@@ -1,33 +1,39 @@
-//! The Ask panel's commands and its one event. Admission and gating live
-//! here; the thread, the page read and the model call belong to the
-//! page-assist service in `zephium-work-composition`.
+//! The assistant's commands and its one event. Admission and gating live here; the
+//! conversation, the page reads and the model loop belong to the page-assist
+//! service in `zephium-work-composition`.
 use super::*;
 use zephium_ipc::page_assist::*;
 
-/// One change to a tab's Ask thread.
+/// One change to an assistant conversation.
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, tauri_specta::Event)]
 #[tauri_specta(event_name = "zephium:page-assist-changed")]
 pub(crate) struct PageAssistChanged(pub(crate) PageAssistChangedV1);
 
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const EVENT: &str = "zephium:page-assist-changed";
 
 fn allowed(caller: &WebviewWindow, command: &'static str) -> bool {
     authorize(caller, CallerPolicy::Main, command)
 }
 
-fn unavailable_status(tab: String) -> PageAssistStatusV1 {
+fn unavailable_status(space: String, tab: Option<String>) -> PageAssistStatusV1 {
     PageAssistStatusV1 {
         version: VERSION,
+        space,
         tab,
         availability: PageAssistAvailabilityV1::Unavailable,
-        site: None,
+        page: None,
         model: None,
         suggestions: Vec::new(),
         selection: None,
-        can_act: false,
+        can_pick: false,
         styled: false,
-        entries: Vec::new(),
+        conversation: PageAssistConversationV1 {
+            id: String::new(),
+            title: None,
+            messages: Vec::new(),
+            seq: 0,
+        },
     }
 }
 
@@ -71,7 +77,7 @@ mod product {
     use zephium_core::ids::ProfileId;
     use zephium_core::ports::engine::Engine as _;
     use zephium_core::ports::store::Store as _;
-    use zephium_core::work::model::{WorkModelEntry, WorkModelError, WorkModelRole};
+    use zephium_core::work::model::{WorkModelError, WorkModelRole};
     use zephium_work_composition::page_assist::port::*;
     use zephium_work_composition::page_assist::{PageAssist, Ports};
 
@@ -89,9 +95,21 @@ mod product {
         space: Option<String>,
         private: bool,
         url: Option<String>,
+        title: String,
         loading: bool,
         viewer: bool,
         epoch: u64,
+    }
+
+    /// Each Space's profile and its tabs in order, as last listed.
+    type SpaceTabs = HashMap<String, (ProfileId, Vec<String>)>;
+    static SPACES: Mutex<Option<SpaceTabs>> = Mutex::new(None);
+    const MAX_SPACES: usize = 256;
+    static REDUCE_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn with_spaces<T>(apply: impl FnOnce(&mut SpaceTabs) -> T) -> T {
+        let mut spaces = SPACES.lock().unwrap_or_else(|p| p.into_inner());
+        apply(spaces.get_or_insert_with(HashMap::new))
     }
 
     static TABS: Mutex<Option<HashMap<String, TabEntry>>> = Mutex::new(None);
@@ -118,6 +136,7 @@ mod product {
                 }
                 entry.loading = tab.loading;
                 entry.viewer = viewer;
+                entry.title.clone_from(&tab.title);
                 if entry.url != tab.url {
                     entry.url = tab.url.clone();
                     entry.epoch = entry.epoch.wrapping_add(1);
@@ -137,6 +156,7 @@ mod product {
                         space: space.map(str::to_owned),
                         private,
                         url: tab.url.clone(),
+                        title: tab.title.clone(),
                         loading: tab.loading,
                         viewer,
                         epoch: 1,
@@ -164,6 +184,20 @@ mod product {
             return;
         };
         let space = state.active_space_id.as_deref();
+        if let Some(space) = space {
+            with_spaces(|spaces| {
+                if spaces.len() >= MAX_SPACES && !spaces.contains_key(space) {
+                    spaces.clear();
+                }
+                spaces.insert(
+                    space.to_owned(),
+                    (
+                        profile,
+                        state.tabs.iter().map(|tab| tab.id.clone()).collect(),
+                    ),
+                );
+            });
+        }
         let (changes, closed) = with_tabs(|tabs| {
             let changes: Vec<_> = state
                 .tabs
@@ -205,17 +239,15 @@ mod product {
             .collect()
     }
 
-    /// Space and address of a tab, for "Run in Work".
-    fn tab_place(tab: &str) -> Option<String> {
-        with_tabs(|tabs| tabs.get(tab).and_then(|entry| entry.space.clone()))
-    }
-
     pub(crate) fn observe_tab(tab: &zephium_ipc::TabView) {
         let change = with_tabs(|tabs| follow(tabs, tab, None));
         navigated(change.into_iter().collect());
     }
 
     pub(crate) fn preference_changed(key: &str, value: &str) {
+        if key == "ui.reduce-motion" {
+            REDUCE_MOTION.store(value == "true", std::sync::atomic::Ordering::Relaxed);
+        }
         if key == "ai.enabled" {
             reader_switch(value != "false");
             if value == "false" {
@@ -290,6 +322,9 @@ mod product {
                         Engine::Select => Role::Select,
                         Engine::Other => Role::Other,
                     },
+                    href: passage
+                        .href
+                        .filter(|_| matches!(passage.role, Engine::Link { .. })),
                     text: passage.text,
                     verbatim: passage.verbatim,
                     value: passage
@@ -384,7 +419,9 @@ mod product {
             with_tabs(|tabs| {
                 tabs.get(tab).map(|entry| TabFacts {
                     profile: entry.profile,
+                    space: entry.space.clone(),
                     url: entry.url.clone(),
+                    title: Some(entry.title.clone()),
                     private: entry.private,
                     viewer: entry.viewer,
                     loading: entry.loading || unread,
@@ -487,17 +524,121 @@ mod product {
             self.engine
                 .set_page_style(*profile, site.to_owned(), Arc::from(css));
         }
+        fn marks<'a>(
+            &'a self,
+            tab: &'a str,
+            epoch: u64,
+            read: u64,
+            marks: Vec<(u8, u16)>,
+        ) -> BoxFuture<'a, Vec<u8>> {
+            Box::pin(async move {
+                let Some(item) = zephium_core::ids::ItemId::parse(tab) else {
+                    return Vec::new();
+                };
+                let marks = marks
+                    .into_iter()
+                    .map(|(n, passage)| zephium_engine::page_reader::PageMark { n, passage })
+                    .collect();
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine
+                    .page_marks(item, epoch, read, marks, reduce_motion(), move |placed| {
+                        let _ = sender.send(placed);
+                    });
+                reader_answer(receiver).await.unwrap_or_default()
+            })
+        }
+        fn mark_focus(&self, tab: &str, epoch: u64, n: Option<u8>, scroll: bool) {
+            if let Some(item) = zephium_core::ids::ItemId::parse(tab) {
+                self.engine.page_mark_focus(item, epoch, n, scroll);
+            }
+        }
+        fn marks_clear(&self, tab: &str) {
+            if let Some(item) = zephium_core::ids::ItemId::parse(tab) {
+                self.engine.page_marks_clear(item);
+            }
+        }
+        fn pick<'a>(
+            &'a self,
+            tab: &'a str,
+            epoch: u64,
+        ) -> BoxFuture<'a, Result<Pick, PickFailure>> {
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab).ok_or(PickFailure::Unavailable)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine
+                    .page_pick(item, epoch, reduce_motion(), move |result| {
+                        let _ = sender.send(result);
+                    });
+                use zephium_engine::page_reader::PagePickFailure as Engine;
+                match tokio::time::timeout(PICK_WAIT, receiver).await {
+                    Ok(Ok(Ok(pick))) => Ok(picked(pick)),
+                    Ok(Ok(Err(Engine::Cancelled))) => Err(PickFailure::Cancelled),
+                    Ok(Ok(Err(Engine::PageChanged))) => Err(PickFailure::PageChanged),
+                    Ok(Ok(Err(Engine::Unavailable))) | Ok(Err(_)) => Err(PickFailure::Unavailable),
+                    Err(_) => {
+                        self.engine.page_pick_cancel(item);
+                        Err(PickFailure::Cancelled)
+                    }
+                }
+            })
+        }
+        fn pick_read<'a>(
+            &'a self,
+            tab: &'a str,
+            epoch: u64,
+            pick: u64,
+        ) -> BoxFuture<'a, Option<Pick>> {
+            Box::pin(async move {
+                let item = zephium_core::ids::ItemId::parse(tab)?;
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                self.engine.page_pick_read(item, epoch, pick, move |found| {
+                    let _ = sender.send(found);
+                });
+                reader_answer(receiver).await.flatten().map(picked)
+            })
+        }
+        fn pick_clear(&self, tab: &str, pick: u64) {
+            if let Some(item) = zephium_core::ids::ItemId::parse(tab) {
+                self.engine.page_pick_clear(item, pick);
+            }
+        }
+        fn pick_cancel(&self, tab: &str) {
+            if let Some(item) = zephium_core::ids::ItemId::parse(tab) {
+                self.engine.page_pick_cancel(item);
+            }
+        }
+    }
+
+    /// Longest a pick may wait for the person; the page ends it sooner when idle.
+    const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
+
+    fn reduce_motion() -> bool {
+        REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn picked(pick: zephium_engine::page_reader::PagePick) -> Pick {
+        Pick {
+            pick: pick.pick,
+            label: pick.label,
+            text: pick.text,
+            selector: pick.selector,
+        }
     }
 
     struct Models;
 
     impl ModelSource for Models {
-        fn entry<'a>(&'a self, profile: &'a ProfileId) -> BoxFuture<'a, Option<WorkModelEntry>> {
+        fn entry<'a>(&'a self, profile: &'a ProfileId) -> BoxFuture<'a, Option<ModelChoice>> {
             Box::pin(async move {
-                zephium_app::work_models::resolve_entry_for(*profile, WorkModelRole::Page, None)
-                    .await
-                    .ok()
-                    .map(|(entry, _)| entry)
+                let (entry, _) = zephium_app::work_models::resolve_entry_for(
+                    *profile,
+                    WorkModelRole::Page,
+                    None,
+                )
+                .await
+                .ok()?;
+                let effort = zephium_app::work_models::lead_effort(*profile, &entry);
+                Some(ModelChoice { entry, effort })
             })
         }
         fn resolve<'a>(
@@ -512,7 +653,12 @@ mod product {
                     Some(source),
                 )
                 .await?;
-                Ok(ResolvedModel { entry, client })
+                let effort = zephium_app::work_models::lead_effort(*profile, &entry);
+                Ok(ResolvedModel {
+                    entry,
+                    effort,
+                    client,
+                })
             })
         }
     }
@@ -529,6 +675,13 @@ mod product {
         fn now_ms(&self) -> u64 {
             u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX)
         }
+        fn unix_ms(&self) -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+                .unwrap_or(0)
+        }
     }
 
     struct Switches(tauri::AppHandle);
@@ -544,20 +697,232 @@ mod product {
     /// objective and the tab on its canvas, run through the ordinary Work
     /// operation owner.
     struct DesktopHandoff(tauri::AppHandle);
+    /// Longest a shell lookup or a new tab is waited for.
+    const LOOKUP_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+    fn home_folder(folder: &str) -> Option<(std::path::PathBuf, String)> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+        let relative = folder
+            .strip_prefix("~/")
+            .or_else(|| (folder == "~").then_some(""))?;
+        if relative.split('/').any(|part| part == "..") {
+            return None;
+        }
+        let path = home.join(relative);
+        path.is_dir().then(|| {
+            let shown = if relative.is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", relative.trim_end_matches('/'))
+            };
+            (path, shown)
+        })
+    }
+
+    fn repository(name: &str) -> Option<String> {
+        let name = name
+            .trim()
+            .trim_start_matches("https://github.com/")
+            .trim_end_matches('/')
+            .trim_end_matches(".git");
+        let (owner, repo) = name.split_once('/')?;
+        let part = |part: &str| {
+            (1..=100).contains(&part.len())
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        (part(owner) && part(repo) && !repo.contains('/')).then(|| format!("{owner}/{repo}"))
+    }
+
     impl WorkHandoff for DesktopHandoff {
+        fn prepare<'a>(
+            &'a self,
+            profile: &'a ProfileId,
+            _space: &'a str,
+            request: BringRequest,
+        ) -> BoxFuture<'a, Vec<PageAssistBringV1>> {
+            Box::pin(async move {
+                let mut brings = Vec::new();
+                let handle = self.0.state::<zephium_app::Handle>();
+                if let Some(words) = request.task.as_deref() {
+                    if let Ok(Some(task)) =
+                        tokio::time::timeout(LOOKUP_WAIT, handle.find_task(*profile, words)).await
+                    {
+                        brings.push(PageAssistBringV1 {
+                            kind: PageAssistBringKindV1::Task,
+                            label: task.title,
+                            detail: task.due,
+                            tab: None,
+                        });
+                    }
+                }
+                if let Some(words) = request.note.as_deref() {
+                    if let Ok(Some(note)) =
+                        tokio::time::timeout(LOOKUP_WAIT, handle.find_note(*profile, words)).await
+                    {
+                        brings.push(PageAssistBringV1 {
+                            kind: PageAssistBringKindV1::Note,
+                            label: note.title,
+                            detail: None,
+                            tab: None,
+                        });
+                    }
+                }
+                for tab in request.tabs.iter().take(6) {
+                    let host = with_tabs(|tabs| {
+                        tabs.get(tab)
+                            .filter(|entry| entry.profile == *profile)
+                            .and_then(|entry| entry.url.clone())
+                    });
+                    if let Some(url) = host {
+                        let rest = url
+                            .strip_prefix("https://")
+                            .or_else(|| url.strip_prefix("http://"))
+                            .unwrap_or(&url);
+                        let host = rest
+                            .split(['/', '?', '#'])
+                            .next()
+                            .unwrap_or_default()
+                            .trim_start_matches("www.")
+                            .to_owned();
+                        brings.push(PageAssistBringV1 {
+                            kind: PageAssistBringKindV1::Tab,
+                            label: host,
+                            detail: Some("Open tab".to_owned()),
+                            tab: Some(tab.clone()),
+                        });
+                    }
+                }
+                if let Some(name) = request.repository.as_deref().and_then(repository) {
+                    brings.push(PageAssistBringV1 {
+                        kind: PageAssistBringKindV1::Repository,
+                        label: name,
+                        detail: Some("GitHub".to_owned()),
+                        tab: None,
+                    });
+                }
+                if let Some((_, shown)) = request.folder.as_deref().and_then(home_folder) {
+                    brings.push(PageAssistBringV1 {
+                        kind: PageAssistBringKindV1::Folder,
+                        label: shown,
+                        detail: Some("Local folder".to_owned()),
+                        tab: None,
+                    });
+                }
+                brings
+            })
+        }
         fn begin<'a>(
             &'a self,
             profile: &'a ProfileId,
-            tab: &'a str,
-            question: String,
-            url: String,
+            space: &'a str,
+            start: WorkStart,
         ) -> BoxFuture<'a, Option<String>> {
             Box::pin(async move {
-                let space = tab_place(tab)?;
-                super::handoff::start(&self.0, *profile, tab, &space, question, url)
+                let tabs: Vec<(String, String)> = start
+                    .brings
+                    .iter()
+                    .filter_map(|bring| bring.tab.clone())
+                    .filter_map(|tab| {
+                        let url = with_tabs(|tabs| {
+                            tabs.get(&tab)
+                                .filter(|entry| entry.profile == *profile)
+                                .and_then(|entry| entry.url.clone())
+                        })?;
+                        Some((tab, url))
+                    })
+                    .collect();
+                super::handoff::start(&self.0, *profile, space, &start, &tabs)
                     .await
                     .ok()
             })
+        }
+    }
+
+    /// The Space's tabs and new background tabs, through the shell.
+    struct DesktopTabs(tauri::AppHandle);
+
+    impl Tabs for DesktopTabs {
+        fn profile(&self, space: &str) -> Option<ProfileId> {
+            with_spaces(|spaces| spaces.get(space).map(|(profile, _)| *profile))
+        }
+        fn list(&self, profile: &ProfileId, space: &str) -> Vec<TabSummary> {
+            let order = with_spaces(|spaces| {
+                spaces
+                    .get(space)
+                    .filter(|(owner, _)| owner == profile)
+                    .map(|(_, tabs)| tabs.clone())
+                    .unwrap_or_default()
+            });
+            with_tabs(|tabs| {
+                order
+                    .iter()
+                    .filter_map(|id| {
+                        let entry = tabs.get(id).filter(|entry| entry.profile == *profile)?;
+                        Some(TabSummary {
+                            id: id.clone(),
+                            title: entry.title.clone(),
+                            url: entry.url.clone(),
+                        })
+                    })
+                    .collect()
+            })
+        }
+        fn open<'a>(
+            &'a self,
+            profile: &'a ProfileId,
+            space: &'a str,
+            url: &'a str,
+            after: Option<&'a str>,
+        ) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async move {
+                let space = zephium_core::ids::SpaceId::parse(space)?;
+                let after = after.and_then(zephium_core::ids::ItemId::parse);
+                let handle = self.0.state::<zephium_app::Handle>();
+                tokio::time::timeout(
+                    LOOKUP_WAIT,
+                    handle.open_background_tab(*profile, space, after, url.to_owned()),
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|tab| tab.to_string())
+            })
+        }
+    }
+
+    /// Conversations in the profile's store.
+    struct Chats(Arc<zephium_store::SqliteStore>);
+
+    impl ConversationStore for Chats {
+        fn list(&self, profile: &ProfileId, limit: u32) -> Vec<StoredConversation> {
+            self.0
+                .chats(*profile, limit)
+                .into_iter()
+                .map(|chat| StoredConversation {
+                    id: chat.id,
+                    space: chat.space,
+                    title: chat.title,
+                    updated_ms: u64::try_from(chat.updated_ms).unwrap_or(0),
+                })
+                .collect()
+        }
+        fn load(&self, profile: &ProfileId, id: &str) -> Option<String> {
+            self.0.chat(*profile, id)
+        }
+        fn save(&self, profile: &ProfileId, entry: &StoredConversation, body: String) -> bool {
+            self.0.save_chat(
+                *profile,
+                &entry.id,
+                &entry.space,
+                &entry.title,
+                i64::try_from(entry.updated_ms).unwrap_or(i64::MAX),
+                body,
+            )
+        }
+        fn delete(&self, profile: &ProfileId, id: &str) -> bool {
+            self.0.delete_chat(*profile, id)
         }
     }
 
@@ -675,30 +1040,36 @@ mod product {
             app.try_state::<keymap::Keymap>()
                 .is_some_and(|keymap| keymap.ai_enabled()),
         );
+        REDUCE_MOTION.store(
+            store.app_setting("ui.reduce-motion").as_deref() == Some("true"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let service = PageAssist::new(Ports {
             page: Arc::new(DesktopPage { engine }),
+            tabs: Arc::new(DesktopTabs(app.clone())),
             models: Arc::new(Models),
             events: Arc::new(Events(app.clone())),
             clock: Arc::new(Monotonic(Instant::now())),
             settings: Arc::new(Switches(app.clone())),
             work: Arc::new(DesktopHandoff(app.clone())),
-            styles: Arc::new(SettingStyles(store)),
+            styles: Arc::new(SettingStyles(store.clone())),
+            conversations: Arc::new(Chats(store)),
         });
         let _ = SERVICE.set(service);
     }
 
-    /// Hosted requests of Ask turns, until their charge is known.
+    /// Hosted requests of assistant replies, until their charge is known.
     static HOSTED: Mutex<Vec<(String, String, u32)>> = Mutex::new(Vec::new());
 
-    pub(crate) fn hosted_sourced(request_id: &str, tab: &str, turn: u32) {
+    pub(crate) fn hosted_sourced(request_id: &str, conversation: &str, reply: u32) {
         let mut hosted = HOSTED.lock().unwrap_or_else(|p| p.into_inner());
         if hosted.len() >= 64 {
             hosted.remove(0);
         }
-        hosted.push((request_id.to_owned(), tab.to_owned(), turn));
+        hosted.push((request_id.to_owned(), conversation.to_owned(), reply));
     }
 
-    /// A hosted request's charge is final: show it under its answer.
+    /// A hosted request's charge is final: it joins its reply's cost.
     pub(crate) fn hosted_charged(
         request_id: &str,
         charged_units: Option<u64>,
@@ -752,19 +1123,31 @@ macro_rules! with_service {
     }};
 }
 
-/// The tab's availability, suggestions and whole thread.
+fn valid_space(space: &str) -> bool {
+    valid_tab(space)
+}
+
+/// The assistant for a Space with `tab` in front: availability, the page chip and
+/// the whole conversation.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn page_assist_status(caller: WebviewWindow, tab: String) -> PageAssistStatusV1 {
-    if !allowed(&caller, "page_assist_status") || !valid_tab(&tab) {
-        return unavailable_status(tab);
+pub(crate) async fn page_assist_status(
+    caller: WebviewWindow,
+    space: String,
+    tab: Option<String>,
+) -> PageAssistStatusV1 {
+    if !allowed(&caller, "page_assist_status")
+        || !valid_space(&space)
+        || tab.as_deref().is_some_and(|tab| !valid_tab(tab))
+    {
+        return unavailable_status(space, tab);
     }
-    with_service!(unavailable_status(tab), |service| service
-        .status(&tab)
+    with_service!(unavailable_status(space, tab), |service| service
+        .status(&space, tab.as_deref())
         .await)
 }
 
-/// Starts a turn. Admission only; the answer arrives as events.
+/// Sends a message. Admission only; the reply arrives as events.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn page_assist_ask(
@@ -772,21 +1155,34 @@ pub(crate) async fn page_assist_ask(
     request: PageAssistAskV1,
 ) -> PageAssistAskResponseV1 {
     let refused = |fault| PageAssistAskResponseV1 {
-        turn: None,
+        reply: None,
         fault: Some(fault),
     };
     if !allowed(&caller, "page_assist_ask") {
         return refused(PageAssistFaultV1::Unavailable);
     }
-    if !valid_tab(&request.tab) || request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES {
+    let tabs_valid = request
+        .attachments
+        .iter()
+        .all(|attachment| match attachment {
+            PageAssistAttachV1::Page { tab } | PageAssistAttachV1::Selection { tab } => {
+                valid_tab(tab)
+            }
+            PageAssistAttachV1::Element { tab, pick } => valid_tab(tab) && valid_id(pick),
+        });
+    if !valid_space(&request.space)
+        || !valid_id(&request.conversation)
+        || !tabs_valid
+        || request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES
+    {
         return refused(PageAssistFaultV1::Invalid);
     }
     with_service!(refused(PageAssistFaultV1::Unavailable), |service| {
         match service.ask(request).await {
-            Ok((turn, task)) => {
+            Ok((reply, task)) => {
                 tauri::async_runtime::spawn(task);
                 PageAssistAskResponseV1 {
-                    turn: Some(turn),
+                    reply: Some(reply),
                     fault: None,
                 }
             }
@@ -795,65 +1191,205 @@ pub(crate) async fn page_assist_ask(
     })
 }
 
-/// Stops the tab's running turn; nothing more is sent or applied.
+/// Stops the Space's running reply; nothing more is sent or applied.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn page_assist_stop(caller: WebviewWindow, tab: String) -> bool {
-    allowed(&caller, "page_assist_stop") && with_service!(false, |service| service.stop(&tab))
+pub(crate) async fn page_assist_stop(caller: WebviewWindow, space: String) -> bool {
+    allowed(&caller, "page_assist_stop") && with_service!(false, |service| service.stop(&space))
 }
 
-/// Scrolls to and highlights citation `n` of `turn` in the page.
+/// Brings cite `n` of a reply into view on its page.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn page_assist_cite(caller: WebviewWindow, tab: String, turn: u32, n: u8) -> bool {
+pub(crate) async fn page_assist_cite(
+    caller: WebviewWindow,
+    conversation: String,
+    reply: u32,
+    n: u8,
+) -> bool {
     allowed(&caller, "page_assist_cite")
-        && with_service!(false, |service| service.cite(&tab, turn, n))
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.cite(&conversation, reply, n))
 }
 
-/// Answers the turn's waiting confirm or style Apply.
+/// Emphasises an item's mark on its page while its card is hovered; none clears it.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_focus(
+    caller: WebviewWindow,
+    conversation: String,
+    reply: u32,
+    block: u16,
+    n: Option<u8>,
+) -> bool {
+    allowed(&caller, "page_assist_focus")
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.focus(
+            &conversation,
+            reply,
+            block,
+            n
+        ))
+}
+
+/// Answers a waiting confirm, a proposed style or an offered handoff.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn page_assist_decide(
     caller: WebviewWindow,
-    tab: String,
-    turn: u32,
+    conversation: String,
+    reply: u32,
+    block: u16,
     decision: PageAssistDecisionV1,
 ) -> bool {
     allowed(&caller, "page_assist_decide")
-        && with_service!(false, |service| service.decide(&tab, turn, decision))
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.decide(
+            &conversation,
+            reply,
+            block,
+            decision
+        ))
 }
 
-/// Continues a paused turn after the person used the page; it reads again.
+/// Continues a paused reply after the person used the page; it reads again.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn page_assist_resume(caller: WebviewWindow, tab: String, turn: u32) -> bool {
-    allowed(&caller, "page_assist_resume")
-        && with_service!(false, |service| service.resume(&tab, turn))
-}
-
-/// Ends the tab's thread.
-#[tauri::command]
-#[specta::specta]
-pub(crate) async fn page_assist_clear(caller: WebviewWindow, tab: String) -> bool {
-    allowed(&caller, "page_assist_clear") && with_service!(false, |service| service.clear(&tab))
-}
-
-/// Starts a Work run with the turn's question and this tab.
-#[tauri::command]
-#[specta::specta]
-pub(crate) async fn page_assist_handoff(
+pub(crate) async fn page_assist_resume(
     caller: WebviewWindow,
-    tab: String,
-    turn: u32,
-) -> PageAssistHandoffV1 {
-    let unavailable = PageAssistHandoffV1 {
+    conversation: String,
+    reply: u32,
+) -> bool {
+    allowed(&caller, "page_assist_resume")
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.resume(&conversation, reply))
+}
+
+/// Starts the Work a reply offered.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_continue(
+    caller: WebviewWindow,
+    conversation: String,
+    reply: u32,
+    block: u16,
+) -> PageAssistContinueV1 {
+    let unavailable = PageAssistContinueV1 {
         work: None,
         fault: Some(PageAssistFaultV1::Unavailable),
     };
-    if !allowed(&caller, "page_assist_handoff") {
+    if !allowed(&caller, "page_assist_continue") || !valid_id(&conversation) {
         return unavailable;
     }
-    with_service!(unavailable, |service| service.handoff(&tab, turn).await)
+    with_service!(unavailable, |service| service
+        .continue_work(&conversation, reply, block)
+        .await)
+}
+
+/// Starts a new conversation in the Space; the old one stays in history.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_new(caller: WebviewWindow, space: String) -> bool {
+    allowed(&caller, "page_assist_new")
+        && valid_space(&space)
+        && with_service!(false, |service| service.new_conversation(&space))
+}
+
+/// Past conversations of the Space's profile, newest first.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_history(
+    caller: WebviewWindow,
+    space: String,
+) -> PageAssistHistoryV1 {
+    let empty = PageAssistHistoryV1 {
+        version: VERSION,
+        conversations: Vec::new(),
+    };
+    if !allowed(&caller, "page_assist_history") || !valid_space(&space) {
+        return empty;
+    }
+    with_service!(empty, |service| service.history(&space))
+}
+
+/// Shows a past conversation in the Space.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_open(
+    caller: WebviewWindow,
+    space: String,
+    conversation: String,
+) -> bool {
+    allowed(&caller, "page_assist_open")
+        && valid_space(&space)
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.open(&space, &conversation))
+}
+
+/// Deletes a conversation.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_delete(
+    caller: WebviewWindow,
+    space: String,
+    conversation: String,
+) -> bool {
+    allowed(&caller, "page_assist_delete")
+        && valid_space(&space)
+        && valid_id(&conversation)
+        && with_service!(false, |service| service.delete(&space, &conversation))
+}
+
+/// The person picks an element on the tab; resolves when they pick or cancel.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_pick(
+    caller: WebviewWindow,
+    space: String,
+    tab: String,
+) -> PageAssistPickResponseV1 {
+    let unavailable = PageAssistPickResponseV1 {
+        pick: None,
+        fault: Some(PageAssistFaultV1::Unavailable),
+    };
+    if !allowed(&caller, "page_assist_pick") || !valid_space(&space) || !valid_tab(&tab) {
+        return unavailable;
+    }
+    with_service!(unavailable, |service| service.pick(&space, &tab).await)
+}
+
+/// Ends a pick in progress.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_pick_cancel(caller: WebviewWindow, tab: String) -> bool {
+    allowed(&caller, "page_assist_pick_cancel")
+        && valid_tab(&tab)
+        && with_service!(false, |service| {
+            service.pick_cancel(&tab);
+            true
+        })
+}
+
+/// Detaches a picked element and removes its outline.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_detach(caller: WebviewWindow, tab: String, pick: String) -> bool {
+    allowed(&caller, "page_assist_detach")
+        && valid_tab(&tab)
+        && valid_id(&pick)
+        && with_service!(false, |service| service.detach(&tab, &pick))
+}
+
+/// The panel closed: marks and picks leave the Space's pages.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn page_assist_close(caller: WebviewWindow, space: String) -> bool {
+    allowed(&caller, "page_assist_close")
+        && valid_space(&space)
+        && with_service!(false, |service| {
+            service.close(&space);
+            true
+        })
 }
 
 /// The page styles of the site in `tab`.
@@ -1068,24 +1604,22 @@ mod handoff {
         .map_err(|_| WorkError::Invalid)
     }
 
-    /// Creates a Work in the tab's Space with the tab and the objective on
-    /// its canvas, then begins a run with the tab as context.
+    /// Creates a Work in the Space with the handoff's tabs and objective on
+    /// its canvas, then begins a run with those tabs as context.
     pub(super) async fn start(
         app: &tauri::AppHandle,
         profile: ProfileId,
-        tab: &str,
         space: &str,
-        question: String,
-        url: String,
+        start: &zephium_work_composition::page_assist::port::WorkStart,
+        tabs: &[(String, String)],
     ) -> Result<String, WorkError> {
-        let tab = ItemId::parse(tab).ok_or(WorkError::Invalid)?;
         let space = SpaceId::parse(space).ok_or(WorkError::Invalid)?;
         let intent = begin_agent()?;
         let title = zephium_work_composition::page_assist::core::text::bounded(
-            &zephium_work_composition::page_assist::core::text::clean(&question),
+            &zephium_work_composition::page_assist::core::text::clean(&start.title),
             MAX_TITLE_CHARS,
         );
-        let created = applied(
+        let mut snapshot = applied(
             call(
                 app,
                 profile,
@@ -1093,15 +1627,25 @@ mod handoff {
             )
             .await?,
         )?;
-        let browser = WorkEnvironmentReference::Browser { tab };
-        let snapshot =
-            applied(call(app, profile, environment(added(&created, browser.clone()))).await?)?;
-        let element = snapshot
-            .elements
-            .iter()
-            .find(|element| element.reference == browser)
-            .map(|element| element.id)
-            .ok_or(WorkError::Unavailable)?;
+        let mut items = Vec::new();
+        for (tab, url) in tabs {
+            let Some(tab) = ItemId::parse(tab) else {
+                continue;
+            };
+            let browser = WorkEnvironmentReference::Browser { tab };
+            snapshot =
+                applied(call(app, profile, environment(added(&snapshot, browser.clone()))).await?)?;
+            if let Some(element) = snapshot
+                .elements
+                .iter()
+                .find(|element| element.reference == browser)
+            {
+                items.push(WorkContextSelectionItem {
+                    element: element.id,
+                    revision: url.clone(),
+                });
+            }
+        }
         let WorkReplyV1::AuthoringApplied { receipt } = call(
             app,
             profile,
@@ -1110,7 +1654,7 @@ mod handoff {
                     version: 1,
                     command: WorkCommandId::generate(),
                     intent: WorkAuthoringIntent::Create {
-                        objective: question,
+                        objective: start.objective.clone(),
                     },
                 },
             },
@@ -1119,7 +1663,7 @@ mod handoff {
         else {
             return Err(WorkError::Unavailable);
         };
-        // The objective joins the canvas beside its tab; the run does not
+        // The objective joins the canvas beside its tabs; the run does not
         // depend on it, so a refusal here does not stop the run.
         let objective = WorkEnvironmentReference::Objective {
             objective: receipt.work,
@@ -1134,12 +1678,9 @@ mod handoff {
                 command: WorkCommandId::generate(),
                 intent,
             },
-            context: Some(WorkContextSelectionV1 {
+            context: (!items.is_empty()).then_some(WorkContextSelectionV1 {
                 environment: snapshot.id,
-                items: vec![WorkContextSelectionItem {
-                    element,
-                    revision: url,
-                }],
+                items,
                 tabs: false,
                 blocks: false,
             }),

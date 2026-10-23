@@ -480,8 +480,11 @@ mod hosted {
                         work: work.clone(),
                     },
                     WorkCallSource::Voice => CallSource::Voice,
-                    WorkCallSource::Page { tab, turn } => {
-                        super::super::page_assist::hosted_sourced(request_id, tab, *turn);
+                    WorkCallSource::Page {
+                        conversation,
+                        reply,
+                    } => {
+                        super::super::page_assist::hosted_sourced(request_id, conversation, *reply);
                         CallSource::Page
                     }
                 },
