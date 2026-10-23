@@ -269,6 +269,81 @@ const HN: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>Hac
 <input type="checkbox"> Keep me posted <input type="text" disabled> <input type="text"></p>
 </center></td></tr></tbody></table></center></body></html>"##;
 
+// A new Notion page: the title and an empty body block are bare editable
+// leaves named only by the placeholder their `::before` shows, beside a
+// "Get started with" row of buttons. Return in the title is the page's own:
+// it moves the caret into the body. Below, a ProseMirror comment box (Linear,
+// Docs-like) whose placeholder sits on its empty paragraph and whose Return
+// the page leaves to the browser.
+const NOTION: &str = r##"<!doctype html><html><head><meta charset="utf-8"><title>New page</title>
+<style>body{font:16px -apple-system,sans-serif;margin:0;color:#37352f;background:#fff}
+.page{max-width:640px;margin:60px auto}[contenteditable]{outline:none;white-space:pre-wrap}
+[placeholder]:empty::before,p.is-empty::before{content:attr(placeholder);color:#9b9a97;pointer-events:none}
+p.is-empty::before{content:attr(data-placeholder)}h1{font-size:40px;margin:0 0 12px}
+.block{min-height:24px;padding:3px 2px}.start{display:flex;gap:10px;color:#9b9a97;margin:18px 0}
+.start [role=button]{cursor:pointer;padding:2px 8px;border-radius:4px;background:#f1f1ef}
+.ProseMirror{border:1px solid #ddd;border-radius:6px;padding:8px;margin-top:40px}</style></head>
+<body><div class="notion-app"><main class="notion-frame"><div class="page notion-page-content">
+<div class="notion-page-block"><h1><div id="title" class="notranslate" spellcheck="true" placeholder="New page" data-content-editable-leaf="true" contenteditable="true"></div></h1></div>
+<div class="notion-selectable notion-text-block" data-block-id="b1"><div><div id="body" class="block notranslate" spellcheck="true" placeholder="Press '/' for commands" data-content-editable-leaf="true" contenteditable="true"></div></div></div>
+<div class="start"><div>Get started with</div><div role="button" tabindex="0">Ask AI</div><div role="button" tabindex="0">Templates</div></div>
+<div id="comment" class="ProseMirror" contenteditable="true" translate="no"><p data-placeholder="Leave a comment…" class="is-empty"><br class="ProseMirror-trailingBreak"></p></div>
+</div></main></div>
+<script>(() => {
+  const title = document.getElementById("title"), body = document.getElementById("body"), comment = document.getElementById("comment");
+  let active = false, been = false, clicks = 0, opened = 0;
+  document.addEventListener("click", () => clicks++, true);
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => {
+    const ua = navigator.userActivation;
+    if (ua && ua.isActive) active = true;
+    if (ua && ua.hasBeenActive) been = true;
+    try { const w = window.open("about:blank", "_blank"); if (w) { opened++; w.close(); } } catch (_) {}
+    setTimeout(() => channel.port2.postMessage(0), 4);
+  };
+  channel.port2.postMessage(0);
+  title.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    body.focus();
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    range.collapse(true);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+  });
+  title.addEventListener("input", () => { document.title = title.textContent || "New page"; });
+  // The body's own Return listens to trusted keys only and takes the
+  // browser's paragraph instead: a new block after it, caret inside.
+  body.addEventListener("keydown", (event) => { if (event.isTrusted && event.key === "Enter") event.preventDefault(); });
+  body.addEventListener("beforeinput", (event) => {
+    if (event.inputType !== "insertParagraph") return;
+    event.preventDefault();
+    const block = document.createElement("div");
+    block.id = "next";
+    block.className = "block";
+    block.contentEditable = "true";
+    block.setAttribute("placeholder", "Press '/' for commands");
+    body.closest(".notion-text-block").after(block);
+    block.focus();
+  });
+  comment.addEventListener("input", () => {
+    const empty = comment.textContent === "";
+    for (const p of comment.querySelectorAll("p")) {
+      p.classList.toggle("is-empty", empty);
+      if (empty) p.setAttribute("data-placeholder", "Leave a comment\u2026"); else p.removeAttribute("data-placeholder");
+    }
+  });
+  addEventListener("hashchange", () => {
+    if (!location.hash.startsWith("#report-")) return;
+    const focus = document.activeElement && document.activeElement.id || "none";
+    const words = (text) => (text || "").replace(/\s/g, "+");
+    const paragraphs = [...comment.querySelectorAll("p")].map(p => words(p.textContent) || "_").join("|");
+    const blocks = document.querySelectorAll(".block").length;
+    document.title = `notion ${location.hash.slice(8)} focus=${focus} blocks=${blocks} title=${words(title.textContent)} body=${words(body.textContent)} comment=${paragraphs} active=${active} been=${been} opened=${opened} clicks=${clicks}`;
+  });
+})();</script></body></html>"##;
+
 fn search_results(path: &str) -> String {
     let query = url::Url::parse(&format!("http://fixture{path}"))
         .ok()
@@ -380,6 +455,7 @@ fn serve(mut stream: TcpStream, heavy: &str) {
         "/listing" | "/feed" | "/slow" => (&generated, "text/html; charset=utf-8", None),
         search if search.starts_with("/search?") => (&generated, "text/html; charset=utf-8", None),
         "/hn" => (HN, "text/html; charset=utf-8", None),
+        "/notion" => (NOTION, "text/html; charset=utf-8", None),
         "/listing-csp" => (
             &generated,
             "text/html; charset=utf-8",
@@ -2529,6 +2605,184 @@ fn fields(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     Ok(())
 }
 
+fn editors(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
+    use crate::page_reader::{PageFieldKind, PagePassage, PageReaderPolicy};
+    use zephium_agentic::{
+        SemanticActionIntent as Intent, SemanticActionText, SemanticEffectClass as Effect,
+        SemanticPressKey, SemanticVerification as Verify,
+    };
+    let probe = Probe::new(mtm, true)?;
+    crate::host::page_reader::set_policy_for_probe(Some(PageReaderPolicy {
+        sensitive: Arc::new(|_| false),
+        human_input: Arc::new(|_| {}),
+    }));
+    let url = fixture.url("/notion");
+    let report = |label: &str| -> Result<String, String> {
+        probe
+            .view
+            .load_url(&format!("{url}#report-{label}"))
+            .map_err(|e| format!("report: {e}"))?;
+        let prefix = format!("notion {label} ");
+        pump(
+            || probe.state.borrow().title.starts_with(&prefix),
+            "for the editor's report",
+        )?;
+        Ok(probe.state.borrow().title.clone())
+    };
+    let proposal = |intent, effect, verification| {
+        zephium_agentic::SemanticActionProposal::try_new(
+            intent,
+            effect,
+            zephium_agentic::SemanticWaitCondition::Immediate,
+            verification,
+            zephium_agentic::SemanticSettleBudget::try_new(2_000).expect("settle"),
+        )
+        .expect("proposal")
+    };
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    let read_now = || {
+        probe
+            .read(epoch, &url)
+            .0
+            .map_err(|f| format!("editor read failed: {f:?}"))
+    };
+    let editable = |read: &PageReadout| -> Vec<(String, Option<String>)> {
+        read.passages
+            .iter()
+            .filter(|p| p.role == PageRole::Field(PageFieldKind::Text))
+            .map(|p| (p.text.clone(), p.value.clone()))
+            .collect()
+    };
+    let target = |read: &PageReadout, name: &str| {
+        let stored = crate::page_reader::planned_read(probe.tab, read.read).ok_or("stored read")?;
+        read.passages
+            .iter()
+            .find(|p| p.role == PageRole::Field(PageFieldKind::Text) && p.text == name)
+            .and_then(|p: &PagePassage| stored.reference(p.id))
+            .ok_or_else(|| format!("no field named {name:?}"))
+    };
+    let fill = |read: &PageReadout, name: &str, text: &str| -> Result<(), String> {
+        let value = SemanticActionText::try_new(text.to_owned()).map_err(|_| "text")?;
+        probe
+            .act(
+                epoch,
+                read.read,
+                &url,
+                proposal(
+                    Intent::Fill {
+                        target: target(read, name)?,
+                        value,
+                    },
+                    Effect::LocalWrite,
+                    Verify::TargetValueMatchesInput,
+                ),
+            )
+            .map_err(|f| format!("fill {name:?}: {f:?}"))
+    };
+    let enter = |read: &PageReadout, name: &str| -> Result<(), String> {
+        probe
+            .act(
+                epoch,
+                read.read,
+                &url,
+                proposal(
+                    Intent::Press {
+                        target: target(read, name)?,
+                        key: SemanticPressKey::Enter,
+                    },
+                    Effect::LocalWrite,
+                    Verify::PageChanged,
+                ),
+            )
+            .map_err(|f| format!("Return in {name:?}: {f:?}"))
+    };
+
+    println!("editors: editable regions read as fields");
+    let first = read_now()?;
+    let none = |name: &str| (name.to_owned(), None);
+    check(
+        editable(&first)
+            == [
+                none("New page"),
+                none("Press '/' for commands"),
+                none("Leave a comment…"),
+            ],
+        &format!(
+            "the title, the empty body block and the comment box read as text fields, named by their placeholders, in order ({:?})",
+            editable(&first)
+        ),
+    )?;
+    let role_of = |read: &PageReadout, text: &str| {
+        read.passages
+            .iter()
+            .find(|p| p.text == text)
+            .map(|p| p.role)
+    };
+    check(
+        role_of(&first, "Ask AI") == Some(PageRole::Button)
+            && role_of(&first, "Templates") == Some(PageRole::Button)
+            && role_of(&first, "Get started with").is_none_or(|role| role == PageRole::Text),
+        "the start row stays buttons and words",
+    )?;
+
+    println!("editors: title, Return, body");
+    fill(&first, "New page", "Weekly notes")?;
+    enter(&first, "New page")?;
+    let moved = report("moved")?;
+    check(
+        field(&moved, "focus") == "body" && field(&moved, "title") == "Weekly+notes",
+        &format!("Return in the title moves the caret into the body ({moved})"),
+    )?;
+    let ready = read_now()?;
+    check(
+        editable(&ready).contains(&("New page".to_owned(), Some("Weekly notes".to_owned()))),
+        &format!("the title holds the typed words ({:?})", editable(&ready)),
+    )?;
+    fill(&ready, "Press '/' for commands", "First item")?;
+    let written = report("written")?;
+    check(
+        field(&written, "body") == "First+item" && field(&written, "title") == "Weekly+notes",
+        &format!("the body holds its words and the title kept its own ({written})"),
+    )?;
+    enter(&ready, "Press '/' for commands")?;
+    let next = report("next")?;
+    check(
+        field(&next, "focus") == "next" && field(&next, "blocks") == "2",
+        &format!(
+            "Return in an editor that takes the browser's paragraph starts its next block ({next})"
+        ),
+    )?;
+
+    println!("editors: Return the page leaves to the browser");
+    let before = read_now()?;
+    fill(&before, "Leave a comment…", "Looks good")?;
+    enter(&before, "Leave a comment…")?;
+    let split = report("split")?;
+    let after = read_now()?;
+    check(
+        editable(&after).contains(&("Leave a comment…".to_owned(), Some("Looks good".to_owned()))),
+        &format!(
+            "the comment box keeps its name once its placeholder is gone ({:?})",
+            editable(&after)
+        ),
+    )?;
+    check(
+        field(&split, "comment") == "Looks+good|_",
+        &format!("Return in a rich editor starts a new paragraph ({split})"),
+    )?;
+    check(
+        field(&split, "active") == "false"
+            && field(&split, "been") == "false"
+            && field(&split, "opened") == "0"
+            && field(&split, "clicks") == "0",
+        &format!("nothing gained activation ({split})"),
+    )?;
+    check(probe.state.borrow().popups == 0, "no popup reached native")?;
+    crate::host::page_reader::set_policy_for_probe(None);
+    Ok(())
+}
+
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.total_cmp(b));
     values.get(values.len() / 2).copied().unwrap_or(0.0)
@@ -2726,6 +2980,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let assist_only = arguments.iter().any(|a| a == "--assist");
     let fields_only = arguments.iter().any(|a| a == "--fields");
     let glow_only = arguments.iter().any(|a| a == "--glow");
+    let editors_only = arguments.iter().any(|a| a == "--editors");
     let wikipedia = arguments
         .iter()
         .position(|a| a == "--article")
@@ -2740,10 +2995,13 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             fields(mtm, &fixture)
         } else if glow_only {
             page_glow_probe::run(mtm, &fixture)
+        } else if editors_only {
+            editors(mtm, &fixture)
         } else {
             fixtures(mtm, &fixture)
                 .and_then(|()| assist(mtm, &fixture))
                 .and_then(|()| fields(mtm, &fixture))
+                .and_then(|()| editors(mtm, &fixture))
                 .and_then(|()| page_glow_probe::run(mtm, &fixture))
         }
     });
