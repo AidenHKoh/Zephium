@@ -150,6 +150,8 @@ struct ReplyData {
     styles: HashMap<u16, PendingStyle>,
     handoffs: HashMap<u16, WorkStart>,
     credits: Option<String>,
+    /// The tab the reply works in: the attached page, then wherever go_to went.
+    working: Option<String>,
 }
 
 struct Live {

@@ -366,12 +366,20 @@ impl Reply {
 
     // ------------------------------------------------------------- the model
 
+    /// Reads an attached page; the first one is where the reply works.
+    async fn read_first(&self, tab: &str) -> Result<usize, PageAssistFaultV1> {
+        self.with_data(|data| {
+            data.working.get_or_insert_with(|| tab.to_owned());
+        });
+        self.read_tab(tab).await
+    }
+
     async fn context(&self) -> Vec<String> {
         let mut parts = Vec::new();
         let mut first_read = None;
         for attachment in &self.attachments {
             match attachment {
-                Admitted::Page { tab } => match self.read_tab(tab).await {
+                Admitted::Page { tab } => match self.read_first(tab).await {
                     Ok(index) => {
                         first_read.get_or_insert(index);
                         parts.push(self.page_block(index));
@@ -694,7 +702,7 @@ async fn run_tool(reply: &Reply, text: &mut Text, call: Call) -> Result<ToolOutc
         Call::ReadPage { tab } => read_page(reply, &tab).await,
         Call::ShowItems { items } => show_items(reply, text, items).await,
         Call::OpenTabs { targets } => open_tabs(reply, text, targets).await,
-        Call::GoTo { target } => go_to(reply, text, &target).await,
+        Call::GoTo { target, new_tab } => go_to(reply, text, &target, new_tab).await,
         Call::Act { steps } => return act(reply, text, steps).await,
         Call::InspectStyle { page } => inspect_style(reply, &page).await,
         Call::Restyle { page, summary, css } => restyle(reply, text, &page, summary, &css).await,
@@ -945,7 +953,7 @@ async fn settled(ports: &super::Ports, tab: &str) {
 
 /// One page in front, read for the model: a read link, an address the
 /// person wrote or a listed tab's, or a search on the person's own engine.
-async fn go_to(reply: &Reply, text: &mut Text, target: &str) -> ToolOutcome {
+async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> ToolOutcome {
     let ports = reply.service.ports().clone();
     let target = target.trim();
     let url = if let Some(query) = target
@@ -975,15 +983,79 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str) -> ToolOutcome {
         }
         target.to_owned()
     };
+    let working = reply.with_data(|data| data.working.clone()).flatten();
+    match working.filter(|_| !new_tab) {
+        Some(tab) => move_tab(reply, text, &ports, &tab, &url).await,
+        None => open_in_front(reply, text, &ports, &url).await,
+    }
+}
+
+/// Follows `url` in the tab the reply works in, as a step on that page.
+async fn move_tab(
+    reply: &Reply,
+    text: &mut Text,
+    ports: &super::Ports,
+    tab: &str,
+    url: &str,
+) -> ToolOutcome {
+    let host = host_of(url);
+    let before = ports.page.facts(tab).map(|facts| facts.epoch);
+    let mut row = PageAssistStepV1 {
+        index: 0,
+        label: format!("Go to {host}"),
+        category: None,
+        state: PageAssistStepStateV1::Running,
+        reason: None,
+    };
+    reply.phase(Some(PageAssistPhaseV1::Acting));
+    reply.glow(tab, Glow::Working);
+    let block = reply.add_block(
+        text,
+        PageAssistBlockV1::Steps {
+            steps: vec![row.clone()],
+        },
+    );
+    if !ports.tabs.navigate(&reply.profile, tab, url) {
+        row.state = PageAssistStepStateV1::Failed;
+        row.reason = Some(PageAssistStepReasonV1::Refused);
+        reply.set_block(block, PageAssistBlockV1::Steps { steps: vec![row] });
+        return Err(format!(
+            "{host} could not be opened in this tab; try new_tab."
+        ));
+    }
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < OPEN_TIMEOUT {
+        match ports.page.facts(tab) {
+            Some(facts) if Some(facts.epoch) != before && !facts.loading => break,
+            None => break,
+            _ => tokio::time::sleep(Duration::from_millis(150)).await,
+        }
+    }
+    row.state = PageAssistStepStateV1::Done;
+    reply.set_block(block, PageAssistBlockV1::Steps { steps: vec![row] });
+    read_after_open(reply, tab, &host, "this tab").await
+}
+
+/// Opens `url` in a new tab in front; the reply works there from now on.
+async fn open_in_front(
+    reply: &Reply,
+    text: &mut Text,
+    ports: &super::Ports,
+    url: &str,
+) -> ToolOutcome {
     reply.phase(Some(PageAssistPhaseV1::Opening));
     let after = reply
-        .with_data(|data| data.handles.first().cloned())
+        .with_data(|data| {
+            data.working
+                .clone()
+                .or_else(|| data.handles.first().cloned())
+        })
         .flatten();
-    let host = host_of(&url);
+    let host = host_of(url);
     let mut row = PageAssistOpenedV1 {
         index: 0,
         host: host.clone(),
-        url: url.clone(),
+        url: url.to_owned(),
         tab: None,
         state: PageAssistOpenStateV1::Opening,
     };
@@ -995,7 +1067,7 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str) -> ToolOutcome {
     );
     let Some(tab) = ports
         .tabs
-        .open(&reply.profile, &reply.space, &url, after.as_deref(), true)
+        .open(&reply.profile, &reply.space, url, after.as_deref(), true)
         .await
     else {
         row.state = PageAssistOpenStateV1::Failed;
@@ -1009,23 +1081,28 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str) -> ToolOutcome {
             tabs: vec![row.clone()],
         },
     );
-    settled(&ports, &tab).await;
+    settled(ports, &tab).await;
     row.state = PageAssistOpenStateV1::Opened;
     reply.set_block(block, PageAssistBlockV1::Opened { tabs: vec![row] });
-    let handle = reply.handle(&tab);
-    let mut read = reply.read_tab(&tab).await;
+    reply.with_data(|data| data.working = Some(tab.clone()));
+    read_after_open(reply, &tab, &host, "a new tab in front").await
+}
+
+async fn read_after_open(reply: &Reply, tab: &str, host: &str, place: &str) -> ToolOutcome {
+    let handle = reply.handle(tab);
+    let mut read = reply.read_tab(tab).await;
     if matches!(read, Err(PageAssistFaultV1::Loading)) {
         tokio::time::sleep(Duration::from_millis(800)).await;
-        read = reply.read_tab(&tab).await;
+        read = reply.read_tab(tab).await;
     }
     reply.phase(Some(PageAssistPhaseV1::Thinking));
     match read {
-        Ok(index) => Ok(format!("Opened {host} in front as {handle}.\n{}", reply.page_block(index))),
+        Ok(index) => Ok(format!("Opened {host} in {place} ({handle}).\n{}", reply.page_block(index))),
         Err(PageAssistFaultV1::Sensitive) => Ok(format!(
-            "Opened {host} in front as {handle}. It is a sensitive site and is never read; the person continues there."
+            "Opened {host} in {place} ({handle}). It is a sensitive site and is never read; the person continues there."
         )),
         Err(_) => Ok(format!(
-            "Opened {host} in front as {handle}, but it cannot be read yet; try read_page {handle} once."
+            "Opened {host} in {place} ({handle}), but it cannot be read yet; try read_page {handle} once."
         )),
     }
 }
@@ -1486,6 +1563,7 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         });
     reply.leased.store(true, Ordering::Release);
     reply.phase(Some(PageAssistPhaseV1::Acting));
+    reply.with_data(|data| data.working = Some(plan.tab.clone()));
     reply.glow(&plan.tab, Glow::Working);
     let result = run_steps(reply, text, &mut plan).await;
     reply.leased.store(false, Ordering::Release);

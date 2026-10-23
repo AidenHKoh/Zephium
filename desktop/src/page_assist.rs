@@ -863,6 +863,23 @@ mod product {
     struct DesktopTabs(tauri::AppHandle, Arc<zephium_store::SqliteStore>);
 
     impl Tabs for DesktopTabs {
+        fn navigate(&self, profile: &ProfileId, tab: &str, url: &str) -> bool {
+            let owned = with_tabs(|tabs| {
+                tabs.get(tab)
+                    .is_some_and(|entry| entry.profile == *profile && !entry.private)
+            });
+            let Some(id) = zephium_core::ids::ItemId::parse(tab).filter(|_| owned) else {
+                return false;
+            };
+            zephium_core::navigation::classify(url).is_some()
+                && self
+                    .0
+                    .state::<zephium_app::Handle>()
+                    .dispatch(zephium_app::Command::Navigate {
+                        id,
+                        input: url.to_owned(),
+                    })
+        }
         fn search_url(&self, _profile: &ProfileId, query: &str) -> Option<String> {
             let engine = self
                 .1

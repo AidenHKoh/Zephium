@@ -38,6 +38,7 @@ pub(crate) enum Call {
     },
     GoTo {
         target: String,
+        new_tab: bool,
     },
     Act {
         steps: Vec<Step>,
@@ -121,10 +122,10 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "go_to",
-            "Opens one page in a new tab in front of the person and reads it, so you can keep working there. The target is a link passage reference such as a12, an address the person wrote or a tab listed by list_tabs, or `search: words` to search the person's own search engine.",
+            "Moves the tab you are working in to one page, as following a link does, and reads it so you can keep working there. The target is a link passage reference such as a12, an address the person wrote or a tab listed by list_tabs, or `search: words` to search the person's own search engine. new_tab only when the person asks for a new tab or the current page must stay.",
             json!({
                 "type": "object",
-                "properties": {"target": {"type": "string"}},
+                "properties": {"target": {"type": "string"}, "new_tab": {"type": "boolean"}},
                 "required": ["target"],
                 "additionalProperties": false
             }),
@@ -274,6 +275,10 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Option<Call> {
         }
         "go_to" => Call::GoTo {
             target: bounded(arguments, "target", 2048)?,
+            new_tab: arguments
+                .get("new_tab")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         },
         "open_tabs" => {
             let targets = strings(arguments, "targets", MAX_OPEN, 2048);

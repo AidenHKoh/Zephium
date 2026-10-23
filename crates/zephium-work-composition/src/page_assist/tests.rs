@@ -333,6 +333,25 @@ impl Settings for Switch {
 
 struct FakeTabs(Mutex<Vec<String>>, Arc<FakePage>);
 impl Tabs for FakeTabs {
+    fn navigate(&self, _profile: &ProfileId, tab: &str, url: &str) -> bool {
+        self.0.lock().unwrap().push(format!("{tab} → {url}"));
+        let mut page = self.1.lock();
+        let Some(facts) = page.facts.get_mut(tab) else {
+            return false;
+        };
+        facts.epoch += 1;
+        facts.url = Some(url.to_owned());
+        page.readouts.insert(
+            tab.to_owned(),
+            Readout {
+                epoch: 2,
+                read: 0,
+                title: Some("Rust".into()),
+                passages: vec![passage(1, Role::Heading(1), "Rust (programming language)")],
+            },
+        );
+        true
+    }
     fn search_url(&self, _profile: &ProfileId, query: &str) -> Option<String> {
         Some(format!(
             "https://duckduckgo.com/?q={}",
@@ -1372,7 +1391,7 @@ async fn go_to_searches_opens_in_front_and_reads_the_page() {
     );
     let (result, _) = h.tool_result(1);
     assert!(
-        result.starts_with("Opened duckduckgo.com in front as t1.\n<<<PAGE a"),
+        result.starts_with("Opened duckduckgo.com in a new tab in front (t1).\n<<<PAGE a"),
         "{result}"
     );
     let (refused, is_error) = h.tool_result(2);
@@ -1391,5 +1410,31 @@ async fn a_long_job_ends_with_words_instead_of_silence() {
     assert_eq!(
         text_of(&h.blocks().await),
         "I listed your tabs but ran out of steps."
+    );
+}
+
+#[tokio::test]
+async fn go_to_follows_the_link_in_the_tab_being_worked_in() {
+    let h = harness(vec![
+        tool("go_to", json!({"target": "a1"})),
+        say("You're on eMudhra's post now."),
+    ]);
+    h.ask("Go to the first story", true).await.unwrap();
+    h.settle().await;
+    assert_eq!(
+        *h.tabs.0.lock().unwrap(),
+        vec![format!("{TAB} → https://emudhra.com/exit")]
+    );
+    let (result, _) = h.tool_result(1);
+    assert!(
+        result.starts_with("Opened emudhra.com in this tab (t1)."),
+        "{result}"
+    );
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert_eq!(
+        (steps[0].label.as_str(), steps[0].state),
+        ("Go to emudhra.com", PageAssistStepStateV1::Done)
     );
 }
