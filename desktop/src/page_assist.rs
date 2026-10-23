@@ -1069,6 +1069,7 @@ mod product {
         store: Arc<zephium_store::SqliteStore>,
     ) {
         let _ = ENGINE.set(engine.clone());
+        zephium_engine::page_reader::set_diagnostics(super::work_provider::record_diagnostic);
         reader_switch(
             app.try_state::<keymap::Keymap>()
                 .is_some_and(|keymap| keymap.ai_enabled()),
