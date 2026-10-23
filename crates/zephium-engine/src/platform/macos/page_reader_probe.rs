@@ -141,6 +141,117 @@ fn heavy() -> String {
     page
 }
 
+// Runs in the Kite fixtures' own world: what the page can tell of our
+// drawings and picker (mutations, clicks, keys, activation), the rows'
+// geometry, and scrolling on request. It reports through its title. A
+// window never shown renders only when the probe takes a snapshot, so
+// nothing here waits for a frame.
+const KITE_WATCH: &str = r##"(() => {
+  let active = false, been = false, opened = 0, attrs = 0, inside = 0, clicks = 0, downs = 0, keys = 0, sampled = 0;
+  const added = [];
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === "attributes") { if (document.body && document.body.contains(record.target)) attrs++; }
+      else if (record.target === document.documentElement) { for (const node of record.addedNodes) added.push(node.nodeName); }
+      else if (document.body && document.body.contains(record.target)) inside++;
+    }
+  }).observe(document.documentElement, { attributes: true, childList: true, subtree: true, characterData: true });
+  document.addEventListener("click", () => clicks++, true);
+  document.addEventListener("pointerdown", () => downs++, true);
+  document.addEventListener("keydown", () => keys++, true);
+  let moves = 0;
+  document.addEventListener("pointermove", () => moves++, true);
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => {
+    sampled++;
+    const ua = navigator.userActivation;
+    if (ua && ua.isActive) active = true;
+    if (ua && ua.hasBeenActive) been = true;
+    try { const w = window.open("about:blank", "_blank"); if (w) { opened++; try { w.close(); } catch (_) {} } } catch (_) {}
+    setTimeout(() => channel.port2.postMessage(0), 4);
+  };
+  channel.port2.postMessage(0);
+  const box = (elements) => {
+    let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    for (const element of elements) {
+      const rect = element.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      l = Math.min(l, rect.left); t = Math.min(t, rect.top); r = Math.max(r, rect.right); b = Math.max(b, rect.bottom);
+    }
+    return [Math.round(l + scrollX), Math.round(t + scrollY), Math.round(r - l), Math.round(b - t)];
+  };
+  const item = (id) => {
+    const element = document.getElementById(id);
+    if (!element) return null;
+    if (element.tagName === "TR") return box([element, element.nextElementSibling]);
+    return box([element]);
+  };
+  addEventListener("hashchange", () => {
+    const hash = decodeURIComponent(location.hash.slice(1));
+    const [verb, label, arg] = hash.split("~");
+    if (verb === "s") { scrollTo(0, Number(arg)); }
+    if (verb === "i") { const inner = document.getElementById("inner"); if (inner) inner.scrollTop = Number(arg); }
+    const report = (rest) => { document.title = `kite ${label} ${rest}`; };
+    const finish = () => {
+      const items = (arg || "").split(",").filter(Boolean).map((id) => [id, item(id)]);
+      report(`attrs=${attrs} inside=${inside} html=${document.documentElement.children.length} added=${added.join("|") || "none"} active=${active} been=${been} opened=${opened} clicks=${clicks} downs=${downs} keys=${keys} moves=${moves} sampled=${sampled} scroll=${Math.round(scrollY)} inner=${document.getElementById("inner") ? document.getElementById("inner").scrollTop : -1} items=${JSON.stringify(Object.fromEntries(items))}`);
+    };
+    setTimeout(finish, 30);
+  });
+})();"##;
+
+fn listing() -> String {
+    let mut page = String::from(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Listing</title>\
+         <style>body{font:13px Verdana,sans-serif;background:#f6f6ef;color:#222;margin:0}\
+         #hnmain{margin:8px 0 0 60px;width:820px;border-collapse:collapse}td{padding:1px 4px}\
+         .spacer{height:5px}.subtext{font-size:10px;color:#828282}a{color:#000}</style></head><body>\
+         <p style=\"margin-left:60px\"><a href=\"https://person:secret@example.org/private\">Signed link</a> \
+         <a href=\"mailto:someone@example.org\">Mail link</a></p><table id=\"hnmain\"><tbody>",
+    );
+    for n in 1..=30 {
+        page.push_str(&format!(
+            "<tr class=\"athing story\" id=\"{n}\"><td class=\"title rank\">{n}.</td><td class=\"votelinks\">^</td>\
+             <td class=\"title\"><span class=\"titleline\"><a id=\"t{n}\" href=\"https://example.org/story/{n}\">Story number {n} about rivers</a> \
+             <span class=\"sitebit\">(example.org)</span></span></td></tr>\
+             <tr><td colspan=\"2\"></td><td class=\"subtext\"><span class=\"score\">{} points</span> by \
+             <a href=\"/user?id=u{n}\">u{n}</a> <a href=\"/item?id={n}\">{n} hours ago</a> | \
+             <a href=\"/item?id={n}\">{n} comments</a></td></tr><tr class=\"spacer\"></tr>",
+            n + 10
+        ));
+    }
+    page.push_str(
+        "</tbody></table><form id=\"f\" onsubmit=\"return false\" style=\"margin-left:60px;width:400px\"><label id=\"email\">Email address \
+         <input name=\"email\" value=\"person@example.com\"></label><br><label>Password <input type=\"password\" value=\"hunter2-secret\"></label><br>\
+         <textarea>draft text</textarea><select><option>Opt A</option></select></form><script src=\"/kite.js\"></script></body></html>",
+    );
+    page
+}
+
+fn feed() -> String {
+    let mut page = String::from(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Feed</title>\
+         <style>body{font:15px system-ui,sans-serif;background:#16181d;color:#e8e8ea;margin:0;padding:24px 80px}\
+         .feed{display:grid;grid-template-columns:repeat(3,260px);gap:16px}.card{background:#22252c;border-radius:12px;padding:14px}\
+         .card h3{margin:0 0 6px;font-size:16px}a{color:#8ab4f8}#inner{height:160px;overflow:auto;margin-top:24px;width:420px;background:#1d2026}\
+         #inner li{height:28px}</style></head><body><main><div class=\"feed\">",
+    );
+    for n in 1..=12 {
+        page.push_str(&format!(
+            "<div class=\"card\" id=\"card{n}\"><h3>Card title {n}</h3><p>A short body for card {n}.</p>\
+             <a href=\"/post/{n}\">Read post {n}</a></div>"
+        ));
+    }
+    page.push_str("</div><ul id=\"inner\">");
+    for n in 1..=20 {
+        page.push_str(&format!(
+            "<li class=\"row\" id=\"row{n}\">Scrolled row {n}</li>"
+        ));
+    }
+    page.push_str("</ul></main><script src=\"/kite.js\"></script></body></html>");
+    page
+}
+
 struct Fixture {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -222,7 +333,23 @@ fn serve(mut stream: TcpStream, heavy: &str) {
         .next()
         .unwrap_or("/")
         .to_owned();
+    let generated = match path.as_str() {
+        "/listing" | "/listing-csp" => listing(),
+        "/feed" => feed(),
+        "/slow" => {
+            std::thread::sleep(Duration::from_millis(1_500));
+            NEXT.to_owned()
+        }
+        _ => String::new(),
+    };
     let (body, kind, csp): (&str, &str, Option<&str>) = match path.as_str() {
+        "/kite.js" => (KITE_WATCH, "text/javascript", None),
+        "/listing" | "/feed" | "/slow" => (&generated, "text/html; charset=utf-8", None),
+        "/listing-csp" => (
+            &generated,
+            "text/html; charset=utf-8",
+            Some("script-src 'self'; object-src 'none'; base-uri 'none'"),
+        ),
         "/watch.js" => (WATCH, "text/javascript", None),
         "/form.js" => (FORM_JS, "text/javascript", None),
         "/form" => (FORM, "text/html; charset=utf-8", None),
@@ -339,6 +466,8 @@ impl Probe {
         };
         // SAFETY: the probe keeps the retained window until teardown.
         unsafe { window.setReleasedWhenClosed(false) };
+        // Pointer moves reach the page as the person's do in a shown window.
+        window.setAcceptsMouseMovedEvents(true);
         let host = Host {
             view: window
                 .contentView()
@@ -386,7 +515,7 @@ impl Probe {
                 let admitted = enabled_and_admitted(&attempt_sensitive, &target);
                 if let Some(reader) = attempt_reader.upgrade() {
                     if let Some(reader) = reader.borrow().as_ref() {
-                        reader.attempt(admitted);
+                        reader.attempt(admitted, &target);
                     }
                 }
             })
@@ -1519,6 +1648,710 @@ fn fixtures(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
     Ok(())
 }
 
+impl Probe {
+    /// A pointer event at a point of the page's viewport, as the person's
+    /// mouse would deliver it.
+    fn mouse(&self, kind: objc2_app_kit::NSEventType, x: f64, y: f64) {
+        let page = super::native_webview(&self.view);
+        let pressure = if kind == objc2_app_kit::NSEventType::LeftMouseDown {
+            1.0
+        } else {
+            0.0
+        };
+        let event = objc2_app_kit::NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            kind,
+            NSPoint::new(x, 768.0 - y),
+            objc2_app_kit::NSEventModifierFlags::empty(),
+            0.0,
+            self._window.windowNumber(),
+            None,
+            0,
+            1,
+            pressure,
+        );
+        let Some(event) = event else {
+            return;
+        };
+        match kind {
+            objc2_app_kit::NSEventType::LeftMouseDown => page.mouseDown(&event),
+            objc2_app_kit::NSEventType::LeftMouseUp => page.mouseUp(&event),
+            _ => page.mouseMoved(&event),
+        }
+    }
+
+    fn click_at(&self, x: f64, y: f64) {
+        self.mouse(objc2_app_kit::NSEventType::LeftMouseDown, x, y);
+        settle(Duration::from_millis(30));
+        self.mouse(objc2_app_kit::NSEventType::LeftMouseUp, x, y);
+        settle(Duration::from_millis(60));
+    }
+
+    /// Presses, widens `ups` times with arrow up, then releases: a headless
+    /// window gets no pointer moves, so the press is what locates the target.
+    fn press_walk_release(&self, x: f64, y: f64, ups: usize) {
+        self.mouse(objc2_app_kit::NSEventType::LeftMouseDown, x, y);
+        settle(Duration::from_millis(30));
+        for _ in 0..ups {
+            self.key(126, "\u{f700}");
+        }
+        self.mouse(objc2_app_kit::NSEventType::LeftMouseUp, x, y);
+        settle(Duration::from_millis(60));
+    }
+
+    /// One rendering update, as a shown window gets every frame: frame
+    /// callbacks and resize observers run.
+    fn render(&self) {
+        let _ = self.snapshot();
+    }
+
+    /// A key as the person's keyboard would press it.
+    fn key(&self, code: u16, characters: &str) {
+        let page = super::native_webview(&self.view);
+        let characters = objc2_foundation::NSString::from_str(characters);
+        for kind in [
+            objc2_app_kit::NSEventType::KeyDown,
+            objc2_app_kit::NSEventType::KeyUp,
+        ] {
+            let event = objc2_app_kit::NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                kind,
+                NSPoint::new(10.0, 10.0),
+                objc2_app_kit::NSEventModifierFlags::empty(),
+                0.0,
+                self._window.windowNumber(),
+                None,
+                &characters,
+                &characters,
+                false,
+                code,
+            );
+            if let Some(event) = event {
+                if kind == objc2_app_kit::NSEventType::KeyDown {
+                    page.keyDown(&event);
+                } else {
+                    page.keyUp(&event);
+                }
+            }
+        }
+        settle(Duration::from_millis(40));
+    }
+
+    /// The Kite fixtures' report: `verb` first, then the page's view.
+    fn kite_report(&self, url: &str, verb: &str, label: &str, arg: &str) -> Result<String, String> {
+        self.view
+            .load_url(&format!("{url}#{verb}~{label}~{arg}"))
+            .map_err(|e| format!("report: {e}"))?;
+        let prefix = format!("kite {label} ");
+        pump(
+            || self.state.borrow().title.starts_with(&prefix),
+            "for a Kite report",
+        )?;
+        Ok(self.state.borrow().title.clone())
+    }
+
+    fn overlay(&self, epoch: u64) -> Result<serde_json::Value, String> {
+        let (answer, _) = self.recipe(epoch, PageRecipe::overlay());
+        serde_json::from_str(&answer.ok_or("no overlay answer")?)
+            .map_err(|e| format!("overlay state: {e}"))
+    }
+
+    fn marks(
+        &self,
+        epoch: u64,
+        read: u64,
+        marks: &[crate::page_reader::PageMark],
+        reduce_motion: bool,
+    ) -> (Vec<u8>, Duration) {
+        let Some((recipe, targets)) =
+            crate::host::page_reader::marks_recipe(self.tab, epoch, read, marks, reduce_motion)
+        else {
+            return (Vec::new(), Duration::ZERO);
+        };
+        let (answer, took) = self.recipe(epoch, recipe);
+        (
+            answer
+                .map(|answer| crate::platform::page_recipe::placed_marks(&answer, &targets))
+                .unwrap_or_default(),
+            took,
+        )
+    }
+
+    /// Polls pick `pick` until it ends or `limit` passes.
+    fn pick_outcome(
+        &self,
+        epoch: u64,
+        pick: u64,
+        limit: Duration,
+    ) -> Option<crate::platform::page_recipe::PickState> {
+        let end = Instant::now() + limit;
+        loop {
+            let (answer, _) = self.recipe(epoch, PageRecipe::picked());
+            let state = answer
+                .as_deref()
+                .and_then(|answer| crate::platform::page_recipe::pick_state(answer, pick));
+            match state {
+                Some(crate::platform::page_recipe::PickState::Waiting) if Instant::now() < end => {
+                    settle(Duration::from_millis(60));
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
+/// The value after `key=` in a page report.
+fn field<'a>(report: &'a str, key: &str) -> &'a str {
+    report
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&format!("{key}=")))
+        .unwrap_or("")
+}
+
+/// The page's own geometry of the items a report asked for.
+fn items(report: &str) -> HashMap<String, [i64; 4]> {
+    let json = report.split_once("items=").map_or("{}", |(_, json)| json);
+    serde_json::from_str::<HashMap<String, Option<[i64; 4]>>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, rect)| rect.map(|rect| (id, rect)))
+        .collect()
+}
+
+fn mark_box(state: &serde_json::Value, n: u64) -> Option<[i64; 4]> {
+    let mark = state["m"].as_array()?.iter().find(|m| m["n"] == n)?;
+    let b = mark["b"].as_array()?;
+    Some([
+        b[0].as_i64()?,
+        b[1].as_i64()?,
+        b[2].as_i64()?,
+        b[3].as_i64()?,
+    ])
+}
+
+/// A mark's box is its item's box with the fixed padding, to a pixel.
+fn encloses(mark: Option<[i64; 4]>, item: Option<&[i64; 4]>) -> bool {
+    match (mark, item) {
+        (Some(m), Some(i)) => {
+            (m[0] - (i[0] - 4)).abs() <= 1
+                && (m[1] - (i[1] - 4)).abs() <= 1
+                && (m[2] - (i[2] + 8)).abs() <= 1
+                && (m[3] - (i[3] + 8)).abs() <= 1
+        }
+        _ => false,
+    }
+}
+
+fn kite(mtm: MainThreadMarker, fixture: &Fixture) -> Result<(), String> {
+    use crate::page_reader::PageMark;
+    use crate::platform::page_recipe::PickState;
+    let probe = Probe::new(mtm, true)?;
+
+    println!("kite: link targets in reads");
+    let url = fixture.url("/listing");
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    let (read, _) = probe.read(epoch, &url);
+    let read = read.map_err(|f| format!("listing read failed: {f:?}"))?;
+    let passage = |text: &str| read.passages.iter().find(|p| p.text == text);
+    let id = |text: &str| {
+        passage(text)
+            .map(|p| p.id)
+            .ok_or_else(|| format!("no passage {text:?}"))
+    };
+    check(
+        passage("Story number 1 about rivers").and_then(|p| p.href.as_deref())
+            == Some("https://example.org/story/1"),
+        "a story link carries its absolute destination",
+    )?;
+    let comments = fixture.url("/item?id=3");
+    check(
+        passage("3 comments").and_then(|p| p.href.as_deref()) == Some(comments.as_str()),
+        "a relative link resolves, its query kept",
+    )?;
+    check(
+        passage("Signed link").is_some_and(|p| p.href.is_none()),
+        "a destination with user information is withheld",
+    )?;
+    check(
+        passage("Mail link").is_some_and(|p| p.href.is_none()),
+        "a mailto link carries none",
+    )?;
+    check(
+        read.passages.iter().filter(|p| p.href.is_some()).all(|p| {
+            matches!(p.role, PageRole::Link { .. })
+                && p.href
+                    .as_deref()
+                    .is_some_and(|h| h.starts_with("http") && h.len() <= 2_048)
+        }),
+        &format!(
+            "only links carry one ({} of {} passages)",
+            read.passages.iter().filter(|p| p.href.is_some()).count(),
+            read.passages.len()
+        ),
+    )?;
+    let last = (1..=30)
+        .rev()
+        .find(|n| passage(&format!("Story number {n} about rivers")).is_some())
+        .ok_or("no story read")?;
+
+    println!("kite: numbered marks enclose listing items");
+    let before = probe.kite_report(&url, "r", "before", "")?;
+    let marks = [
+        PageMark {
+            n: 1,
+            passage: id("Story number 1 about rivers")?,
+        },
+        PageMark {
+            n: 2,
+            passage: id("Story number 2 about rivers")?,
+        },
+        PageMark {
+            n: 3,
+            passage: id("3 comments")?,
+        },
+        PageMark {
+            n: 4,
+            passage: id(&format!("Story number {last} about rivers"))?,
+        },
+    ];
+    let (placed, took) = probe.marks(epoch, read.read, &marks, false);
+    check(
+        placed == [1, 2, 3, 4],
+        &format!("four marks placed in {} ms ({placed:?})", took.as_millis()),
+    )?;
+    let state = probe.overlay(epoch)?;
+    let rows = probe.kite_report(&url, "r", "rows", &format!("1,2,3,{last}"))?;
+    let geometry = items(&rows);
+    for (n, row) in [
+        (1, "1".to_owned()),
+        (2, "2".to_owned()),
+        (3, "3".to_owned()),
+        (4, last.to_string()),
+    ] {
+        check(
+            encloses(mark_box(&state, n), geometry.get(&row)),
+            &format!(
+                "mark {n} encloses story {row}'s item row and subtext row ({:?} around {:?})",
+                mark_box(&state, n),
+                geometry.get(&row)
+            ),
+        )?;
+    }
+    check(
+        state["m"]
+            .as_array()
+            .is_some_and(|m| m.iter().all(|m| m["i"] == false && m["k"] == "17 17 17")),
+        "badges sit in the left gutter, in dark ink on a light page",
+    )?;
+    check(
+        field(&rows, "attrs") == "0" && field(&rows, "inside") == "0",
+        "the page saw no attribute, style or node change in its own elements",
+    )?;
+    check(
+        field(&rows, "html").parse::<usize>().ok()
+            == field(&before, "html").parse::<usize>().ok().map(|n| n + 1),
+        &format!(
+            "one layer of ours, beside the body ({})",
+            field(&rows, "added")
+        ),
+    )?;
+    check(
+        !rows.to_ascii_lowercase().contains("zephium") && !rows.contains("kite-"),
+        "nothing the page can see names the panel",
+    )?;
+
+    println!("kite: document scroll runs none of our script");
+    // The first frame delivers the observers' initial sizes.
+    probe.render();
+    let layouts = probe.overlay(epoch)?["l"].as_u64().unwrap_or(0);
+    let cpu = probe.cpu_ns();
+    for (step, y) in [600, 1_400, 300, 2_000, 0, 2_600].into_iter().enumerate() {
+        probe.kite_report(&url, "s", &format!("scroll{step}"), &y.to_string())?;
+        probe.render();
+    }
+    let scrolled_cpu = probe.cpu_ns().zip(cpu).map_or(0.0, |(after, before)| {
+        after.saturating_sub(before) as f64 / 1e6
+    });
+    let after_scroll = probe.overlay(epoch)?;
+    check(
+        after_scroll["l"].as_u64() == Some(layouts),
+        &format!("six document scrolls, no layout of ours ({layouts} layouts before and after; page CPU {scrolled_cpu:.1} ms)"),
+    )?;
+    let at = probe.kite_report(&url, "r", "atbottom", "")?;
+    let scroll_y = field(&at, "scroll").parse::<f64>().unwrap_or(0.0);
+    let snapshot = probe.snapshot().ok_or("snapshot after scrolling")?;
+    let scale = snapshot.pixelsWide() as f64 / 1024.0;
+    let badge = mark_box(&after_scroll, 4).ok_or("mark 4")?;
+    let (bx, by) = (
+        badge[0] as f64 - 22.5 - 7.0,
+        badge[1] as f64 + badge[3] as f64 / 2.0 - scroll_y,
+    );
+    let pixel = rgb(&snapshot, (bx * scale) as isize, (by * scale) as isize);
+    check(
+        by > 0.0 && by < 768.0 && pixel.is_some_and(|(r, g, b)| r < 0.3 && g < 0.3 && b < 0.3),
+        &format!("the badge scrolled with its row on its own (pixel {pixel:?} at {bx:.0},{by:.0})"),
+    )?;
+
+    println!("kite: focus and clearing");
+    let (focused, _) = probe.recipe(epoch, PageRecipe::mark_focus(Some(2), true));
+    let state = probe.overlay(epoch)?;
+    check(
+        focused.as_deref() == Some("1") && state["f"] == 2,
+        "mark 2 is emphasised",
+    )?;
+    let (cleared, _) = probe.recipe(epoch, PageRecipe::marks(&[], false).ok_or("clear")?);
+    settle(Duration::from_millis(300));
+    let state = probe.overlay(epoch)?;
+    check(
+        cleared.as_deref() == Some("M:")
+            && state["h"] == false
+            && state["o"] == 0
+            && state["s"] == 0,
+        "clearing removes the layer and every observer and listener",
+    )?;
+    let after_clear = probe.kite_report(&url, "r", "cleared", "")?;
+    check(
+        field(&after_clear, "html") == field(&before, "html"),
+        "the page is back to its own nodes",
+    )?;
+
+    println!("kite: costs");
+    let mut times = Vec::new();
+    for _ in 0..7 {
+        let (placed, took) = probe.marks(epoch, read.read, &marks, true);
+        if placed.len() == 4 {
+            times.push(took.as_secs_f64() * 1e3);
+        }
+    }
+    let twelve: Vec<PageMark> = (1..=12)
+        .filter_map(|n| {
+            id(&format!("Story number {n} about rivers"))
+                .ok()
+                .map(|passage| PageMark { n, passage })
+        })
+        .collect();
+    let mut twelve_times = Vec::new();
+    for _ in 0..7 {
+        let (placed, took) = probe.marks(epoch, read.read, &twelve, true);
+        if placed.len() == 12 {
+            twelve_times.push(took.as_secs_f64() * 1e3);
+        }
+    }
+    check(
+        times.len() == 7 && twelve_times.len() == 7,
+        &format!(
+            "placement on the listing: 4 marks median {:.1} ms, 12 marks median {:.1} ms (round trip)",
+            median(&mut times),
+            median(&mut twelve_times)
+        ),
+    )?;
+    let _ = probe.recipe(epoch, PageRecipe::clear());
+
+    let heavy = fixture.url("/heavy");
+    let heavy_epoch = probe.load(&heavy)?;
+    probe.wait_readable()?;
+    let (heavy_read, _) = probe.read(heavy_epoch, &heavy);
+    let heavy_read = heavy_read.map_err(|f| format!("heavy read: {f:?}"))?;
+    probe.settled_footprint();
+    let base = probe.settled_footprint();
+    let paragraphs: Vec<PageMark> = heavy_read
+        .passages
+        .iter()
+        .filter(|p| p.role == PageRole::Text)
+        .step_by(7)
+        .take(12)
+        .zip(1..)
+        .map(|(p, n)| PageMark { n, passage: p.id })
+        .collect();
+    let (placed, took) = probe.marks(heavy_epoch, heavy_read.read, &paragraphs, false);
+    probe.render();
+    let marked = probe.settled_footprint();
+    check(
+        placed.len() == 12,
+        &format!(
+            "12 marks on a 3,000-paragraph page in {} ms; page footprint {base} KB before, {marked} KB with them ({:+} KB)",
+            took.as_millis(),
+            i64::try_from(marked).unwrap_or(0) - i64::try_from(base).unwrap_or(0)
+        ),
+    )?;
+    let state = probe.overlay(heavy_epoch)?;
+    check(
+        state["o"].as_u64() == Some(13) && state["s"] == 0,
+        "twelve marked elements and the document observed, no scroll listener",
+    )?;
+
+    println!("kite: a card feed and a nested scroller");
+    let feed = fixture.url("/feed");
+    let feed_epoch = probe.load(&feed)?;
+    probe.wait_readable()?;
+    let (feed_read, _) = probe.read(feed_epoch, &feed);
+    let feed_read = feed_read.map_err(|f| format!("feed read: {f:?}"))?;
+    let feed_id = |text: &str| {
+        feed_read
+            .passages
+            .iter()
+            .find(|p| p.text == text)
+            .map(|p| p.id)
+            .ok_or_else(|| format!("no feed passage {text:?}"))
+    };
+    let (placed, _) = probe.marks(
+        feed_epoch,
+        feed_read.read,
+        &[
+            PageMark {
+                n: 1,
+                passage: feed_id("Card title 1")?,
+            },
+            PageMark {
+                n: 2,
+                passage: feed_id("Read post 5")?,
+            },
+            PageMark {
+                n: 3,
+                passage: feed_id("Scrolled row 3")?,
+            },
+        ],
+        false,
+    );
+    let state = probe.overlay(feed_epoch)?;
+    let cards = items(&probe.kite_report(&feed, "r", "cards", "card1,card5,row3")?);
+    check(placed == [1, 2, 3], "three marks placed on the feed")?;
+    check(
+        encloses(mark_box(&state, 1), cards.get("card1"))
+            && encloses(mark_box(&state, 2), cards.get("card5")),
+        "a heading and a link each mark their whole card",
+    )?;
+    check(
+        encloses(mark_box(&state, 3), cards.get("row3")),
+        "a row inside a scroller marks its row",
+    )?;
+    check(
+        state["m"]
+            .as_array()
+            .is_some_and(|m| m.iter().all(|m| m["k"] == "255 255 255")),
+        "light ink on a dark page",
+    )?;
+    check(
+        state["s"] == 1,
+        "one scroll listener, on the scroller holding a mark",
+    )?;
+    probe.render();
+    let layouts = probe.overlay(feed_epoch)?["l"].as_u64().unwrap_or(0);
+    let row = mark_box(&state, 3).ok_or("row mark")?;
+    probe.kite_report(&feed, "i", "inner", "56")?;
+    probe.render();
+    settle(Duration::from_millis(60));
+    let state = probe.overlay(feed_epoch)?;
+    let moved = mark_box(&state, 3).ok_or("row mark after scroll")?;
+    check(
+        state["l"].as_u64().is_some_and(|l| l > layouts) && (row[1] - moved[1] - 56).abs() <= 1,
+        &format!(
+            "scrolling the scroller moves its mark with it ({} to {})",
+            row[1], moved[1]
+        ),
+    )?;
+
+    println!("kite: navigation removes the marks");
+    let state = probe.overlay(feed_epoch)?;
+    let card = mark_box(&state, 1).ok_or("card mark")?;
+    let badge = (card[0] as f64 - 29.5, card[1] as f64 + card[3] as f64 / 2.0);
+    let shown = probe.snapshot().ok_or("snapshot with marks")?;
+    let scale = shown.pixelsWide() as f64 / 1024.0;
+    let at = |rep: &objc2_app_kit::NSBitmapImageRep| {
+        rgb(rep, (badge.0 * scale) as isize, (badge.1 * scale) as isize)
+    };
+    let slow = fixture.url("/slow");
+    let _ = probe.navigation.begin(&slow);
+    probe
+        .view
+        .load_url(&slow)
+        .map_err(|e| format!("slow: {e}"))?;
+    settle(Duration::from_millis(400));
+    let leaving = probe.snapshot().ok_or("snapshot while leaving")?;
+    check(
+        crate::page_reader::committed_epoch(probe.tab) == Some(feed_epoch)
+            && at(&shown).is_some_and(|(r, _, _)| r > 0.8)
+            && at(&leaving).is_some_and(|(r, _, _)| r < 0.3),
+        &format!(
+            "a navigation's start removes them while the old page still shows ({:?} then {:?})",
+            at(&shown),
+            at(&leaving)
+        ),
+    )?;
+    pump(|| probe.epoch() != Some(feed_epoch), "for the slow page")?;
+
+    println!("kite: the person's pick");
+    let epoch = probe.load(&url)?;
+    probe.wait_readable()?;
+    let (started, took) = probe.recipe(epoch, PageRecipe::pick(1, false).ok_or("pick")?);
+    let state = probe.overlay(epoch)?;
+    check(
+        started.as_deref() == Some("1") && state["w"] == true,
+        &format!("the picker starts in {} ms", took.as_millis()),
+    )?;
+    let geometry = items(&probe.kite_report(&url, "r", "picking", "t2,t3,t4,t5,email,f")?);
+    let centre = |id: &str| -> Result<(f64, f64), String> {
+        let rect = geometry
+            .get(id)
+            .ok_or_else(|| format!("no rect for {id}"))?;
+        Ok((rect[0] as f64 + 12.0, rect[1] as f64 + rect[3] as f64 / 2.0))
+    };
+    let (x, y) = centre("t2")?;
+    probe.click_at(x, y);
+    let outcome = probe.pick_outcome(epoch, 1, Duration::from_secs(3));
+    let synthetic = matches!(outcome, Some(PickState::Picked(_)));
+    if let Some(PickState::Picked(picked)) = &outcome {
+        check(
+            picked.label == "Link"
+                && picked.text == "Story number 2 about rivers"
+                && picked.selector.as_deref() == Some("[id=\"t2\"]"),
+            &format!("a click picks the link under the pointer ({picked:?})"),
+        )?;
+    } else {
+        println!("  note  synthetic pointer input did not reach the picker ({outcome:?})");
+    }
+    if synthetic {
+        let _ = probe.recipe(epoch, PageRecipe::pick(2, false).ok_or("pick")?);
+        let (x, y) = centre("t3")?;
+        probe.press_walk_release(x, y, 5);
+        match probe.pick_outcome(epoch, 2, Duration::from_secs(3)) {
+            Some(PickState::Picked(picked)) => check(
+                picked.label == "Story list"
+                    && picked.text.contains("Story number 1 about rivers")
+                    && picked.text.contains("\n")
+                    && picked.selector.as_deref() == Some("[id=\"hnmain\"]"),
+                &format!(
+                    "arrow up widens to the listing, named for its rows ({:?}, {} chars)",
+                    picked.label,
+                    picked.text.chars().count()
+                ),
+            )?,
+            other => return Err(format!("FAILED widened pick: {other:?}")),
+        }
+        let _ = probe.recipe(epoch, PageRecipe::pick(3, false).ok_or("pick")?);
+        let (x, y) = centre("email")?;
+        let scrolled =
+            probe.kite_report(&url, "s", "toform", &format!("{}", (y - 300.0).max(0.0)))?;
+        let offset = field(&scrolled, "scroll").parse::<f64>().unwrap_or(0.0);
+        probe.press_walk_release(x, y - offset, 1);
+        match probe.pick_outcome(epoch, 3, Duration::from_secs(3)) {
+            Some(PickState::Picked(picked)) => check(
+                picked.text.contains("Email address")
+                    && picked.text.contains("Password")
+                    && !["person@example.com", "hunter2", "draft text", "Opt A"]
+                        .iter()
+                        .any(|value| picked.text.contains(value)),
+                &format!("a form's text never carries its values ({:?})", picked.text),
+            )?,
+            other => return Err(format!("FAILED form pick: {other:?}")),
+        }
+        let _ = probe.recipe(epoch, PageRecipe::pick(4, false).ok_or("pick")?);
+        probe.kite_report(&url, "s", "totop", "0")?;
+        let (x, y) = centre("t4")?;
+        probe.click_at(x, y);
+        let _ = probe.pick_outcome(epoch, 4, Duration::from_secs(3));
+        let state = probe.overlay(epoch)?;
+        let attached: Vec<&str> = state["p"]
+            .as_array()
+            .map(|p| p.iter().filter_map(|p| p["p"].as_str()).collect())
+            .unwrap_or_default();
+        check(
+            attached == ["2", "3", "4"],
+            &format!("at most three picks stay attached, the oldest goes ({attached:?})"),
+        )?;
+        let (again, _) = probe.recipe(epoch, PageRecipe::pick_read(2).ok_or("read")?);
+        check(
+            matches!(
+                again.as_deref().and_then(|a| crate::platform::page_recipe::pick_state(a, 2)),
+                Some(PickState::Picked(ref p)) if p.label == "Story list"
+            ),
+            "a pick reads again as it is now",
+        )?;
+        let (gone, _) = probe.recipe(epoch, PageRecipe::pick_read(1).ok_or("read")?);
+        check(
+            gone.as_deref() == Some("N"),
+            "a pick no longer attached reads as gone",
+        )?;
+        let _ = probe.recipe(epoch, PageRecipe::pick_clear(3).ok_or("clear")?);
+        settle(Duration::from_millis(250));
+        let state = probe.overlay(epoch)?;
+        check(
+            state["p"].as_array().is_some_and(|p| p.len() == 2),
+            "clearing a pick removes its outline",
+        )?;
+        let watched = probe.kite_report(&url, "r", "picked", "")?;
+        println!("  page report: {watched}");
+        check(
+            field(&watched, "clicks") == "0"
+                && field(&watched, "downs") == "0"
+                && field(&watched, "keys") == "0",
+            "the page never received the presses, clicks or keys of picking",
+        )?;
+        check(
+            field(&watched, "attrs") == "0" && field(&watched, "inside") == "0",
+            "and nothing of its own changed",
+        )?;
+        check(field(&watched, "opened") == "0", "no popup got through")?;
+        println!(
+            "  note  page activation after the person's own clicks: active={} been={}",
+            field(&watched, "active"),
+            field(&watched, "been")
+        );
+        let _ = probe.recipe(epoch, PageRecipe::pick(5, false).ok_or("pick")?);
+        probe.key(53, "\u{1b}");
+        check(
+            probe.pick_outcome(epoch, 5, Duration::from_secs(2)) == Some(PickState::Cancelled),
+            "Escape ends a pick as cancelled",
+        )?;
+    }
+    let _ = probe.recipe(epoch, PageRecipe::pick(6, false).ok_or("pick")?);
+    let _ = probe.recipe(epoch, PageRecipe::pick_cancel());
+    check(
+        probe.pick_outcome(epoch, 6, Duration::from_secs(2)) == Some(PickState::Cancelled),
+        "a cancel ends a pick as cancelled",
+    )?;
+    let quiet = probe.kite_report(&url, "r", "quiet", "")?;
+    if !synthetic {
+        check(
+            field(&quiet, "active") == "false" && field(&quiet, "been") == "false",
+            "starting and ending pickers gave the page no activation",
+        )?;
+    }
+
+    println!("kite: under script-src 'self'");
+    let csp = fixture.url("/listing-csp");
+    let epoch = probe.load(&csp)?;
+    probe.wait_readable()?;
+    let (read, _) = probe.read(epoch, &csp);
+    let read = read.map_err(|f| format!("csp read: {f:?}"))?;
+    let first = read
+        .passages
+        .iter()
+        .find(|p| p.text == "Story number 1 about rivers")
+        .ok_or("csp story")?;
+    let (placed, _) = probe.marks(
+        epoch,
+        read.read,
+        &[PageMark {
+            n: 1,
+            passage: first.id,
+        }],
+        false,
+    );
+    let (started, _) = probe.recipe(epoch, PageRecipe::pick(7, false).ok_or("pick")?);
+    let watched = probe.kite_report(&csp, "r", "csp", "")?;
+    check(
+        placed == [1] && started.as_deref() == Some("1"),
+        "marks and the picker work under the page's CSP",
+    )?;
+    check(
+        field(&watched, "active") == "false"
+            && field(&watched, "been") == "false"
+            && field(&watched, "opened") == "0",
+        "and give the page no activation",
+    )?;
+    Ok(())
+}
+
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(|a, b| a.total_cmp(b));
     values.get(values.len() / 2).copied().unwrap_or(0.0)
@@ -1713,6 +2546,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     let fixture = Fixture::start()?;
     let measuring = arguments.iter().any(|a| a == "--measure");
+    let kite_only = arguments.iter().any(|a| a == "--kite");
     let wikipedia = arguments
         .iter()
         .position(|a| a == "--article")
@@ -1721,8 +2555,10 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let outcome = objc2::rc::autoreleasepool(|_| {
         if measuring {
             measure(mtm, &fixture, wikipedia)
+        } else if kite_only {
+            kite(mtm, &fixture)
         } else {
-            fixtures(mtm, &fixture)
+            fixtures(mtm, &fixture).and_then(|()| kite(mtm, &fixture))
         }
     });
     drop(fixture);
