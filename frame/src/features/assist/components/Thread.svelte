@@ -8,7 +8,16 @@
   import PersonMessage from "./PersonMessage.svelte";
   import Reply from "./Reply.svelte";
 
-  let { session, onwork }: { session: AssistSession; onwork: (work: string) => void } = $props();
+  let {
+    session,
+    onwork,
+    onexit,
+  }: {
+    session: AssistSession;
+    onwork: (work: string) => void;
+    /** Leaves the starts for the field below. */
+    onexit: () => void;
+  } = $props();
 
   let scroller = $state<HTMLElement>();
   let content = $state<HTMLElement>();
@@ -77,6 +86,7 @@
         <Empty
           status={session.status}
           onsuggest={(suggestion) => void session.ask("", suggestion)}
+          {onexit}
         />
       {:else}
         <div class="messages" role="log" aria-label={m.assist_thread_label()}>
@@ -133,8 +143,8 @@
   .messages {
     display: flex;
     flex-direction: column;
-    gap: 22px;
-    padding-block-start: 6px;
+    gap: 24px;
+    padding-block-start: 8px;
   }
 
   .down {

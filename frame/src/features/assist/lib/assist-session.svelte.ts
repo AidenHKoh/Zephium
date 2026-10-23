@@ -20,6 +20,7 @@ export const MESSAGE_LIMIT = 2048;
 /** The latest deltas of a streaming text that still ink in. */
 const FRESH = 3;
 const MAX_ATTACHMENTS = 6;
+const MAX_OTHERS = 3;
 
 /** A picked element, with the address its page had when it was picked. */
 export type Pick = PageAssistPickV1 & { url: string | null };
@@ -49,6 +50,8 @@ export class AssistSession {
   picking = $state<string | null>(null);
   /** The person took the page chip off for the next message. */
   pageOff = $state(false);
+  /** Other tabs of the Space the person attached to the next message. */
+  others = $state.raw<string[]>([]);
   selectionOn = $state(false);
   /** Why the last message or pick did not start. */
   notice = $state.raw<PageAssistFaultV1 | null>(null);
@@ -116,6 +119,7 @@ export class AssistSession {
       this.conversation = EMPTY;
       this.arrivals = {};
       this.picks = [];
+      this.others = [];
       this.picking = null;
       this.styles = null;
       this.past = null;
@@ -131,6 +135,8 @@ export class AssistSession {
     this.pageOff = false;
     this.selectionOn = false;
     this.styles = null;
+    if (tab && this.others.includes(tab))
+      this.others = this.others.filter((other) => other !== tab);
     void this.read();
   }
 
@@ -231,6 +237,7 @@ export class AssistSession {
     const tab = this.tab;
     const out: PageAssistAttachV1[] = [];
     if (tab && this.pageAttached) out.push({ kind: "page", tab });
+    for (const other of this.others) if (other !== tab) out.push({ kind: "page", tab: other });
     if (tab && this.selectionOn && this.status?.selection) out.push({ kind: "selection", tab });
     for (const pick of this.picks) out.push({ kind: "element", tab: pick.tab, pick: pick.pick });
     return out.slice(0, MAX_ATTACHMENTS);
@@ -283,6 +290,7 @@ export class AssistSession {
       }
       if (composed) {
         this.picks = [];
+        this.others = [];
         this.pageOff = false;
         this.selectionOn = false;
       }
@@ -366,10 +374,22 @@ export class AssistSession {
     void quietly(commands.pageAssistDetach(pick.tab, pick.pick), false);
   }
 
-  /** Picks on a page that navigated or closed went with it. */
+  /** Another of the Space's tabs goes along with the next message; the one in front is the page chip. */
+  attachTab(tab: string) {
+    if (tab === this.tab) this.pageOff = false;
+    else if (!this.others.includes(tab)) this.others = [...this.others, tab].slice(-MAX_OTHERS);
+  }
+
+  detachTab(tab: string) {
+    this.others = this.others.filter((other) => other !== tab);
+  }
+
+  /** Picks on a page that navigated or closed went with it, as did closed tabs. */
   forget(urlOf: (tab: string) => string | null | undefined) {
     const kept = this.picks.filter((pick) => urlOf(pick.tab) === pick.url);
     if (kept.length !== this.picks.length) this.picks = kept;
+    const open = this.others.filter((tab) => urlOf(tab) !== undefined);
+    if (open.length !== this.others.length) this.others = open;
   }
 
   async newConversation() {

@@ -59,14 +59,14 @@
   }
 
   .item {
-    --shine-radius: var(--radius-row);
+    --shine-radius: var(--radius-card);
 
     display: flex;
     align-items: flex-start;
     gap: 11px;
     box-sizing: border-box;
     inline-size: 100%;
-    padding: 11px 12px 11px 11px;
+    padding: 12px;
     border: 0;
     color: var(--color-text);
     font: inherit;

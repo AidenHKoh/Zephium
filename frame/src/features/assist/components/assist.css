@@ -1,13 +1,13 @@
 /* What the assistant adds to the thread arrives on its own: a short rise and
    fade, the same for every kind, so a reply settles in rather than appears. */
 .assist-rise {
-  animation: assist-rise 200ms var(--ease-out) both;
+  animation: assist-rise 180ms var(--ease-out) both;
 }
 
 @keyframes assist-rise {
   from {
     opacity: 0;
-    transform: translateY(4px);
+    transform: translateY(6px);
   }
 }
 
@@ -38,6 +38,18 @@
   font-size: 13px;
   line-height: 1.45;
   text-wrap: pretty;
+}
+
+/* A list the reply keeps (tabs it opened, steps it ran): rows inset on one quiet plate. */
+.assist-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 4px;
+  border-radius: var(--radius-card);
+  background: var(--color-fill);
+  box-shadow: inset 0 0 0 0.5px var(--color-border);
+  list-style: none;
 }
 
 .assist-actions {

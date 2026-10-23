@@ -139,13 +139,14 @@
   .text {
     color: var(--color-text);
     font-size: var(--text-page-title);
-    line-height: 1.55;
+    letter-spacing: -0.003em;
+    line-height: 22px;
     overflow-wrap: break-word;
     text-wrap: pretty;
   }
 
   .text :global(:is(p, ul, ol, pre, blockquote)) {
-    margin: 0 0 10px;
+    margin: 0 0 12px;
   }
 
   .text > :global(:last-child),
@@ -154,21 +155,30 @@
   }
 
   .heading {
+    margin-block-start: 16px;
     font-weight: 620;
-    letter-spacing: -0.008em;
+    letter-spacing: -0.01em;
+  }
+
+  .text > .heading:first-child {
+    margin-block-start: 0;
   }
 
   ul,
   ol {
-    padding-inline-start: 20px;
+    padding-inline-start: 18px;
   }
 
   li {
-    padding-inline-start: 2px;
+    padding-inline-start: 4px;
   }
 
   li + li {
-    margin-block-start: 4px;
+    margin-block-start: 6px;
+  }
+
+  li :global(:is(ul, ol)) {
+    margin-block: 6px 0;
   }
 
   li::marker {
@@ -186,16 +196,19 @@
   code {
     padding: 1px 5px;
     border-radius: 5px;
-    background: var(--color-fill);
+    background: var(--color-fill-active);
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: 0.86em;
   }
 
   pre {
     overflow-x: auto;
     padding: 10px 12px;
-    border-radius: var(--radius-inset);
+    border-radius: var(--radius-row);
     background: var(--color-fill);
+    box-shadow: inset 0 0 0 0.5px var(--color-border);
+    font-size: 12.5px;
+    line-height: 19px;
   }
 
   pre code {

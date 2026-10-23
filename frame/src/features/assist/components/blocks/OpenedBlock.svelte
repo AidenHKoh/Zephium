@@ -4,8 +4,11 @@
   import { favicons } from "$domain/favicons";
   import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
+  import { Orb } from "$shared/ui/presence";
   import type { PageAssistOpenedV1 } from "$shared/ipc/bindings";
+  import { isOne } from "../../lib/format";
   import { Globe02Icon, Tick02Icon } from "../../lib/icons";
+  import "../assist.css";
 
   let { rows }: { rows: readonly PageAssistOpenedV1[] } = $props();
 
@@ -22,10 +25,12 @@
 <section class="opened" aria-label={m.assist_opened_label()}>
   <p class="caption" role="status">
     {settled
-      ? m.assist_opened_done({ count: opened })
-      : m.assist_opened_working({ count: rows.length })}
+      ? (isOne(opened) ? m.assist_opened_done_one : m.assist_opened_done)({ count: opened })
+      : (isOne(rows.length) ? m.assist_opened_working_one : m.assist_opened_working)({
+          count: rows.length,
+        })}
   </p>
-  <ul class="rows">
+  <ul class="rows assist-list">
     {#each rows as row (row.index)}
       {@const mark = markOf(row)}
       {@const shown = !!row.tab && live.has(row.tab)}
@@ -48,7 +53,7 @@
           >
           <span class="host">{row.host}</span>
           <span class="state" aria-hidden={row.state !== "failed" || undefined}>
-            {#if row.state === "opening"}<span class="spinner"></span>
+            {#if row.state === "opening"}<Orb size={13} />
             {:else if row.state === "opened"}<Icon icon={Tick02Icon} size={14} strokeWidth={2} />
             {:else if row.state === "failed"}{m.assist_opened_failed()}
             {:else}<span class="queued"></span>{/if}
@@ -74,17 +79,6 @@
     line-height: 17px;
   }
 
-  .rows {
-    display: flex;
-    flex-direction: column;
-    margin: 0;
-    padding: 4px;
-    border-radius: var(--radius-row);
-    background: var(--color-fill);
-    box-shadow: inset 0 0 0 0.5px var(--color-border);
-    list-style: none;
-  }
-
   .row {
     display: flex;
     align-items: center;
@@ -94,7 +88,7 @@
     min-block-size: 36px;
     padding: 0 10px;
     border: 0;
-    border-radius: var(--radius-inset);
+    border-radius: var(--radius-control);
     background: transparent;
     color: var(--color-text);
     font: inherit;
@@ -164,22 +158,6 @@
     }
   }
 
-  .spinner {
-    box-sizing: border-box;
-    inline-size: 13px;
-    block-size: 13px;
-    border: 1.6px solid var(--color-border-strong);
-    border-block-start-color: var(--color-text);
-    border-radius: 50%;
-    animation: turn 800ms linear infinite;
-  }
-
-  @keyframes turn {
-    to {
-      rotate: 1turn;
-    }
-  }
-
   .queued {
     inline-size: 5px;
     block-size: 5px;
@@ -188,10 +166,6 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .spinner {
-      animation-duration: 2.4s;
-    }
-
     .row[data-state="opened"] .state {
       animation: none;
     }

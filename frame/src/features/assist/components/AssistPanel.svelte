@@ -130,6 +130,7 @@
 <!-- Escape steps back from a sheet, then closes the panel; the composer takes it first to stop. -->
 <div
   class="assist-host"
+  data-assist
   role="presentation"
   onkeydown={(event) => {
     if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -162,7 +163,11 @@
     {#if session}
       {#if view === "history"}<HistoryView {session} onback={() => (view = "thread")} />
       {:else if view === "styles"}<SiteStyles {session} onback={() => (view = "thread")} />
-      {:else}<Thread {session} onwork={(work) => void openWork(work)} />{/if}
+      {:else}<Thread
+          {session}
+          onwork={(work) => void openWork(work)}
+          onexit={() => composer?.focus()}
+        />{/if}
     {/if}
     {#snippet footer()}
       {#if session}<Composer

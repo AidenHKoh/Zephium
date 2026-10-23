@@ -38,4 +38,8 @@
     box-sizing: border-box;
     background: var(--color-chrome);
   }
+
+  :global(:root[data-material="liquid_glass"]) .stage {
+    background: transparent;
+  }
 </style>

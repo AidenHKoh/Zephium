@@ -8,6 +8,7 @@
   import { suggestionLabel } from "../lib/suggestions";
   import { Globe02Icon, QuoteDownIcon, Target02Icon } from "../lib/icons";
   import "$shared/ui/Shine/shine.css";
+  import "./assist.css";
 
   let { message }: { message: Person } = $props();
 
@@ -22,7 +23,7 @@
   }
 </script>
 
-<div class="person" aria-label={m.assist_person_label()}>
+<div class="person assist-rise" aria-label={m.assist_person_label()}>
   {#if message.attachments.length}
     <ul class="attached" aria-label={m.assist_attached_label()}>
       {#each message.attachments as attachment, index (index)}
@@ -63,7 +64,7 @@
     flex-direction: column;
     align-items: flex-end;
     gap: 6px;
-    padding-inline-start: 15%;
+    padding-inline-start: 18%;
   }
 
   .attached {
@@ -83,10 +84,11 @@
     gap: 5px;
     box-sizing: border-box;
     max-inline-size: 100%;
-    block-size: 22px;
-    padding: 0 8px 0 6px;
-    border-radius: var(--radius-capsule);
-    box-shadow: inset 0 0 0 0.5px var(--color-border-strong);
+    block-size: 20px;
+    padding: 0 7px 0 5px;
+    border-radius: var(--radius-inset);
+    background: var(--color-fill);
+    box-shadow: inset 0 0 0 0.5px var(--color-border);
     color: var(--color-muted);
     font-size: 11.5px;
   }
@@ -100,14 +102,16 @@
   }
 
   .bubble {
-    --shine-radius: var(--radius-card);
+    --shine-radius: 18px;
 
     max-inline-size: 100%;
+    box-sizing: border-box;
     margin: 0;
-    padding: 8px 13px 9px;
+    padding: 8px 13px;
     color: var(--color-text);
-    font-size: var(--text-page-title);
-    line-height: 1.45;
+    font-size: 13.5px;
+    letter-spacing: -0.003em;
+    line-height: 20px;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
   }

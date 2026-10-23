@@ -127,7 +127,7 @@
   }
 
   .badge {
-    --shine-radius: var(--radius-row);
+    --shine-radius: var(--radius-control);
 
     display: flex;
     align-items: center;

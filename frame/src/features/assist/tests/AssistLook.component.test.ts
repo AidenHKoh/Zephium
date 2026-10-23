@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import type { PageAssistMessageV1, PageAssistStatusV1 } from "$shared/ipc/bindings";
@@ -65,6 +65,23 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
 });
 
+// The native glass is not in WebKit: a blurred wallpaper and the effect view's tint stand in for it.
+function glass(theme: "light" | "dark") {
+  document.getElementById("wallpaper")?.remove();
+  const ground = document.createElement("div");
+  ground.id = "wallpaper";
+  ground.style.cssText =
+    "position:fixed;inset:0;z-index:-1;background:radial-gradient(90% 80% at 20% 15%, #8f7fd6 0%, #4b3f86 40%, #1d1838 75%)";
+  const frost = document.createElement("div");
+  frost.style.cssText = `position:absolute;inset:0;backdrop-filter:blur(40px) saturate(1.6);background:${
+    theme === "light"
+      ? "linear-gradient(rgb(245 245 247 / 59%), rgb(245 245 247 / 59%)), rgb(255 255 255 / 30%)"
+      : "linear-gradient(rgb(23 23 26 / 47%), rgb(23 23 26 / 47%)), rgb(0 0 0 / 12%)"
+  }`;
+  ground.append(frost);
+  document.body.prepend(ground);
+}
+
 const settled = () =>
   Promise.all(
     document
@@ -98,13 +115,44 @@ const CITES = (() => {
 
 const thread = (...messages: PageAssistMessageV1[]) => status(messages);
 
-test("empty: the page in front and what Zephium can do with it", async () => {
+test("empty: a greeting for the page in front and at most four starts", async () => {
   const screen = await open(status());
-  await expect.element(screen.getByText("Understand")).toBeVisible();
+  await expect.element(screen.getByText("What can I do on Hacker News?")).toBeVisible();
   await expect.element(screen.getByRole("button", { name: "Worth opening" })).toBeVisible();
-  await expect.element(screen.getByText("Restyle", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Redesign this page" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Make it darker" }))
+    .not.toBeInTheDocument();
   await expect.element(screen.getByRole("button", { name: /Model: GPT-6 Luna/u })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
   await capture(screen.container, "empty");
+  await screen.getByRole("button", { name: "Worth opening" }).hover();
+  await capture(screen.container, "empty-hover");
+});
+
+test("empty over the glass sidebar", async () => {
+  const screen = await open(status());
+  await expect.element(screen.getByText("What can I do on Hacker News?")).toBeVisible();
+  document.documentElement.dataset.material = "liquid_glass";
+  try {
+    for (const theme of ["dark", "light"] as const) {
+      document.documentElement.dataset.theme = theme;
+      glass(theme);
+      await settled();
+      await page.screenshot({ path: `../../../../../target/look/assist/glass-${theme}.png` });
+    }
+  } finally {
+    delete document.documentElement.dataset.material;
+    document.getElementById("wallpaper")?.remove();
+  }
+});
+
+test("empty, typing: Send takes the mic's place", async () => {
+  const screen = await open(status());
+  await screen.getByRole("textbox").hover();
+  await screen.getByRole("textbox").fill("Which of these is worth an hour tonight?");
+  await expect.element(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  await capture(screen.container, "typing");
 });
 
 test("empty on a page it does not read: says what it can still do", async () => {
@@ -176,7 +224,7 @@ test("opened: one inset checklist, one moving thing", async () => {
   );
   await expect.element(screen.getByText("Couldn’t open")).toBeVisible();
   expect(screen.container.querySelector(".working")).toBeNull();
-  expect(screen.container.querySelectorAll(".spinner")).toHaveLength(1);
+  expect(screen.container.querySelectorAll(".orb")).toHaveLength(1);
   await capture(screen.container, "opened");
 });
 
@@ -190,9 +238,27 @@ test("confirm: the exact control, a quiet Not now, and what it does", async () =
           {
             kind: "steps",
             steps: [
-              { index: 0, label: "Scroll to “eMudhra to exit”", category: null, state: "done" },
-              { index: 1, label: 'Click "upvote"', category: "save", state: "confirm" },
-              { index: 2, label: "Check the score", category: null, state: "skipped" },
+              {
+                index: 0,
+                label: "Scroll to “eMudhra to exit”",
+                category: null,
+                state: "done",
+                reason: null,
+              },
+              {
+                index: 1,
+                label: "Click “upvote”",
+                category: "save",
+                state: "confirm",
+                reason: null,
+              },
+              {
+                index: 2,
+                label: "Check the score",
+                category: null,
+                state: "skipped",
+                reason: null,
+              },
             ],
           },
         ],
@@ -205,6 +271,48 @@ test("confirm: the exact control, a quiet Not now, and what it does", async () =
     .element(screen.getByText("This saves a change on news.ycombinator.com."))
     .toBeVisible();
   await capture(screen.container, "confirm");
+});
+
+test("steps: each names its control; a failed one says why", async () => {
+  const screen = await open(
+    thread(
+      person(1, "Search the site for Terax"),
+      reply(
+        2,
+        [
+          {
+            kind: "steps",
+            steps: [
+              {
+                index: 0,
+                label: "Type “Terax” into “Search”",
+                category: null,
+                state: "done",
+                reason: null,
+              },
+              {
+                index: 1,
+                label: "Press Return in “Search”",
+                category: null,
+                state: "failed",
+                reason: "no_effect",
+              },
+              {
+                index: 2,
+                label: "Open “Terax — release notes”",
+                category: null,
+                state: "skipped",
+                reason: null,
+              },
+            ],
+          },
+        ],
+        { state: "failed", cost: null, fault: { reason: "step_failed" } },
+      ),
+    ),
+  );
+  await expect.element(screen.getByText("It ran, but nothing changed")).toBeVisible();
+  await capture(screen.container, "steps");
 });
 
 test("style: a proposal, then the applied badge with its switches", async () => {
@@ -286,12 +394,31 @@ test("faults: a rate limit counts down, credits lead to the account", async () =
   await capture(screen.container, "faults");
 });
 
-test("composer: page, selection and element chips, picker and model chip", async () => {
+test("composer: page and selection chips; + holds the page, the picker and other tabs", async () => {
+  setTabs({
+    tabs: [
+      tab(TAB, "https://news.ycombinator.com/", "Hacker News"),
+      tab("tab-2", "https://github.com/zephium/zephium", "zephium/zephium · GitHub"),
+      tab("tab-3", "https://developer.mozilla.org/", "MDN Web Docs"),
+    ],
+  });
   const screen = await open(status([], { selection: "The quick brown fox" }));
   await expect.element(screen.getByRole("button", { name: "Selection" })).toBeVisible();
   await expect
     .element(screen.getByRole("button", { name: "Remove news.ycombinator.com" }))
     .toBeVisible();
-  await expect.element(screen.getByRole("button", { name: "Pick an element" })).toBeVisible();
   await capture(screen.container, "composer");
+  for (const theme of ["dark", "light"]) {
+    document.documentElement.dataset.theme = theme;
+    await screen.getByRole("button", { name: "Add" }).click();
+    await expect.element(page.getByRole("menuitem", { name: "Pick an element" })).toBeVisible();
+    await settled();
+    await page.screenshot({ path: `../../../../../target/look/assist/add-${theme}.png` });
+    await page.getByRole("menuitem", { name: "Attach another tab" }).click();
+    await expect.element(page.getByRole("menuitem", { name: /MDN Web Docs/u })).toBeVisible();
+    await settled();
+    await page.screenshot({ path: `../../../../../target/look/assist/add-tabs-${theme}.png` });
+    await userEvent.keyboard("{Escape}");
+    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
+  }
 });

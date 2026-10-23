@@ -162,10 +162,65 @@ test("while a reply works, Send is Stop, and Escape stops it before closing anyt
   native.status.conversation.seq = 42;
   emitNativeEvent("pageAssistChanged", event(2, { type: "text", block: 0, delta: "Done." }));
   emitNativeEvent("pageAssistChanged", event(2, { type: "done", cost: null }));
-  await expect.element(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
   await field.click();
   await userEvent.keyboard("{Escape}");
   expect(onclose).toHaveBeenCalledOnce();
+});
+
+test("one round button: the mic on an empty field, Send once there are words", async () => {
+  const { screen, field } = await open(status());
+  await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Send" })).toHaveAttribute("inert");
+  await field.fill("Hi");
+  await expect.element(screen.getByRole("button", { name: "Send" })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Dictate" })).toHaveAttribute("inert");
+  await field.fill("");
+  await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
+});
+
+test("the starts are a list the arrows walk, from the field up and back down", async () => {
+  const { screen, field } = await open(status());
+  await expect.element(screen.getByText("What can I do on Hacker News?")).toBeVisible();
+  await field.click();
+  await userEvent.keyboard("{ArrowUp}");
+  await expect.element(screen.getByRole("button", { name: "Redesign this page" })).toHaveFocus();
+  await userEvent.keyboard("{ArrowUp}");
+  await expect.element(screen.getByRole("button", { name: "Key points" })).toHaveFocus();
+  await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+  await expect.element(field).toHaveFocus();
+});
+
+test("+ attaches another tab of the Space alongside the page in front", async () => {
+  setTabs({
+    tabs: [
+      tab(TAB, "https://news.ycombinator.com/", "Hacker News"),
+      tab("tab-2", "https://github.com/zephium", "Zephium · GitHub"),
+      tab("tab-3", "about:blank", ""),
+    ],
+  });
+  const { screen, field } = await open(status());
+  await screen.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("menuitem", { name: "Attach another tab" }).click();
+  await expect
+    .element(page.getByRole("menuitem", { name: /about:blank/u }))
+    .not.toBeInTheDocument();
+  await page.getByRole("menuitem", { name: /Zephium · GitHub/u }).click();
+  await expect.element(screen.getByRole("button", { name: "Remove github.com" })).toBeVisible();
+  await field.fill("Compare these");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
+  expect(native.ask).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      attachments: [
+        { kind: "page", tab: TAB },
+        { kind: "page", tab: "tab-2" },
+      ],
+    }),
+  );
+  await expect
+    .element(screen.getByRole("button", { name: "Remove github.com" }))
+    .not.toBeInTheDocument();
 });
 
 test("an item's card points at its mark while hovered; ⌘-click opens it in a new tab", async () => {
@@ -189,7 +244,15 @@ test("a confirm is answered on its own block, with the exact control", async () 
           text("One step needs you."),
           {
             kind: "steps",
-            steps: [{ index: 0, label: 'Click "upvote"', category: "save", state: "confirm" }],
+            steps: [
+              {
+                index: 0,
+                label: "Click “upvote”",
+                category: "save",
+                state: "confirm",
+                reason: null,
+              },
+            ],
           },
         ],
         { state: "waiting", cost: null },
@@ -226,7 +289,11 @@ test("the picker attaches what was picked; × detaches it; Escape cancels a pick
     fault: null,
   });
   const { screen, field } = await open(status());
-  await screen.getByRole("button", { name: "Pick an element" }).click();
+  const pickFromMenu = async () => {
+    await screen.getByRole("button", { name: "Add" }).click();
+    await page.getByRole("menuitem", { name: "Pick an element" }).click();
+  };
+  await pickFromMenu();
   await expect.poll(() => native.pick.mock.calls.at(-1)).toEqual([SPACE, TAB]);
   await expect.element(screen.getByText("Story list")).toBeVisible();
   await field.fill("Summarize this part");
@@ -246,12 +313,12 @@ test("the picker attaches what was picked; × detaches it; Escape cancels a pick
     pick: { tab: TAB, pick: "8", label: "Pricing table", host: "news.ycombinator.com" },
     fault: null,
   });
-  await screen.getByRole("button", { name: "Pick an element" }).click();
+  await pickFromMenu();
   await screen.getByRole("button", { name: "Remove Pricing table" }).click();
   await expect.poll(() => native.detach.mock.calls.at(-1)).toEqual([TAB, "8"]);
 
   native.pick.mockImplementationOnce(() => new Promise(() => {}));
-  await screen.getByRole("button", { name: "Pick an element" }).click();
+  await pickFromMenu();
   await expect
     .element(screen.getByRole("status").filter({ hasText: "Esc to cancel" }))
     .toBeVisible();

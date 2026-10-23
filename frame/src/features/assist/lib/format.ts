@@ -1,5 +1,10 @@
 import * as m from "$shared/i18n/messages";
-import type { PageAssistCostV1, WorkConfirmCategoryV1 } from "$shared/ipc/bindings";
+import { getLocale } from "$shared/i18n/runtime";
+import type {
+  PageAssistCostV1,
+  PageAssistStepReasonV1,
+  WorkConfirmCategoryV1,
+} from "$shared/ipc/bindings";
 
 /** What a reply cost, as its footer's tooltip says it. */
 export function costLine(cost: PageAssistCostV1): string {
@@ -14,9 +19,49 @@ export function costLine(cost: PageAssistCostV1): string {
     : m.assist_cost_credits({ model: cost.model, credits: cost.credits });
 }
 
-/** The control a step names, such as `Place order` in `Click "Place order"`. */
+const QUOTED = /[“"]([^”"]*)[”"]/gu;
+
+/** The control a step names, the last thing it quotes: `Search` in `Type “Terax” into “Search”`. */
 export function controlOf(label: string): string {
-  return /[“"]([^”"]+)[”"]/u.exec(label)?.[1] ?? label;
+  return [...label.matchAll(QUOTED)].findLast((match) => match[1])?.[1] ?? label;
+}
+
+/** A step's words, with what it quotes (a control, a value) apart from the verb around it. */
+export function labelParts(label: string): { text: string; named: boolean }[] {
+  const parts: { text: string; named: boolean }[] = [];
+  let at = 0;
+  for (const match of label.matchAll(QUOTED)) {
+    if (match.index > at) parts.push({ text: label.slice(at, match.index), named: false });
+    if (match[1]) parts.push({ text: match[1], named: true });
+    at = match.index + match[0].length;
+  }
+  if (at < label.length) parts.push({ text: label.slice(at), named: false });
+  return parts;
+}
+
+/** Why a step failed, as the person can act on it. */
+export function stepReason(reason: PageAssistStepReasonV1 | null): string {
+  switch (reason) {
+    case "refused":
+      return m.assist_step_refused();
+    case "unsuitable":
+      return m.assist_step_unsuitable();
+    case "page_changed":
+      return m.assist_step_page_changed();
+    case "no_effect":
+      return m.assist_step_no_effect();
+    default:
+      return m.assist_step_failed();
+  }
+}
+
+const plurals = new Map<string, Intl.PluralRules>();
+/** One or many, as the language counts. */
+export function isOne(count: number): boolean {
+  const locale = getLocale();
+  let rules = plurals.get(locale);
+  if (!rules) plurals.set(locale, (rules = new Intl.PluralRules(locale)));
+  return rules.select(count) === "one";
 }
 
 /** One quiet line on what confirming does, from Rust's category. */
