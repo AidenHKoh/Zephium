@@ -28,10 +28,11 @@ use zephium_core::navigation;
 use zephium_core::permissions::{PagePermissionCatalogRevision, PagePermissionPatch};
 use zephium_core::ports::store::{
     BlockerConfigLoadOutcome, BlockerConfigUpdateOutcome, BlockerSiteLoadOutcome,
-    BlockerSiteUpdateOutcome, HistoryHit, HistoryVisit, PagePermissionCatalogLoadOutcome,
-    PagePermissionCatalogMutationOutcome, ProfileDeletionAuthorizeOutcome,
-    ProfileDeletionFinalizeOutcome, ProfileDeletionLoad, SessionLoad, Store, StoreShutdownOutcome,
-    UserscriptCatalogLoadOutcome, UserscriptCatalogMutationOutcome, MAX_FAVICON_BATCH_ORIGINS,
+    BlockerSiteUpdateOutcome, ChatSummary, HistoryHit, HistoryVisit,
+    PagePermissionCatalogLoadOutcome, PagePermissionCatalogMutationOutcome,
+    ProfileDeletionAuthorizeOutcome, ProfileDeletionFinalizeOutcome, ProfileDeletionLoad,
+    SessionLoad, Store, StoreShutdownOutcome, UserscriptCatalogLoadOutcome,
+    UserscriptCatalogMutationOutcome, MAX_CHATS, MAX_FAVICON_BATCH_ORIGINS,
 };
 use zephium_core::profiles::{ProfileAvatar, ProfileKind};
 use zephium_core::session::{
@@ -401,6 +402,19 @@ enum Cmd {
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
     ClearHistory(ProfileId, Option<i64>, Sender<Option<u32>>),
+    Chats(ProfileId, u32, Sender<Vec<ChatSummary>>),
+    Chat(ProfileId, String, Sender<Option<String>>),
+    SaveChat {
+        profile: ProfileId,
+        id: String,
+        space: String,
+        title: String,
+        updated_ms: i64,
+        body: String,
+        reply: Sender<bool>,
+    },
+    DeleteChat(ProfileId, String, Sender<bool>),
+    ClearChats(ProfileId, Option<i64>, Sender<u32>),
     AmendVisitTitle(ProfileId, String, String),
     FaviconAge(ProfileId, String, Sender<Option<i64>>),
     FaviconRasterWithAge(ProfileId, String, Sender<Option<(Vec<u8>, i64)>>),
@@ -467,6 +481,14 @@ impl SqliteStore {
             return false;
         };
         self.tx.try_send(Cmd::Activity(write, permit)).is_ok()
+    }
+
+    /// One request answered by the actor, or None when it was not admitted or
+    /// did not answer in time.
+    fn ask<T>(&self, command: impl FnOnce(Sender<T>) -> Cmd) -> Option<T> {
+        let (tx, rx) = mpsc::channel();
+        self.tx.try_send(command(tx)).ok()?;
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok()
     }
 
     /// `dir` is the app data directory; the hub lays out `meta.sqlite` plus
@@ -1423,6 +1445,59 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
+    fn chats(&self, profile: ProfileId, limit: u32) -> Vec<ChatSummary> {
+        let limit = limit.min(MAX_CHATS as u32);
+        if limit == 0 {
+            return Vec::new();
+        }
+        self.ask(|reply| Cmd::Chats(profile, limit, reply))
+            .unwrap_or_default()
+    }
+
+    fn chat(&self, profile: ProfileId, id: &str) -> Option<String> {
+        if !hub::valid_chat_id(id) {
+            return None;
+        }
+        self.ask(|reply| Cmd::Chat(profile, id.to_owned(), reply))
+            .flatten()
+    }
+
+    fn save_chat(
+        &self,
+        profile: ProfileId,
+        id: &str,
+        space: &str,
+        title: &str,
+        updated_ms: i64,
+        body: String,
+    ) -> bool {
+        if !hub::valid_chat(id, space, title, &body) {
+            return false;
+        }
+        self.ask(|reply| Cmd::SaveChat {
+            profile,
+            id: id.to_owned(),
+            space: space.to_owned(),
+            title: title.to_owned(),
+            updated_ms,
+            body,
+            reply,
+        })
+        .unwrap_or(false)
+    }
+
+    fn delete_chat(&self, profile: ProfileId, id: &str) -> bool {
+        hub::valid_chat_id(id)
+            && self
+                .ask(|reply| Cmd::DeleteChat(profile, id.to_owned(), reply))
+                .unwrap_or(false)
+    }
+
+    fn clear_chats(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.ask(|reply| Cmd::ClearChats(profile, since, reply))
+            .unwrap_or_default()
+    }
+
     fn amend_visit_title(&self, profile: ProfileId, url: String, title: String) -> bool {
         if !zephium_core::navigation::is_allowed_str(&url) || title.len() > hub::MAX_TITLE_BYTES {
             return false;
@@ -1905,6 +1980,31 @@ fn actor(
                     None
                 };
                 let _ = reply.send(result);
+            }
+            Some(Cmd::Chats(profile, limit, reply)) => {
+                let _ = reply.send(hub.chats(profile, limit));
+            }
+            Some(Cmd::Chat(profile, id, reply)) => {
+                let _ = reply.send(hub.chat(profile, &id));
+            }
+            Some(Cmd::SaveChat {
+                profile,
+                id,
+                space,
+                title,
+                updated_ms,
+                body,
+                reply,
+            }) => {
+                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                    && hub.save_chat(profile, &id, &space, &title, updated_ms, &body);
+                let _ = reply.send(stored);
+            }
+            Some(Cmd::DeleteChat(profile, id, reply)) => {
+                let _ = reply.send(hub.delete_chat(profile, &id));
+            }
+            Some(Cmd::ClearChats(profile, since, reply)) => {
+                let _ = reply.send(hub.clear_chats(profile, since));
             }
             Some(Cmd::AmendVisitTitle(profile, url, title)) => {
                 hub.amend_visit_title(profile, &url, &title);

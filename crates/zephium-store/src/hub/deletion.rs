@@ -558,6 +558,7 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM time_spent;
          DELETE FROM time_batch_receipts;
          DELETE FROM bookmarks;
+         DELETE FROM chats;
          DELETE FROM search_queries;
          DELETE FROM history;
          DELETE FROM history_usage;
@@ -695,6 +696,11 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO chats(id,space,title,updated_ms,body) VALUES('scrub-chat','scrub-space',?1,1,?1)",
+            [PROFILE_SCRUB_MARKER],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO blocker_statistics VALUES(1,?1)",
             [r#"{"day":700000,"days":[0,0,0,0,0,0,12]}"#],
         )
@@ -729,6 +735,7 @@ mod tests {
         let expected_tables = [
             "blocker_statistics",
             "bookmarks",
+            "chats",
             "download_cleanup",
             "download_preferences",
             "downloads",
@@ -794,6 +801,7 @@ mod tests {
             "time_spent",
             "time_batch_receipts",
             "bookmarks",
+            "chats",
             "download_cleanup",
             "download_preferences",
             "downloads",

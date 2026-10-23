@@ -2670,6 +2670,26 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 36,
+        up: |tx| {
+            // Kite conversations. The body is opaque to the store; the count
+            // cap is held by the write. Bounds mirror zephium_core::ports::store.
+            tx.execute_batch(
+                "CREATE TABLE chats (
+                     id TEXT PRIMARY KEY NOT NULL CHECK (
+                         length(CAST(id AS BLOB)) BETWEEN 1 AND 40
+                         AND id NOT GLOB '*[^A-Za-z0-9-]*'
+                     ),
+                     space TEXT NOT NULL CHECK (length(CAST(space AS BLOB)) <= 128),
+                     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 200),
+                     updated_ms INTEGER NOT NULL,
+                     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 524288)
+                 ) STRICT;
+                 CREATE INDEX idx_chats_updated ON chats(updated_ms DESC, id DESC);",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2762,6 +2782,7 @@ mod tests {
         (33, 0x101002bc7ceb482a),
         (34, 0x1a93a832df64a4a1),
         (35, 0x3c4c67becd54e02a),
+        (36, 0xa35d00504cb31a89),
     ];
 
     #[test]
@@ -2982,7 +3003,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 35);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -3045,6 +3066,72 @@ mod tests {
         assert!(conn
             .execute(
                 "INSERT INTO time_batch_receipts(batch_id,digest) VALUES(zeroblob(16),x'00')",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn profile_v36_adds_empty_bounded_chats_and_keeps_existing_data() {
+        use zephium_core::ports::store::{
+            MAX_CHAT_BODY_BYTES, MAX_CHAT_ID_BYTES, MAX_CHAT_SPACE_BYTES, MAX_CHAT_TITLE_BYTES,
+        };
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..35]).unwrap();
+        conn.execute(
+            "INSERT INTO history(url,title,visited_at) VALUES('https://example.com/','Kept',1)",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
+        assert_eq!(
+            conn.query_row("SELECT title FROM history", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "Kept"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM chats", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let insert = |id: &str, space: &str, title: &str, body: &str| {
+            conn.execute(
+                "INSERT INTO chats(id,space,title,updated_ms,body) VALUES(?1,?2,?3,1,?4)",
+                rusqlite::params![id, space, title, body],
+            )
+        };
+        let id = "a".repeat(MAX_CHAT_ID_BYTES);
+        let space = "s".repeat(MAX_CHAT_SPACE_BYTES);
+        let title = "t".repeat(MAX_CHAT_TITLE_BYTES);
+        let body = "b".repeat(MAX_CHAT_BODY_BYTES);
+        insert("Z-9", "", "", "").unwrap();
+        insert(&id, &space, &title, &body).unwrap();
+        for refused in [
+            insert("", "s", "t", "b"),
+            insert(&"a".repeat(MAX_CHAT_ID_BYTES + 1), "s", "t", "b"),
+            insert("has space", "s", "t", "b"),
+            insert("under_score", "s", "t", "b"),
+            insert("caf\u{e9}", "s", "t", "b"),
+            insert("Z-9", "s", "t", "b"),
+            insert("space", &"s".repeat(MAX_CHAT_SPACE_BYTES + 1), "t", "b"),
+            insert("title", "s", &"t".repeat(MAX_CHAT_TITLE_BYTES + 1), "b"),
+            insert("body", "s", "t", &"b".repeat(MAX_CHAT_BODY_BYTES + 1)),
+            insert(
+                "multibyte",
+                "s",
+                &"\u{e9}".repeat(MAX_CHAT_TITLE_BYTES / 2 + 1),
+                "b",
+            ),
+        ] {
+            assert!(refused.is_err());
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO chats(id,space,title,updated_ms,body) VALUES('blob','s','t',1,x'7b7d')",
                 []
             )
             .is_err());
@@ -4322,7 +4409,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(35));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(36));
     }
 
     #[test]

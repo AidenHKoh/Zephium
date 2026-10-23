@@ -9,6 +9,7 @@ mod agent_audit;
 mod agent_work;
 mod blocker;
 mod bookmarks;
+mod chats;
 mod compatibility;
 mod deletion;
 mod downloads;
@@ -62,6 +63,7 @@ pub(crate) use agent_work::work_test_guard;
 pub(crate) use agent_work::work_test_storage;
 #[cfg(feature = "work-execution")]
 pub(crate) use agent_work::AGENT_WORK_PRUNE_BATCH;
+pub(crate) use chats::{valid_chat, valid_chat_id};
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
