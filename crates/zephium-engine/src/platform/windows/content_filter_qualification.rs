@@ -403,7 +403,13 @@ fn native_protection_qualification() {
                 .0;
             builder = builder.with_initialization_script_for_main_only(discard, true);
             builder = builder.with_initialization_script_for_main_only(
-                include_str!("../../host/content_style.js"),
+                concat!(
+                    "(() => {\n",
+                    include_str!("../../host/picker_kit.js"),
+                    "\n",
+                    include_str!("../../host/content_style.js"),
+                    "\n})();\n"
+                ),
                 true,
             );
         }

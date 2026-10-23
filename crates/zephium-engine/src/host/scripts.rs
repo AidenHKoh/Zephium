@@ -754,6 +754,15 @@ fn builtin_script(id: u128, source: &str, all_frames: bool) -> UserScript {
     }
 }
 
+/// The blocker's document script, with the shared picker in its own scope.
+const CONTENT_STYLE_JS: &str = concat!(
+    "(() => {\n",
+    include_str!("picker_kit.js"),
+    "\n",
+    include_str!("content_style.js"),
+    "\n})();\n"
+);
+
 #[derive(Clone, Copy)]
 struct ProtectedScriptSpec {
     id: u128,
@@ -766,7 +775,7 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
     ProtectedScriptSpec {
         id: 6,
-        source: include_str!("content_style.js"),
+        source: CONTENT_STYLE_JS,
         all_frames: false,
     },
     ProtectedScriptSpec {
