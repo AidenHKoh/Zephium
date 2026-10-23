@@ -1,5 +1,5 @@
 //! The one-click starts offered for a page, chosen from its structure.
-use crate::ipc::{PageAssistIntentV1 as Intent, PageAssistSuggestionV1 as Suggestion};
+use crate::ipc::PageAssistSuggestionV1 as Suggestion;
 use crate::page::{PageKind, PageTraits};
 
 /// Most reading suggestions shown at once.
@@ -20,6 +20,7 @@ pub fn suggestions(traits: &PageTraits, styles: bool) -> Vec<Suggestion> {
         PageKind::Product if traits.prices >= 2 => chosen.push(Suggestion::Compare),
         PageKind::Docs => chosen.push(Suggestion::Explain),
         PageKind::Article if traits.words >= 600 => chosen.push(Suggestion::KeyPoints),
+        PageKind::Listing => chosen.insert(0, Suggestion::Picks),
         _ => {}
     }
     if traits.prices > 0 || matches!(traits.kind, PageKind::Product) {
@@ -43,18 +44,12 @@ pub fn suggestions(traits: &PageTraits, styles: bool) -> Vec<Suggestion> {
     chosen
 }
 
-/// The turn a suggestion starts.
-pub fn intent_of(suggestion: Suggestion) -> Intent {
-    match suggestion {
-        Suggestion::Summarize => Intent::Summarize,
-        Suggestion::Redesign | Suggestion::Darker | Suggestion::Readable => Intent::Style,
-        Suggestion::KeyPoints
-        | Suggestion::KeyNumbers
-        | Suggestion::Catch
-        | Suggestion::Explain
-        | Suggestion::Steps
-        | Suggestion::Compare => Intent::Ask,
-    }
+/// Whether a suggestion restyles the site.
+pub fn restyles(suggestion: Suggestion) -> bool {
+    matches!(
+        suggestion,
+        Suggestion::Redesign | Suggestion::Darker | Suggestion::Readable
+    )
 }
 
 /// What the suggestion asks, in the model's words. Fixed text; the person's
@@ -72,6 +67,7 @@ pub fn request_text(suggestion: Suggestion) -> &'static str {
         Suggestion::Explain => "Explain this page in plain language.",
         Suggestion::Steps => "List the steps this page describes, in order.",
         Suggestion::Compare => "Compare the options this page offers and say who each suits.",
+        Suggestion::Picks => "What's worth opening on this page? Show the few best as items.",
         Suggestion::Redesign => {
             "Redesign this site: a refined, modern look that keeps its identity, with a clear type scale and a comfortable reading width."
         }
@@ -159,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn every_suggestion_has_an_intent_and_fixed_text() {
+    fn every_suggestion_has_fixed_text() {
         for suggestion in [
             Suggestion::Summarize,
             Suggestion::KeyPoints,
@@ -168,16 +164,12 @@ mod tests {
             Suggestion::Explain,
             Suggestion::Steps,
             Suggestion::Compare,
+            Suggestion::Picks,
             Suggestion::Redesign,
             Suggestion::Darker,
             Suggestion::Readable,
         ] {
             assert!(!request_text(suggestion).is_empty());
-            let style = matches!(
-                suggestion,
-                Suggestion::Redesign | Suggestion::Darker | Suggestion::Readable
-            );
-            assert_eq!(intent_of(suggestion) == Intent::Style, style);
         }
     }
 }

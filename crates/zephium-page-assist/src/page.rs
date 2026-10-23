@@ -38,12 +38,15 @@ pub struct PageTraits {
     pub fields: u16,
 }
 
-/// One passage of the read, addressable by the model as `rN`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// One passage of the read, addressable by the model by its number.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Fragment {
     /// The page's own words exactly as shown, when the read proved them
     /// complete. Only this is ever highlighted or quoted back.
     pub verbatim: Option<String>,
+    /// Where a link leads: an absolute `http(s)` address from the reader,
+    /// never from the model.
+    pub href: Option<String>,
 }
 
 /// One fresh read of the tab.
@@ -51,6 +54,8 @@ pub struct Fragment {
 pub struct PageRead {
     /// Registrable site, such as wikipedia.org.
     pub site: String,
+    /// The tab's host, such as en.wikipedia.org.
+    pub host: String,
     /// The page's title, as the page states it (untrusted).
     pub title: Option<String>,
     /// The model-facing encoding of the read (untrusted page content).
@@ -59,7 +64,7 @@ pub struct PageRead {
     pub fragments: BTreeMap<u16, Fragment>,
     /// Structure counts.
     pub traits: PageTraits,
-    /// Changes whenever the read's content changes; keys the summary cache.
+    /// Changes whenever the read's content changes.
     pub fingerprint: u64,
 }
 

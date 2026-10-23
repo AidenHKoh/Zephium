@@ -10,9 +10,9 @@ use std::fmt::Write as _;
 use cssparser::{serialize_identifier, serialize_string, ParseError, Parser, ParserInput, Token};
 
 /// Largest proposal accepted, in bytes.
-pub const MAX_INPUT_BYTES: usize = 16 * 1024;
+pub const MAX_INPUT_BYTES: usize = 24 * 1024;
 /// Largest stylesheet produced, in bytes.
-pub const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 20 * 1024;
 /// Most style rules one style may hold.
 pub const MAX_RULES: usize = 200;
 /// Deepest nesting of blocks and functions.
@@ -471,6 +471,8 @@ const PSEUDO_CLASSES: &[&str] = &[
     "only-of-type",
 ];
 const PSEUDO_ELEMENTS: &[&str] = &[
+    "before",
+    "after",
     "selection",
     "placeholder",
     "marker",
@@ -700,6 +702,10 @@ struct Grammar {
     commas: bool,
     slash: bool,
     filters: bool,
+    /// Grid tracks: `fr` and `repeat()`, `minmax()`, `fit-content()`.
+    tracks: bool,
+    /// Author names, such as counter names.
+    names: bool,
     max_values: usize,
 }
 
@@ -712,8 +718,37 @@ const NONE: Grammar = Grammar {
     commas: false,
     slash: false,
     filters: false,
+    tracks: false,
+    names: false,
     max_values: 1,
 };
+
+const ALIGNMENT: &[&str] = &[
+    "normal",
+    "stretch",
+    "center",
+    "start",
+    "end",
+    "flex-start",
+    "flex-end",
+    "self-start",
+    "self-end",
+    "baseline",
+    "first",
+    "last",
+    "left",
+    "right",
+    "space-between",
+    "space-around",
+    "space-evenly",
+];
+
+/// What `content` may hold: nothing, a counter, or a separator. Free text is
+/// how a page would make the model write words onto a site.
+const SEPARATORS: &[&str] = &[
+    "", " ", "·", " · ", "•", " • ", "|", " | ", "—", " — ", "–", " – ", "/", " / ", ",", ", ",
+    ".", ". ", ":", ": ", "#", "(", ")", "→", " → ",
+];
 
 const BORDER_STYLES: &[&str] = &[
     "none", "hidden", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset", "outset",
@@ -822,6 +857,7 @@ fn grammar(property: &str) -> Option<Grammar> {
             &["auto", "none", "min-content", "max-content", "fit-content"],
             1,
         ),
+        "min-height" => length(&["auto", "min-content", "max-content", "fit-content"], 1),
         "display" => keywords(&[
             "none",
             "block",
@@ -833,7 +869,82 @@ fn grammar(property: &str) -> Option<Grammar> {
             "inline-grid",
             "flow-root",
             "contents",
+            "list-item",
+            "table",
+            "table-row",
+            "table-cell",
         ]),
+        "box-sizing" => keywords(&["border-box", "content-box"]),
+        "flex-direction" => keywords(&["row", "row-reverse", "column", "column-reverse"]),
+        "flex-wrap" => keywords(&["nowrap", "wrap", "wrap-reverse"]),
+        "flex-flow" => Grammar {
+            max_values: 2,
+            ..keywords(&[
+                "row",
+                "row-reverse",
+                "column",
+                "column-reverse",
+                "nowrap",
+                "wrap",
+                "wrap-reverse",
+            ])
+        },
+        "flex" => Grammar {
+            number: true,
+            ..length(&["none", "auto", "content"], 3)
+        },
+        "flex-grow" | "flex-shrink" | "order" => Grammar {
+            number: true,
+            ..NONE
+        },
+        "flex-basis" => length(&["auto", "content", "min-content", "max-content"], 1),
+        "align-items" | "align-self" | "align-content" | "justify-content" | "justify-items"
+        | "justify-self" | "place-items" | "place-content" | "place-self" => Grammar {
+            max_values: 2,
+            ..keywords(ALIGNMENT)
+        },
+        "grid-template-columns" | "grid-template-rows" | "grid-auto-columns" | "grid-auto-rows" => {
+            Grammar {
+                tracks: true,
+                ..length(&["none", "auto", "min-content", "max-content"], 12)
+            }
+        }
+        "grid-auto-flow" => Grammar {
+            max_values: 2,
+            ..keywords(&["row", "column", "dense"])
+        },
+        "grid-column" | "grid-row" => Grammar {
+            number: true,
+            slash: true,
+            keywords: &["auto", "span"],
+            max_values: 5,
+            ..NONE
+        },
+        "vertical-align" => keywords(&[
+            "baseline",
+            "top",
+            "middle",
+            "bottom",
+            "text-top",
+            "text-bottom",
+        ]),
+        "list-style-type" | "list-style" => {
+            keywords(&["none", "disc", "circle", "square", "decimal"])
+        }
+        "list-style-position" => keywords(&["inside", "outside"]),
+        "white-space" => keywords(&["normal", "nowrap", "pre-line", "pre-wrap"]),
+        "text-wrap" => keywords(&["wrap", "balance", "pretty"]),
+        "text-underline-offset" => length(&["auto"], 1),
+        "border-collapse" => keywords(&["collapse", "separate"]),
+        "border-spacing" => length(&[], 2),
+        "table-layout" => keywords(&["auto", "fixed"]),
+        "counter-reset" | "counter-increment" => Grammar {
+            number: true,
+            names: true,
+            keywords: &["none"],
+            max_values: 4,
+            ..NONE
+        },
         "visibility" => keywords(&["visible", "hidden", "collapse"]),
         "opacity" => Grammar {
             number: true,
@@ -895,9 +1006,7 @@ fn grammar(property: &str) -> Option<Grammar> {
 /// a way that could load or inject content.
 fn forbidden_property(property: &str) -> bool {
     let bare = property.trim_start_matches('-');
-    bare.contains("binding")
-        || bare.ends_with("behavior")
-        || matches!(bare, "src" | "content" | "behaviour")
+    bare.contains("binding") || bare.ends_with("behavior") || matches!(bare, "src" | "behaviour")
 }
 
 const GLOBAL_KEYWORDS: &[&str] = &["inherit", "initial", "unset", "revert", "revert-layer"];
@@ -938,17 +1047,75 @@ fn declaration(nodes: &[Node]) -> Result<Option<String>, Rejection> {
             }
         }
     }
-    let Some(grammar) = grammar(&property) else {
-        return Ok(None);
-    };
-    let Some(text) = value_text(&value, grammar) else {
-        return Ok(None);
+    let text = if property == "content" {
+        content(&value)?
+    } else {
+        let Some(grammar) = grammar(&property) else {
+            return Ok(None);
+        };
+        let Some(text) = value_text(&value, grammar) else {
+            return Ok(None);
+        };
+        text
     };
     Ok(Some(if important {
         format!("{property}:{text}!important")
     } else {
         format!("{property}:{text}")
     }))
+}
+
+/// A `content` value: counters and separators only; anything else rejects
+/// the sheet, as only a page could have asked for it.
+fn content(nodes: &[&Node]) -> Result<String, Rejection> {
+    let words: Vec<&Node> = nodes
+        .iter()
+        .copied()
+        .filter(|n| !matches!(n, Node::Space))
+        .collect();
+    if let [Node::Ident(word)] = words.as_slice() {
+        if matches!(lower(word).as_str(), "none" | "normal") {
+            return Ok(lower(word));
+        }
+    }
+    if words.is_empty() || words.len() > 4 {
+        return Err(Rejection::Forbidden);
+    }
+    let mut pieces = Vec::with_capacity(words.len());
+    for word in words {
+        pieces.push(match word {
+            Node::Str(text) if SEPARATORS.contains(&text.as_str()) => {
+                let mut quoted = String::new();
+                serialize_string(text, &mut quoted).map_err(|_| Rejection::Forbidden)?;
+                quoted
+            }
+            Node::Function(name, inner) if name == "counter" => {
+                let args: Vec<&Node> = inner.iter().filter(|n| !matches!(n, Node::Space)).collect();
+                match args.as_slice() {
+                    [Node::Ident(counter)] if plain_name(counter) => format!(
+                        "counter({})",
+                        ident(&lower(counter)).ok_or(Rejection::Forbidden)?
+                    ),
+                    [Node::Ident(counter), Node::Comma, Node::Ident(style)]
+                        if plain_name(counter)
+                            && matches!(
+                                lower(style).as_str(),
+                                "decimal" | "decimal-leading-zero"
+                            ) =>
+                    {
+                        format!(
+                            "counter({}, {})",
+                            ident(&lower(counter)).ok_or(Rejection::Forbidden)?,
+                            lower(style)
+                        )
+                    }
+                    _ => return Err(Rejection::Forbidden),
+                }
+            }
+            _ => return Err(Rejection::Forbidden),
+        });
+    }
+    Ok(pieces.join(" "))
 }
 
 fn value_text(nodes: &[&Node], grammar: Grammar) -> Option<String> {
@@ -987,7 +1154,7 @@ fn value_text(nodes: &[&Node], grammar: Grammar) -> Option<String> {
                 let word = lower(word);
                 if grammar.keywords.contains(&word.as_str()) || grammar.color && color_name(&word) {
                     word
-                } else if grammar.family && plain_name(&word) {
+                } else if (grammar.family || grammar.names) && plain_name(&word) {
                     ident(&word)?
                 } else {
                     return None;
@@ -1006,7 +1173,14 @@ fn value_text(nodes: &[&Node], grammar: Grammar) -> Option<String> {
                 }
                 text
             }
+            Node::Dimension { unit, .. } if grammar.tracks && unit == "fr" => number(node)?,
             Node::Percentage { .. } | Node::Dimension { .. } if grammar.length => length(node)?,
+            Node::Function(name, inner)
+                if grammar.tracks
+                    && matches!(name.as_str(), "repeat" | "minmax" | "fit-content") =>
+            {
+                tracks(name, inner, 0)?
+            }
             Node::Function(name, inner) => function(name, inner, grammar, 0)?,
             _ => return None,
         };
@@ -1067,6 +1241,61 @@ fn length(node: &Node) -> Option<String> {
         Node::Dimension { unit, .. } if LENGTH_UNITS.contains(&unit.as_str()) => number(node),
         _ => None,
     }
+}
+
+/// Grid track functions: `repeat(auto-fill, minmax(240px, 1fr))` and kin.
+fn tracks(name: &str, inner: &[Node], depth: u8) -> Option<String> {
+    if depth > 2 {
+        return None;
+    }
+    let mut output = format!("{name}(");
+    let mut space = false;
+    for (count, node) in inner.iter().enumerate() {
+        if count > MAX_VALUE_TOKENS {
+            return None;
+        }
+        let piece = match node {
+            Node::Space => {
+                space = true;
+                continue;
+            }
+            Node::Comma => {
+                output.push_str(", ");
+                space = false;
+                continue;
+            }
+            Node::Number { int: Some(n), .. } if name == "repeat" && (1..=24).contains(n) => {
+                n.to_string()
+            }
+            Node::Number { .. } => {
+                let text = number(node)?;
+                (text == "0").then_some(text)?
+            }
+            Node::Dimension { unit, .. } if unit == "fr" => number(node)?,
+            Node::Percentage { .. } | Node::Dimension { .. } => length(node)?,
+            Node::Ident(word)
+                if matches!(
+                    lower(word).as_str(),
+                    "auto" | "auto-fill" | "auto-fit" | "min-content" | "max-content"
+                ) =>
+            {
+                lower(word)
+            }
+            Node::Function(inner_name, nested)
+                if matches!(inner_name.as_str(), "minmax" | "fit-content") =>
+            {
+                tracks(inner_name, nested, depth + 1)?
+            }
+            _ => return None,
+        };
+        if space && !output.ends_with('(') && !output.ends_with(' ') {
+            output.push(' ');
+        }
+        space = false;
+        output.push_str(&piece);
+    }
+    output.push(')');
+    Some(output)
 }
 
 fn function(name: &str, inner: &[Node], grammar: Grammar, depth: u8) -> Option<String> {
@@ -1269,6 +1498,34 @@ mod tests {
     }
 
     #[test]
+    fn cards_can_be_laid_out_and_content_holds_only_separators_and_counters() {
+        assert_eq!(
+            css(".itemlist{display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:12px}"),
+            ".itemlist{display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:12px}\n"
+        );
+        assert_eq!(
+            css("tr.athing{display:flex;flex-wrap:wrap;align-items:baseline;order:2}td{display:block}"),
+            "tr.athing{display:flex;flex-wrap:wrap;align-items:baseline;order:2}\ntd{display:block}\n"
+        );
+        assert_eq!(
+            css(".subline a+a::before{content:\" · \"}li::before{content:counter(item) \". \";counter-increment:item}"),
+            ".subline a + a::before{content:\" · \"}\nli::before{content:counter(item) \". \";counter-increment:item}\n"
+        );
+        assert_eq!(
+            css("a{grid-template-columns:repeat(99, 1fr);height:0;position:fixed;color:red}"),
+            "a{color:red}\n"
+        );
+        for spoof in [
+            "a::after{content:\"Verified by Zephium\"}",
+            "a::after{content:\"$0.00\"}",
+            "a::after{content:counter(x) \"Call now\"}",
+            "a::after{content:open-quote}",
+        ] {
+            assert_eq!(validate(spoof), Err(Rejection::Forbidden), "{spoof}");
+        }
+    }
+
+    #[test]
     fn rule_count_is_capped() {
         let many = "a{color:red}".repeat(MAX_RULES + 20);
         let valid = validate(&many[..many.len().min(MAX_INPUT_BYTES)]).unwrap();
@@ -1282,7 +1539,7 @@ mod tests {
                 let again = validate(&valid.css).expect("own output is admitted");
                 prop_assert_eq!(&again.css, &valid.css);
                 let lower = valid.css.to_ascii_lowercase();
-                for needle in ["url(", "@import", "/*", "\\", "attr(", "expression", "content:", "image"] {
+                for needle in ["url(", "@import", "/*", "\\", "attr(", "expression", "image"] {
                     prop_assert!(!lower.contains(needle), "{needle} in {lower}");
                 }
                 prop_assert!(valid.css.len() <= MAX_OUTPUT_BYTES);

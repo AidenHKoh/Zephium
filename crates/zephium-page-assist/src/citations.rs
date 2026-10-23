@@ -1,58 +1,56 @@
-//! Numbered sources for one turn. A chip's excerpt and the text the page
-//! highlights both come from the read's verbatim passage, never the model.
+//! A reply's numbered sources. Only passages the read proved verbatim can be
+//! cited, so every excerpt and highlight is the page's own words.
 use crate::ipc::{PageAssistCiteV1 as Cite, PAGE_ASSIST_MAX_EXCERPT_CHARS};
 use crate::page::PageRead;
+use crate::refs::Ref;
 use crate::text;
 
-/// Most distinct sources one turn may number.
-pub const MAX_SOURCES: usize = 24;
-/// Most sources one part may cite.
-pub const MAX_CITES_PER_PART: usize = 4;
-/// Longest text handed to the page highlight, in bytes.
+/// Most sources one reply numbers.
+pub const MAX_SOURCES: usize = 32;
+/// Longest highlight sent to the page, in bytes.
 pub const MAX_HIGHLIGHT_BYTES: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Source {
-    fragment: u16,
-    excerpt: String,
+    reference: Ref,
+    tab: String,
+    epoch: u64,
+    cite: Cite,
     highlight: String,
 }
 
-/// The turn's sources in the order they were first cited.
+/// Where a cite jumps: the tab, the document it was read in, the quote.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Jump<'a> {
+    /// The tab it is on.
+    pub tab: &'a str,
+    /// The document's epoch at the read.
+    pub epoch: u64,
+    /// The verbatim quote to mark.
+    pub highlight: &'a str,
+}
+
+/// The sources of one reply, numbered in order of first citation.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CitationBook {
     sources: Vec<Source>,
 }
 
 impl CitationBook {
-    /// Numbers the passages a part cites. Unknown ids, passages without
-    /// verbatim text, repeats and anything past the caps are dropped.
-    pub fn cite(&mut self, read: &PageRead, fragments: &[u16]) -> Vec<Cite> {
-        let mut cites: Vec<Cite> = Vec::new();
-        for &fragment in fragments {
-            if cites.len() == MAX_CITES_PER_PART {
-                break;
-            }
-            let Some(n) = self.number(read, fragment) else {
-                continue;
-            };
-            if cites.iter().any(|cite| cite.n == n) {
-                continue;
-            }
-            let excerpt = self.sources[usize::from(n) - 1].excerpt.clone();
-            cites.push(Cite { n, excerpt });
-        }
-        cites
-    }
-
-    fn number(&mut self, read: &PageRead, fragment: u16) -> Option<u8> {
-        if let Some(index) = self.sources.iter().position(|s| s.fragment == fragment) {
-            return u8::try_from(index + 1).ok();
+    /// The number of `reference` in `read` of `tab` at `epoch`, numbering it
+    /// now if it is new; none when it cannot be cited.
+    pub fn cite(&mut self, reference: Ref, read: &PageRead, tab: &str, epoch: u64) -> Option<Cite> {
+        if let Some(source) = self.sources.iter().find(|s| s.reference == reference) {
+            return Some(source.cite.clone());
         }
         if self.sources.len() >= MAX_SOURCES {
             return None;
         }
-        let verbatim = read.fragments.get(&fragment)?.verbatim.as_deref()?;
+        let verbatim = read
+            .fragments
+            .get(&reference.passage)?
+            .verbatim
+            .as_deref()?;
         let shown = text::clean(verbatim);
         if shown.is_empty() {
             return None;
@@ -61,35 +59,45 @@ impl CitationBook {
         if highlight.is_empty() || highlight.chars().any(char::is_control) {
             return None;
         }
-        self.sources.push(Source {
-            fragment,
+        let cite = Cite {
+            n: u8::try_from(self.sources.len() + 1).ok()?,
             excerpt: text::bounded(&shown, PAGE_ASSIST_MAX_EXCERPT_CHARS),
+            tab: tab.to_owned(),
+            host: read.host.clone(),
+        };
+        self.sources.push(Source {
+            reference,
+            tab: tab.to_owned(),
+            epoch,
+            cite: cite.clone(),
             highlight: highlight.to_owned(),
         });
-        u8::try_from(self.sources.len()).ok()
+        Some(cite)
     }
 
-    /// The page's own words for chip `n`, to scroll to and mark.
-    pub fn highlight(&self, n: u8) -> Option<&str> {
+    /// Where cite `n` jumps.
+    pub fn jump(&self, n: u8) -> Option<Jump<'_>> {
         let index = usize::from(n).checked_sub(1)?;
-        self.sources
-            .get(index)
-            .map(|source| source.highlight.as_str())
+        self.sources.get(index).map(|source| Jump {
+            tab: &source.tab,
+            epoch: source.epoch,
+            highlight: &source.highlight,
+        })
     }
 
-    /// Sources numbered so far.
+    /// How many sources are numbered.
     pub fn len(&self) -> usize {
         self.sources.len()
     }
 
-    /// Whether nothing was cited.
+    /// Whether none are.
     pub fn is_empty(&self) -> bool {
         self.sources.is_empty()
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::page::{Fragment, PageTraits};
     use std::collections::BTreeMap;
@@ -97,6 +105,7 @@ mod tests {
     pub(crate) fn read(passages: &[(u16, Option<&str>)]) -> PageRead {
         PageRead {
             site: "example.com".into(),
+            host: "www.example.com".into(),
             title: None,
             payload: String::new(),
             fragments: passages
@@ -106,6 +115,7 @@ mod tests {
                         *id,
                         Fragment {
                             verbatim: text.map(str::to_owned),
+                            href: None,
                         },
                     )
                 })
@@ -113,6 +123,10 @@ mod tests {
             traits: PageTraits::default(),
             fingerprint: 1,
         }
+    }
+
+    fn at(passage: u16) -> Ref {
+        Ref { read: 0, passage }
     }
 
     #[test]
@@ -124,18 +138,20 @@ mod tests {
             (11, Some("  \u{202E}  ")),
         ]);
         let mut book = CitationBook::default();
-        let first = book.cite(&page, &[7, 3, 7, 99, 9, 11]);
+        assert_eq!(book.cite(at(7), &page, "t", 4).map(|c| c.n), Some(1));
+        assert_eq!(book.cite(at(99), &page, "t", 4), None);
+        assert_eq!(book.cite(at(9), &page, "t", 4), None);
+        assert_eq!(book.cite(at(11), &page, "t", 4), None);
+        assert_eq!(book.cite(at(3), &page, "t", 4).map(|c| c.n), Some(2));
+        assert_eq!(book.cite(at(7), &page, "t", 4).map(|c| c.n), Some(1));
+        let jump = book.jump(1).unwrap();
+        assert_eq!((jump.tab, jump.epoch), ("t", 4));
+        assert_eq!(jump.highlight, "Returns are free for 30 days.");
         assert_eq!(
-            first.iter().map(|c| c.n).collect::<Vec<_>>(),
-            vec![1, 2],
-            "unknown, unverbatim and blank passages are dropped"
+            book.cite(at(7), &page, "t", 4).unwrap().host,
+            "www.example.com"
         );
-        assert_eq!(first[0].excerpt, "Returns are free for 30 days.");
-        let second = book.cite(&page, &[3]);
-        assert_eq!(second[0].n, 2);
-        assert_eq!(book.highlight(1), Some("Returns are free for 30 days."));
-        assert_eq!(book.highlight(0), None);
-        assert_eq!(book.highlight(3), None);
+        assert!(book.jump(0).is_none() && book.jump(3).is_none());
     }
 
     #[test]
@@ -143,15 +159,15 @@ mod tests {
         let long = "word ".repeat(200);
         let page = read(&[(1, Some(long.as_str()))]);
         let mut book = CitationBook::default();
-        let cite = book.cite(&page, &[1]);
-        assert!(cite[0].excerpt.chars().count() <= PAGE_ASSIST_MAX_EXCERPT_CHARS);
-        let highlight = book.highlight(1).unwrap();
+        let cite = book.cite(at(1), &page, "t", 1).unwrap();
+        assert!(cite.excerpt.chars().count() <= PAGE_ASSIST_MAX_EXCERPT_CHARS);
+        let highlight = book.jump(1).unwrap().highlight;
         assert!(highlight.len() <= MAX_HIGHLIGHT_BYTES);
         assert!(long.starts_with(highlight));
     }
 
     #[test]
-    fn caps_hold() {
+    fn the_cap_holds() {
         let passages: Vec<(u16, Option<String>)> = (1..=40)
             .map(|i| (i, Some(format!("passage {i}"))))
             .collect();
@@ -159,10 +175,8 @@ mod tests {
             passages.iter().map(|(i, t)| (*i, t.as_deref())).collect();
         let page = read(&borrowed);
         let mut book = CitationBook::default();
-        let ids: Vec<u16> = (1..=40).collect();
-        assert_eq!(book.cite(&page, &ids).len(), MAX_CITES_PER_PART);
-        for chunk in ids.chunks(4) {
-            book.cite(&page, chunk);
+        for id in 1..=40 {
+            book.cite(at(id), &page, "t", 1);
         }
         assert_eq!(book.len(), MAX_SOURCES);
     }

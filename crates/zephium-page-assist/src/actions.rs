@@ -1,10 +1,10 @@
-//! Light page actions the model may propose, one per `>` line. The grammar
-//! is closed: a verb, a passage of the current read and, for typing and
-//! choosing, a quoted value. What each step may do is decided later by Rust
-//! from the live control, never from these words.
-use crate::ipc::PageAssistOfferV1 as Offer;
+//! Light page steps the model may ask for, through the `act` tool. The
+//! grammar is closed: a verb, a passage reference and, for typing and
+//! choosing, a value. What each step may do is decided later by Rust from
+//! the live control, never from these words.
+use crate::refs::{self, Ref};
 
-/// Most steps one turn may run.
+/// Most steps one call may run.
 pub const MAX_STEPS: usize = 8;
 /// Longest value a step may type or choose, in characters.
 pub const MAX_VALUE_CHARS: usize = 256;
@@ -30,6 +30,23 @@ pub enum Verb {
     Open,
 }
 
+impl Verb {
+    /// The verb a tool call names.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name.trim().to_ascii_lowercase().as_str() {
+            "click" | "press" => Self::Click,
+            "fill" | "type" => Self::Fill,
+            "select" | "choose" => Self::Select,
+            "check" => Self::Check,
+            "uncheck" => Self::Uncheck,
+            "scroll" => Self::Scroll,
+            "expand" => Self::Expand,
+            "open" => Self::Open,
+            _ => return None,
+        })
+    }
+}
+
 /// Where a scroll goes when it names no passage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -39,184 +56,104 @@ pub enum Direction {
     Down,
 }
 
-/// One proposed step.
+/// One asked-for step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Step {
     /// What it does.
     pub verb: Verb,
-    /// The passage it acts on, as `rN`.
-    pub target: Option<u16>,
+    /// The passage it acts on.
+    pub target: Option<Ref>,
     /// A page scroll with no passage.
     pub direction: Option<Direction>,
     /// What to type or choose.
     pub value: Option<String>,
 }
 
-/// One `>` line, understood.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Proposal {
-    /// A step on this page.
-    Step(Step),
-    /// The model judged the request too big for the panel.
-    Work,
-}
-
-/// Parses one action line; anything outside the grammar is refused.
-pub fn parse(line: &str) -> Option<Proposal> {
-    let line = line.trim();
-    let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let verb = verb.to_ascii_lowercase();
-    if verb == "work" {
-        return Some(Proposal::Work);
+/// One step from a tool call's fields; anything outside the grammar is none.
+pub fn step(verb: &str, target: Option<&str>, value: Option<&str>) -> Option<Step> {
+    let verb = Verb::parse(verb)?;
+    let value = value.filter(|value| !value.is_empty());
+    if let Some(value) = value {
+        if value.chars().any(char::is_control) || value.chars().count() > MAX_VALUE_CHARS {
+            return None;
+        }
     }
-    let verb = match verb.as_str() {
-        "click" | "press" => Verb::Click,
-        "fill" | "type" => Verb::Fill,
-        "select" | "choose" => Verb::Select,
-        "check" => Verb::Check,
-        "uncheck" => Verb::Uncheck,
-        "scroll" => Verb::Scroll,
-        "expand" => Verb::Expand,
-        "open" => Verb::Open,
-        _ => return None,
-    };
-    let rest = rest.trim();
     if verb == Verb::Scroll {
-        let direction = match rest.to_ascii_lowercase().as_str() {
-            "up" => Some(Direction::Up),
-            "down" => Some(Direction::Down),
+        let direction = match target.map(|t| t.trim().to_ascii_lowercase()).as_deref() {
+            Some("up") => Some(Direction::Up),
+            Some("down") | None => Some(Direction::Down),
             _ => None,
         };
         if direction.is_some() {
-            return Some(Proposal::Step(Step {
+            return Some(Step {
                 verb,
                 target: None,
                 direction,
                 value: None,
-            }));
+            });
         }
     }
-    let (target, rest) = rest.split_once(' ').unwrap_or((rest, ""));
-    let target = fragment(target)?;
-    let rest = rest.trim();
+    let target = refs::parse(target?)?;
     let value = match verb {
-        Verb::Fill | Verb::Select => Some(quoted(rest)?),
-        _ if rest.is_empty() => None,
+        Verb::Fill | Verb::Select => Some(value?.to_owned()),
+        _ if value.is_none() => None,
         _ => return None,
     };
-    Some(Proposal::Step(Step {
+    Some(Step {
         verb,
         target: Some(target),
         direction: None,
         value,
-    }))
-}
-
-fn fragment(token: &str) -> Option<u16> {
-    let digits = token
-        .strip_prefix("@r")
-        .or_else(|| token.strip_prefix('r'))?;
-    if digits.is_empty()
-        || digits.len() > 5
-        || (digits.len() > 1 && digits.starts_with('0'))
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return None;
-    }
-    digits.parse::<u16>().ok().filter(|id| *id > 0)
-}
-
-fn quoted(text: &str) -> Option<String> {
-    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
-    if inner.contains('"')
-        || inner.chars().any(char::is_control)
-        || inner.chars().count() > MAX_VALUE_CHARS
-    {
-        return None;
-    }
-    Some(inner.to_owned())
-}
-
-/// The steps of a turn, or the reason to offer Work instead.
-pub fn plan(proposals: &[Proposal]) -> Result<Vec<Step>, Offer> {
-    if proposals.iter().any(|p| matches!(p, Proposal::Work)) {
-        return Err(Offer::Complex);
-    }
-    let steps: Vec<Step> = proposals
-        .iter()
-        .filter_map(|proposal| match proposal {
-            Proposal::Step(step) => Some(step.clone()),
-            Proposal::Work => None,
-        })
-        .collect();
-    if steps.len() > MAX_STEPS {
-        return Err(Offer::Complex);
-    }
-    Ok(steps)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn step(verb: Verb, target: u16, value: Option<&str>) -> Option<Proposal> {
-        Some(Proposal::Step(Step {
-            verb,
-            target: Some(target),
-            direction: None,
-            value: value.map(str::to_owned),
-        }))
+    fn at(passage: u16) -> Option<Ref> {
+        Some(Ref { read: 0, passage })
     }
 
     #[test]
-    fn grammar_is_closed() {
-        let cases = [
-            ("click r5", step(Verb::Click, 5, None)),
-            ("Press @r12", step(Verb::Click, 12, None)),
-            (
-                "fill r3 \"Ada Lovelace\"",
-                step(Verb::Fill, 3, Some("Ada Lovelace")),
-            ),
-            (
-                "select r9 \"Price: low to high\"",
-                step(Verb::Select, 9, Some("Price: low to high")),
-            ),
-            ("expand r2", step(Verb::Expand, 2, None)),
-            ("open r40", step(Verb::Open, 40, None)),
-            ("check r1", step(Verb::Check, 1, None)),
-            (
-                "scroll down",
-                Some(Proposal::Step(Step {
-                    verb: Verb::Scroll,
-                    target: None,
-                    direction: Some(Direction::Down),
-                    value: None,
-                })),
-            ),
-            ("work", Some(Proposal::Work)),
-            ("click", None),
-            ("click r0", None),
-            ("click #submit", None),
-            ("click r5 now", None),
-            ("fill r3 unquoted", None),
-            ("fill r3 \"has \" quote\"", None),
-            ("fill r3", None),
-            ("navigate https://evil.example", None),
-            ("eval r1", None),
-            ("submit r1", None),
-        ];
-        for (line, expected) in cases {
-            assert_eq!(parse(line), expected, "{line}");
+    fn the_grammar_is_closed() {
+        let fill = step("fill", Some("a3"), Some("Ada Lovelace")).unwrap();
+        assert_eq!(
+            (fill.verb, fill.target, fill.value.as_deref()),
+            (Verb::Fill, at(3), Some("Ada Lovelace"))
+        );
+        assert_eq!(step("Press", Some("@a12"), None).unwrap().verb, Verb::Click);
+        let down = step("scroll", None, None).unwrap();
+        assert_eq!((down.target, down.direction), (None, Some(Direction::Down)));
+        assert_eq!(
+            step("scroll", Some("up"), None).unwrap().direction,
+            Some(Direction::Up)
+        );
+        assert_eq!(
+            step("scroll", Some("b7"), None).unwrap().target,
+            Some(Ref {
+                read: 1,
+                passage: 7
+            })
+        );
+        for (verb, target, value) in [
+            ("click", None, None),
+            ("click", Some("a0"), None),
+            ("click", Some("#submit"), None),
+            ("click", Some("a5"), Some("now")),
+            ("fill", Some("a3"), None),
+            ("fill", Some("a3"), Some("line\nbreak")),
+            ("navigate", Some("https://evil.example"), None),
+            ("eval", Some("a1"), None),
+            ("submit", Some("a1"), None),
+        ] {
+            assert_eq!(
+                step(verb, target, value),
+                None,
+                "{verb} {target:?} {value:?}"
+            );
         }
-        let long = format!("fill r1 \"{}\"", "a".repeat(MAX_VALUE_CHARS + 1));
-        assert_eq!(parse(&long), None);
-    }
-
-    #[test]
-    fn plans_cap_at_eight_steps_and_honour_work() {
-        let click = parse("click r1").unwrap();
-        assert_eq!(plan(&vec![click.clone(); 8]).map(|s| s.len()), Ok(8));
-        assert_eq!(plan(&vec![click.clone(); 9]), Err(Offer::Complex));
-        assert_eq!(plan(&[click, Proposal::Work]), Err(Offer::Complex));
+        let long = "a".repeat(MAX_VALUE_CHARS + 1);
+        assert_eq!(step("fill", Some("a1"), Some(&long)), None);
     }
 }

@@ -24,7 +24,10 @@ pub fn clean(text: &str) -> String {
             space = !output.is_empty();
             continue;
         }
-        if invisible(character) {
+        if invisible(character)
+            || character == crate::ipc::PAGE_ASSIST_CITE_OPEN
+            || character == crate::ipc::PAGE_ASSIST_CITE_CLOSE
+        {
             continue;
         }
         if space {

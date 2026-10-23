@@ -34,6 +34,28 @@ pub fn usd(micros: u64) -> String {
     decimal((micros + divisor / 2) / divisor, places)
 }
 
+fn hundredths(credits: &str) -> Option<u128> {
+    let (whole, fraction) = credits.split_once('.').unwrap_or((credits, ""));
+    if whole.is_empty()
+        || whole.len() > 18
+        || fraction.len() > 6
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let micro: u128 = format!("{fraction:0<6}").parse().ok()?;
+    Some(whole.parse::<u128>().ok()? * 100 + micro.div_ceil(10_000))
+}
+
+/// The sum of two credit amounts as shown, in hundredths.
+pub fn add_credits(total: Option<&str>, more: &str) -> Option<String> {
+    let sum = total.map_or(Some(0), hundredths)? + hundredths(more)?;
+    Some(decimal(sum, 2))
+}
+
 /// `value / 10^places`, trailing zeros trimmed.
 fn decimal(value: u128, places: u32) -> String {
     let scale = 10u128.pow(places);
@@ -61,6 +83,15 @@ pub fn estimate_micros(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credits_add_up_as_shown() {
+        assert_eq!(add_credits(None, "0.3").as_deref(), Some("0.3"));
+        assert_eq!(add_credits(Some("0.3"), "1.25").as_deref(), Some("1.55"));
+        assert_eq!(add_credits(Some("2"), "0.001").as_deref(), Some("2.01"));
+        assert_eq!(add_credits(Some("x"), "1"), None);
+        assert_eq!(add_credits(None, "-1"), None);
+    }
 
     #[test]
     fn credits_round_up_and_read_naturally() {

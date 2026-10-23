@@ -1,6 +1,6 @@
-//! The Ask panel's pure core: what is asked, how the page is framed for the
-//! model, how the answer is parsed, checked and paced, what each tab's thread
-//! holds, and which page styles are admitted.
+//! The assistant's pure core: how pages are framed for the model, how streamed text
+//! is cited and paced, what a conversation holds, and which page styles and
+//! steps are admitted.
 //!
 //! No I/O, clocks, threads, async runtimes or logging. Time arrives as
 //! milliseconds from the caller; page text arrives already read and is only
@@ -16,7 +16,7 @@
 
 pub mod actions;
 pub mod citations;
-pub mod complexity;
+pub mod conversation;
 pub mod cost;
 pub mod css;
 #[cfg(test)]
@@ -27,9 +27,9 @@ pub mod pacer;
 pub mod page;
 pub mod policy;
 pub mod prompt;
-pub mod protocol;
+pub mod refs;
+pub mod stream;
 pub mod suggest;
 pub mod text;
-pub mod thread;
 
 pub use zephium_ipc::page_assist as ipc;

@@ -298,11 +298,7 @@ mod tests {
     use super::*;
     use crate::css::{self, Rejection};
     use crate::guard;
-    use crate::page::{PageRead, PageTraits};
-    use crate::prompt::{self, Message, Turn};
-    use std::collections::BTreeMap;
-
-    use crate::ipc::PageAssistIntentV1 as Intent;
+    use crate::prompt;
 
     #[test]
     fn realistic_outlines_survive_admission_whole() {
@@ -322,38 +318,11 @@ mod tests {
     }
 
     #[test]
-    fn style_prompts_carry_the_outline_after_the_page_and_before_the_request() {
-        let read = PageRead {
-            site: "example.org".into(),
-            title: Some("Example".into()),
-            payload: "ZREAD3".into(),
-            fragments: BTreeMap::new(),
-            traits: PageTraits::default(),
-            fingerprint: 1,
-        };
+    fn outline_blocks_stay_cheap_and_name_the_scheme_and_main() {
         for fixture in all() {
-            let rendered = fixture.outline.render();
+            let rendered = prompt::outline_block(&fixture.outline);
             assert!(rendered.len() < 2_600, "{}: stays cheap", fixture.name);
-            let prompt = prompt::build(&Turn {
-                intent: Intent::Style,
-                suggestion: None,
-                question: "Redesign this page for me",
-                selection: None,
-                page: &read,
-                history: &[],
-                outline: Some(&fixture.outline),
-            });
-            let Some(Message::User(parts)) = prompt.messages.last() else {
-                panic!("user message");
-            };
-            assert_eq!(parts.len(), 2);
-            assert!(parts[0].starts_with("<<<PAGE"));
-            assert_eq!(
-                parts[1],
-                format!("{rendered}\nSTYLE Redesign this page for me"),
-                "{}",
-                fixture.name
-            );
+            assert!(rendered.starts_with("<<<OUTLINE"));
             assert!(rendered.contains(if fixture.outline.dark {
                 "scheme: dark"
             } else {
