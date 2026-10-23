@@ -1,8 +1,8 @@
 import { fileURLToPath } from "node:url";
 import type { UserConfig } from "vite";
-import { alias } from "./aliases";
-import { i18nLocales } from "./i18n-locales";
-import { bootstrapReport, type Page } from "./bootstrap-report";
+import { alias } from "./aliases.ts";
+import { i18nLocales } from "./i18n-locales.ts";
+import { bootstrapReport, type Page } from "./bootstrap-report.ts";
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
@@ -72,6 +72,13 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
                 test: /[\\/]src[\\/]shared[\\/]i18n[\\/]/u,
                 entriesAware: true,
                 entriesAwareMergeThreshold: 0,
+              },
+              {
+                // The icon package ships one module per icon; unbundled, the
+                // startup icons would each add a request at launch.
+                name: "icons",
+                test: /[\\/]@hugeicons[\\/]core-free-icons[\\/]/u,
+                tags: ["$initial"],
               },
               {
                 name: "ui-core",

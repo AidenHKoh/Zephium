@@ -18,12 +18,16 @@
   import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
+  import { closeOnMiddleClick } from "../lib/middle-click";
 
   let {
     entries,
+    closable = new Set<string>(),
     onSelect,
   }: {
     entries: TabView[];
+    /** Tabs the expanded list shows a close button for. */
+    closable?: ReadonlySet<string>;
     onSelect: (id: string) => void;
   } = $props();
 
@@ -158,6 +162,7 @@
               onpointerup={(event) => drag.up(event)}
               onpointercancel={(event) => drag.cancel(event)}
               onclick={() => !drag.swallowClick() && onSelect(tab.id)}
+              {...closable.has(tab.id) ? closeOnMiddleClick(() => tabs.close(tab.id)) : {}}
             >
               <FavIcon
                 image={favicons.image(tab.icon)}

@@ -3,9 +3,9 @@ import { defineConfig } from "vitest/config";
 import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { alias } from "./aliases";
-import { i18nLocales } from "./i18n-locales";
-import { benchPhotos, webkitFootprint } from "./vitest.bench-commands";
+import { alias } from "./aliases.ts";
+import { i18nLocales } from "./i18n-locales.ts";
+import { benchPhotos, webkitFootprint } from "./vitest.bench-commands.ts";
 
 export default defineConfig({
   test: {
@@ -51,7 +51,7 @@ export default defineConfig({
             "@tiptap/pm/state",
             "@tiptap/pm/view",
             "marked",
-            "@hugeicons/core-free-icons/*",
+            "@hugeicons/core-free-icons",
           ],
         },
         test: {

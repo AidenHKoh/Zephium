@@ -357,6 +357,43 @@ fn a_new_tab_asked_for_from_settings_over_a_page_is_the_new_tab() {
 }
 
 #[test]
+fn tab_close_command_closes_extensions_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    assert_ne!(extensions, web);
+
+    let _disposition = shell.operation_run_command("tab.close");
+    assert_eq!(active_id(&screen), web);
+    assert!(shell.items.tab(extensions).is_none());
+}
+
+#[test]
+fn tab_close_on_a_window_page_closes_the_page_not_the_tab_behind_it() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let web = active_id(&screen);
+    shell.handle_operation(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    assert_eq!(
+        shell.active_browser_page(),
+        Some(crate::BrowserPage::Settings)
+    );
+
+    let before = engine.calls();
+    let _disposition = shell.operation_run_command("nav.reload");
+    assert_eq!(engine.calls(), before);
+
+    let _disposition = shell.operation_run_command("tab.close");
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(shell.items.tab(web).is_some());
+    assert_eq!(active_id(&screen), web);
+}
+
+#[test]
 fn trusted_extension_page_closure_removes_only_matching_typed_marker() {
     use zephium_core::item::TabContent;
 
