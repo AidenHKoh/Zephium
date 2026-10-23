@@ -272,7 +272,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         split("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
         Group::Window,
     ),
-    command("tool.ai", "Ask", Keys::same("CmdOrCtrl+E"), Group::Window),
+    command("tool.ai", "Ask Zephium", Keys::same("CmdOrCtrl+E"), Group::Window),
     command(
         "tool.tasks",
         "Tasks",

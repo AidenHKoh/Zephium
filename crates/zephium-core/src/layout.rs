@@ -36,7 +36,7 @@ impl Default for Metrics {
 /// check and then get silently widened back by the actor, so the chrome and
 /// the content region disagreed about where the sidebar ended.
 pub const MIN_SIDEBAR_WIDTH: f64 = 56.0;
-pub const MAX_SIDEBAR_WIDTH: f64 = 420.0;
+pub const MAX_SIDEBAR_WIDTH: f64 = 460.0;
 
 pub fn clamp_sidebar_width(width: f64) -> f64 {
     if !width.is_finite() {
