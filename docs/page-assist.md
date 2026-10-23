@@ -1,26 +1,31 @@
-# Ask panel (page assist): Rust state and reader handoff
+# The sidebar assistant (page assist): design as built
 
-Status as of 2026-10-22, branch `feat/work-production`.
+Status as of 2026-10-23, branch `feat/work-production`. The assistant is named **Zephium** in the product ("Ask Zephium…"); the code keeps the subsystem name `page_assist`. It replaced the one-shot Ask panel of 2026-10-22.
 
-## What exists
+## Shape
 
-| Piece | Where | State |
-|---|---|---|
-| IPC contract | `crates/zephium-ipc/src/page_assist.rs`, `desktop/src/page_assist.rs` | Complete; bindings generated. |
-| Pure core | `crates/zephium-page-assist` | Prompt layout (fixed system text, fenced untrusted page and selection blocks, page-first layout for prompt caching), line-protocol parser, citation numbering with verbatim highlight text, pacer, refusal policy, per-tab threads (24 turns, 64 tabs LRU, same-site vs cross-site context), summary cache, cost display, action grammar and 8-step plan, up-front "Run in Work" detection, CSS validator, page outline (`outline.rs`: hostile-data admission and the fenced `<<<OUTLINE` block of style turns) and sheet guard (`guard.rs`: drops declarations that hide Main/Article/Navigation regions or `html`/`body`/`main`/`article`/`nav`, and corrects text colours under 4.5:1 against a background in the same rule). Boundary: `cargo xtask check-page-assist-boundary`. |
-| Service | `crates/zephium-work-composition/src/page_assist/` | Turn lifecycle, model call through `resolve_entry_for(…, Page, Some(WorkCallSource::Page{tab, turn}))`, streaming parse and pacing, cancellation (Stop, navigation, tab close, AI off), fault mapping with retry hints, cost (hosted settled later, BYOK priced or estimated, local free), steps under a lease with confirm for Commit and pause on human input, page styles applied only after Apply. 20 tests including a loopback SSE provider. |
-| Page-style caps | `page_assist::MAX_SITE_STYLES` (8), `MAX_SITE_CSS_BYTES` (48 KiB) | Past either cap a style turn ends with `style.state = full` before any request; storage refuses a row over 60 KiB without writing. |
-| Desktop wiring | `desktop/src/page_assist.rs`, hooks in `desktop/src/lib.rs` and `desktop/src/account.rs` | Commands call the service; tabs followed from `Projection::Items`/`Projection::Tab`; AI off ends every thread; styles persist per profile and site in app settings (validated again on load); hosted charges reach the answer when the receipt settles. |
-| Page-style slot | `crates/zephium-engine/src/host/content_styles.rs`, `content_style.js` | `Engine::set_page_style(profile, site, css)`; delivered as the `page-style` adopted sheet after `personal`, matched by registrable site including subdomains. |
-| Human-wall survey | `platform/macos/semantic_runtime.rs` | Runs as the closed `H1:survey` pull of the installed runtime; no `evaluateJavaScript` remains in that file. |
-| Browse reader | `crates/zephium-engine/src/page_reader.rs` (types, read projection), `platform/page_recipe.rs` and `page_reader_recipes.js` (closed recipes), `platform/macos/browse_reader.rs`, `platform/windows/browse_reader.rs`, `host/page_reader.rs` | Reads, selection, mark and outline on macOS (qualified headlessly) and Windows (compiled; physical verification pending). `DesktopPage::supported()` is true on both. Boundary: `cargo xtask check-page-reader-boundary`. Probe: `cargo run -p zephium-engine --features page-reader-probe --bin macos-page-reader-probe [-- --measure [--article URL]]`. |
+- **One conversation per Space** that follows the person across tabs. The page in front is an attachment (a chip), not the conversation's owner. Conversations persist per profile in the profile store (`Store::{chats, chat, save_chat, delete_chat, clear_chats}`, 200 per profile, cleared with browsing data, never in private windows) and reopen from history.
+- **One streamed model loop per message** (`zephium-work-composition/src/page_assist/agent.rs`) on `LeadClient` through `resolve_entry_for(…, Page, WorkCallSource::Page{conversation, reply})`, at the person's global effort. Up to 8 calls and 16 tool calls per reply, 90 s per call. Text streams as markdown, coalesced to one delivery per 50 ms; `[a12]` references become cite marks `⟦n⟧` as they stream (`core::stream`).
+- **Tools** (`tools.rs`): `list_tabs`, `read_page`, `show_items` (cards + numbered marks), `open_tabs`, `act` (light steps), `inspect_style`, `restyle`, `hand_off`. Every argument is the model's words; the service admits each against the reply's own reads.
+- **Contract**: `crates/zephium-ipc/src/page_assist.rs` (status, ask, blocks, events with `seq`), commands in `desktop/src/page_assist.rs`.
 
-## What is not done
+## Security rules
 
-1. **Windows reader and steps on a real machine.** They compile and their CDP calls are unit-tested; the physical checks are not yet run.
-5. **"Run in Work"** is wired: `desktop/src/page_assist.rs` (`handoff`) creates a Work environment in the tab's Space, adds the tab (`WorkEnvironmentReference::Browser`) and the new objective, and begins a run through `work_product::admit_run` with the panel's own grant and limits (pinned against `frame/src/domain/work/work-model.ts` by a test). A tab not yet listed in a Space cannot be handed off.
-6. **Tab close** is read from the shell's Items projection: a tab its profile and Space listed before and no longer list ends its thread and cancels its turn. A tab moved to another Space is treated the same way.
-7. **Security fixture** for the survey change itself is not written; the reader's probe covers the same pull mechanism (activation and popups stay blocked while the page watches).
+- Page, selection, element and outline text, and every tool result, are fenced untrusted data (`core::prompt::fence`); page text cannot forge cite marks (`text::clean` drops them).
+- `open_tabs` opens only addresses that a read in this conversation produced (link `href` from the reader, `http(s)` only) or that the person wrote; at most 8, in the background, never focused.
+- Item URLs and marks come from read passages only, never from model text. Other tabs are read only by handle, never sensitive sites, never private windows.
+- Steps keep their rules: protected fields and cross-site links refused, Commit steps wait for the person's confirm, human input pauses them (lease).
+- Styles are CSS only, validated (`core::css`) and guarded (`core::guard`), applied only after Apply. Layout properties are allowed (flex, grid tracks, order, table parts as blocks); `content` holds only `""`, counters and a fixed separator set — free text, `attr()`, `url()` and `:has()` are refused.
+- `hand_off` is a preview card: nothing runs until "Continue in Work". Work gets the title, summary, the conversation (bounded) and the tabs as context.
+
+## Page layer (engine)
+
+Reads carry link targets; marks are numbered badges and item outlines in one closed, top-layer overlay positioned against the initial containing block (no script per document scroll); the picker is shared with the blocker (`host/picker_kit.js`) and runs in the reader's private world for the assistant. Probe: `macos-page-reader-probe --assist`. Reads use the bounded extraction budget (256 items, 48 KiB) so a whole listing page fits.
+
+## Not done
+
+1. Windows reader, marks, picks and steps on a real machine (compiled, not run).
+2. A live run of the launch-video script on the real app.
 
 ## Reader: chosen design
 
