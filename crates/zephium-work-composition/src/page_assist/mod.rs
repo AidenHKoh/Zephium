@@ -68,6 +68,8 @@ pub struct Ports {
     pub styles: Arc<dyn StyleStore>,
     /// Conversation persistence.
     pub conversations: Arc<dyn ConversationStore>,
+    /// The app's log.
+    pub diagnostics: Arc<dyn Diagnostics>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +215,15 @@ fn host_of(url: &str) -> String {
     host.strip_prefix("www.")
         .unwrap_or(host)
         .to_ascii_lowercase()
+}
+
+/// The sidebar answers while the person waits: the person's effort, held at
+/// high at most.
+pub(crate) fn sidebar_effort(effort: WorkModelReasoning) -> WorkModelReasoning {
+    match effort {
+        WorkModelReasoning::XHigh | WorkModelReasoning::Max => WorkModelReasoning::High,
+        effort => effort,
+    }
 }
 
 fn effort_name(effort: WorkModelReasoning) -> &'static str {
@@ -458,7 +469,10 @@ impl PageAssist {
                 hosted: choice.entry.model.provider
                     == zephium_core::work::model::WorkModelProvider::Cloud,
                 name: choice.entry.display_name,
-                effort: choice.effort.map(|effort| effort_name(effort).to_owned()),
+                effort: choice
+                    .effort
+                    .filter(|_| choice.entry.supports.reasoning)
+                    .map(|effort| effort_name(sidebar_effort(effort)).to_owned()),
             });
         let (Some(tab), Some(facts), PageAssistAvailabilityV1::Ready) = (tab, facts, availability)
         else {

@@ -264,6 +264,20 @@ pub enum PageAssistStepStateV1 {
     Skipped,
 }
 
+/// Why a step did not run or did not take.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAssistStepReasonV1 {
+    /// A password, card or code field, or a link to another site.
+    Refused,
+    /// What it names is not a control this step can use.
+    Unsuitable,
+    /// The page changed before it ran.
+    PageChanged,
+    /// It ran, but the page did not change as expected.
+    NoEffect,
+}
+
 /// One step of a light page action.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(deny_unknown_fields)]
@@ -275,6 +289,8 @@ pub struct PageAssistStepV1 {
     /// Set when the step commits something and so needs the person's confirm.
     pub category: Option<WorkConfirmCategoryV1>,
     pub state: PageAssistStepStateV1,
+    /// Set when `state` is `failed`.
+    pub reason: Option<PageAssistStepReasonV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]

@@ -43,6 +43,14 @@ fn kind(role: Role) -> &'static str {
     }
 }
 
+/// A control the person can use, kept in a read even without a name.
+fn control(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Field(_) | Role::Button | Role::Select | Role::Checkbox { .. }
+    )
+}
+
 fn quoted(value: &str, limit: usize) -> String {
     text::bounded(&text::clean(value), limit).replace('"', "'")
 }
@@ -157,7 +165,10 @@ pub(crate) fn page_read(
         let lines: Vec<(u16, String)> = readout
             .passages
             .iter()
-            .filter(|passage| passage.region <= keep_region && !passage.text.trim().is_empty())
+            .filter(|passage| {
+                passage.region <= keep_region
+                    && (!passage.text.trim().is_empty() || control(passage.role))
+            })
             .map(|passage| (passage.id, line(letters, passage, secret)))
             .collect();
         let size: usize = lines.iter().map(|(_, line)| line.len() + 1).sum();

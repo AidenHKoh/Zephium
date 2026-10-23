@@ -246,6 +246,26 @@ pub trait PagePort: Send + Sync {
     fn pick_clear(&self, tab: &str, pick: u64);
     /// Ends a pick in progress.
     fn pick_cancel(&self, tab: &str);
+    /// Shows on the tab that the assistant is working there.
+    fn glow(&self, tab: &str, glow: Glow);
+}
+
+/// The light along a tab's edges while the assistant works on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Glow {
+    /// Nothing.
+    Off,
+    /// Steps are running.
+    Working,
+    /// The person took over; the steps wait.
+    Paused,
+}
+
+/// Closed facts about replies for the app's log: counts, names and closed
+/// reasons only, never page or model text.
+pub trait Diagnostics: Send + Sync {
+    /// One fact.
+    fn note(&self, fact: std::fmt::Arguments<'_>);
 }
 
 /// An element the person picked.

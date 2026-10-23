@@ -7,9 +7,10 @@
 use zephium_agentic::{
     ContextNavigationTarget, SemanticActionBatch, SemanticActionBatchId, SemanticActionIntent,
     SemanticActionKind, SemanticActionProposal, SemanticActionText, SemanticEffectClass,
-    SemanticFrameJoin, SemanticNode, SemanticObservation, SemanticReferenceId, SemanticRole,
-    SemanticScrollAmount, SemanticScrollDirection, SemanticSensitivity, SemanticSettleBudget,
-    SemanticSnapshot, SemanticState, SemanticVerification, SemanticWaitCondition,
+    SemanticFrameJoin, SemanticNode, SemanticObservation, SemanticPressKey, SemanticReferenceId,
+    SemanticRole, SemanticScrollAmount, SemanticScrollDirection, SemanticSensitivity,
+    SemanticSettleBudget, SemanticSnapshot, SemanticState, SemanticVerification,
+    SemanticWaitCondition,
 };
 use zephium_ipc::page_assist::WorkConfirmCategoryV1;
 use zephium_page_assist::actions::{Direction, Verb};
@@ -236,6 +237,22 @@ pub fn plan(
                 format!("Type into \"{label}\""),
             )
         }
+        Verb::Submit
+            if matches!(
+                role,
+                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
+            ) =>
+        {
+            (
+                SemanticActionIntent::Press {
+                    target,
+                    key: SemanticPressKey::Enter,
+                },
+                SemanticActionKind::Press,
+                SemanticVerification::PageChanged,
+                format!("Press Return in \"{label}\""),
+            )
+        }
         Verb::Select if matches!(role, SemanticRole::Combobox | SemanticRole::Listbox) => {
             let value = step.value.as_deref().ok_or(StepFailure::Unsuitable)?;
             let choice = option(snapshot, node, value).ok_or(StepFailure::Unsuitable)?;
@@ -261,7 +278,8 @@ pub fn plan(
         ),
         _ => return Err(StepFailure::Unsuitable),
     };
-    let (effect, class) = match classify(kind, None, node, snapshot) {
+    let key = (kind == SemanticActionKind::Press).then_some(SemanticPressKey::Enter);
+    let (effect, class) = match classify(kind, key, node, snapshot) {
         SiteEffect::Read => (StepEffect::Read, SemanticEffectClass::Read),
         SiteEffect::Draft => (StepEffect::Draft, SemanticEffectClass::LocalWrite),
         SiteEffect::Commit(consequence) => (

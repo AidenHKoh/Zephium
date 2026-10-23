@@ -607,6 +607,15 @@ mod product {
                 self.engine.page_pick_cancel(item);
             }
         }
+        fn glow(&self, _tab: &str, _glow: Glow) {}
+    }
+
+    /// Closed facts about replies, into the app's diagnostic log.
+    struct Log;
+    impl Diagnostics for Log {
+        fn note(&self, fact: std::fmt::Arguments<'_>) {
+            super::super::work_provider::record_diagnostic(fact);
+        }
     }
 
     /// Longest a pick may wait for the person; the page ends it sooner when idle.
@@ -1054,6 +1063,7 @@ mod product {
             work: Arc::new(DesktopHandoff(app.clone())),
             styles: Arc::new(SettingStyles(store.clone())),
             conversations: Arc::new(Chats(store)),
+            diagnostics: Arc::new(Log),
         });
         let _ = SERVICE.set(service);
     }

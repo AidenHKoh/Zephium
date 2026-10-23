@@ -11,6 +11,7 @@ use zephium_core::work::model::{
 };
 
 use super::*;
+use zephium_page_assist::actions::Verb;
 
 const TAB: &str = "tab-1";
 const SPACE: &str = "space-1";
@@ -34,6 +35,7 @@ struct PageState {
     reads: u64,
     picks: Vec<Pick>,
     outline: Option<Outline>,
+    glows: Vec<(String, Glow)>,
 }
 
 #[derive(Default)]
@@ -144,6 +146,17 @@ impl PagePort for FakePage {
     }
     fn pick_clear(&self, _tab: &str, _pick: u64) {}
     fn pick_cancel(&self, _tab: &str) {}
+    fn glow(&self, tab: &str, glow: Glow) {
+        self.lock().glows.push((tab.to_owned(), glow));
+    }
+}
+
+#[derive(Default)]
+struct Notes(Mutex<Vec<String>>);
+impl Diagnostics for Notes {
+    fn note(&self, fact: std::fmt::Arguments<'_>) {
+        self.0.lock().unwrap().push(fact.to_string());
+    }
 }
 
 /// One scripted model call: text deltas, then tool calls or the end.
@@ -153,6 +166,7 @@ struct Turn {
     tools: Vec<(String, Value)>,
     hang: bool,
     error: Option<WorkModelError>,
+    exhausted: bool,
 }
 
 fn say(text: &str) -> Turn {
@@ -217,7 +231,9 @@ impl WorkModelClient for FakeClient {
                 }));
             }
             Ok(WorkModelOutcome {
-                stop: if turn.tools.is_empty() {
+                stop: if turn.exhausted {
+                    WorkModelStop::MaxTokens
+                } else if turn.tools.is_empty() {
                     WorkModelStop::EndTurn
                 } else {
                     WorkModelStop::ToolUse
@@ -283,7 +299,7 @@ impl ModelSource for FakeModels {
         Box::pin(async move {
             Ok(ResolvedModel {
                 entry,
-                effort: Some(WorkModelReasoning::High),
+                effort: Some(WorkModelReasoning::XHigh),
                 client,
             })
         })
@@ -431,6 +447,7 @@ impl ConversationStore for Store {
 }
 
 struct Harness {
+    notes: Arc<Notes>,
     service: PageAssist,
     page: Arc<FakePage>,
     client: Arc<FakeClient>,
@@ -545,6 +562,7 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
     let work = Arc::new(FakeWork::default());
     let store = Arc::new(Store::default());
     let styles = Arc::new(Styles::default());
+    let notes = Arc::new(Notes::default());
     let service = PageAssist::new(Ports {
         page: page.clone(),
         tabs: tabs.clone(),
@@ -558,8 +576,10 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
         work: work.clone(),
         styles: styles.clone(),
         conversations: store.clone(),
+        diagnostics: notes.clone(),
     });
     Harness {
+        notes,
         service,
         page,
         client,
@@ -726,7 +746,15 @@ async fn an_answer_streams_with_cites_from_the_page_and_is_stored() {
         "text is coalesced, not one event per token"
     );
     let request = &h.requests()[0];
-    assert_eq!(request.reasoning, Some(WorkModelReasoning::High));
+    assert_eq!(
+        request.reasoning,
+        Some(WorkModelReasoning::High),
+        "the sidebar holds effort at high"
+    );
+    assert!(
+        request.max_output_tokens >= 8_000,
+        "room to think and still write"
+    );
     assert_eq!(request.tools.len(), 8);
     assert!(h
         .request_text(0)
@@ -1192,4 +1220,110 @@ async fn a_picked_element_travels_as_its_own_block() {
         !h.service.detach(TAB, &picked.pick),
         "a sent element is no longer attached"
     );
+}
+
+#[tokio::test]
+async fn a_reply_that_spends_its_budget_thinking_says_so() {
+    let h = harness(vec![Turn {
+        exhausted: true,
+        ..Turn::default()
+    }]);
+    h.ask("Redesign this site", true).await.unwrap();
+    h.settle().await;
+    let PageAssistMessageV1::Reply { fault, .. } = h.reply().await else {
+        panic!()
+    };
+    assert_eq!(fault, Some(PageAssistFaultV1::TooLong));
+}
+
+#[tokio::test]
+async fn an_unnamed_search_box_is_read_typed_into_and_submitted_under_a_glow() {
+    let h = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Terax"}, {"verb": "submit", "ref": "a7"}]}),
+        ),
+        say("Searched for Terax."),
+    ]);
+    {
+        let mut page = h.page.lock();
+        page.readouts.get_mut(TAB).unwrap().passages.push(passage(
+            7,
+            Role::Field(FieldKind::Search),
+            "",
+        ));
+        page.steps.insert(
+            7,
+            ResolvedStep {
+                label: "Search".into(),
+                effect: StepEffect::Draft,
+            },
+        );
+    }
+    h.ask("Write Terax in the search", true).await.unwrap();
+    h.settle().await;
+    assert!(
+        h.request_text(0).contains("@a7 field:search \"\""),
+        "an unnamed field is still read"
+    );
+    let acted = h.page.lock().acted.clone();
+    assert_eq!(
+        acted.iter().map(|step| step.verb).collect::<Vec<_>>(),
+        vec![Verb::Fill, Verb::Submit]
+    );
+    assert_eq!(
+        h.page.lock().glows,
+        vec![(TAB.to_owned(), Glow::Working), (TAB.to_owned(), Glow::Off)]
+    );
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert!(steps
+        .iter()
+        .all(|step| step.state == PageAssistStepStateV1::Done));
+}
+
+#[tokio::test]
+async fn a_failed_step_says_why_and_names_its_target() {
+    let h = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a1", "value": "x"}]}),
+        ),
+        say("Could not."),
+    ]);
+    h.ask("Type x", true).await.unwrap();
+    h.settle().await;
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert_eq!(steps[0].state, PageAssistStepStateV1::Failed);
+    assert_eq!(steps[0].reason, Some(PageAssistStepReasonV1::Refused));
+    assert!(
+        steps[0].label.starts_with("Type “x” into “eMudhra"),
+        "{}",
+        steps[0].label
+    );
+    let (result, _) = h.tool_result(1);
+    assert!(result.contains("refused"), "{result}");
+}
+
+#[tokio::test]
+async fn the_log_carries_counts_and_names_never_page_or_model_text() {
+    let h = harness(vec![
+        tool(
+            "show_items",
+            json!({"items": [{"ref": "a1", "title": "eMudhra"}]}),
+        ),
+        say("One stands out."),
+    ]);
+    h.ask("What's worth reading?", true).await.unwrap();
+    h.settle().await;
+    let notes = h.notes.0.lock().unwrap().join("\n");
+    assert!(notes.contains("start model=test/model"));
+    assert!(notes.contains("tool name=show_items ok=true"));
+    assert!(notes.contains("end done"));
+    for secret in ["eMudhra", "stands out", "worth reading", PASSWORD] {
+        assert!(!notes.contains(secret), "{secret} leaked into the log");
+    }
 }

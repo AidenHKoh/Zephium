@@ -22,7 +22,8 @@ use zephium_page_assist::stream::CiteRewriter;
 use zephium_page_assist::{css, guard, prompt, suggest, text};
 
 use super::port::{
-    BringRequest, ReadFailure, ResolvedModel, Role, StepEffect, StepFailure, StepRequest, WorkStart,
+    BringRequest, Glow, ReadFailure, ResolvedModel, Role, StepEffect, StepFailure, StepRequest,
+    WorkStart,
 };
 use super::tools::{self, Call, ItemCall};
 use super::{
@@ -93,6 +94,13 @@ type ToolOutcome = Result<String, String>;
 impl Reply {
     fn apply(&self, kind: PageAssistEventV1) -> bool {
         self.service.apply(&self.conversation, self.reply, kind)
+    }
+
+    fn note(&self, fact: std::fmt::Arguments<'_>) {
+        self.service.ports().diagnostics.note(format_args!(
+            "assist: conversation={} reply={} {fact}",
+            self.conversation, self.reply
+        ));
     }
 
     fn phase(&self, phase: Option<PageAssistPhaseV1>) {
@@ -463,6 +471,14 @@ pub(super) async fn run(reply: Reply) {
         end = body(&reply) => end,
     };
     reply.leased.store(false, Ordering::Release);
+    reply.note(format_args!(
+        "end {}",
+        match &end {
+            End::Done(_) => "done".to_owned(),
+            End::Failed(fault) => format!("failed fault={fault:?}"),
+            End::Cancelled(reason) => format!("cancelled reason={reason:?}"),
+        }
+    ));
     match end {
         End::Done(cost) => {
             reply.apply(PageAssistEventV1::Done { cost });
@@ -500,6 +516,14 @@ async fn body(reply: &Reply) -> End {
         Err(error) => return End::Failed(fault::model_fault(error, false)),
     };
     let hosted = model.entry.model.provider == zephium_core::work::model::WorkModelProvider::Cloud;
+    reply.note(format_args!(
+        "start model={} effort={:?} tools={} attachments={} suggestion={:?}",
+        model.entry.id,
+        model.effort.map(super::sidebar_effort),
+        model.entry.supports.tools,
+        reply.attachments.len(),
+        reply.suggestion
+    ));
     let parts = reply.context().await;
     let mut messages = reply.history();
     messages.push(WorkModelMessage::User(
@@ -529,8 +553,11 @@ async fn body(reply: &Reply) -> End {
             system: system.clone(),
             tools: tools.clone(),
             messages: messages.clone(),
-            max_output_tokens: prompt::MAX_OUTPUT_TOKENS.min(model.entry.max_output.max(1_024)),
-            reasoning: model.effort.filter(|_| model.entry.supports.reasoning),
+            max_output_tokens: prompt::MAX_OUTPUT_TOKENS.min(model.entry.max_output.max(8_192)),
+            reasoning: model
+                .effort
+                .filter(|_| model.entry.supports.reasoning)
+                .map(super::sidebar_effort),
             native_search: false,
             parallel_tools: false,
             tool_choice: WorkModelToolChoice::Auto,
@@ -544,6 +571,16 @@ async fn body(reply: &Reply) -> End {
             }
         };
         add_usage(&mut usage, &outcome.usage);
+        reply.note(format_args!(
+            "call stop={:?} in={} cached={} out={} reasoning={} text_blocks={}",
+            outcome.stop,
+            outcome.usage.input_tokens,
+            outcome.usage.cached_input_tokens,
+            outcome.usage.output_tokens,
+            outcome.usage.reasoning_tokens,
+            reply.next_block()
+        ));
+        let exhausted = outcome.stop == WorkModelStop::MaxTokens;
         let calls: Vec<_> = outcome
             .assistant
             .iter()
@@ -553,6 +590,10 @@ async fn body(reply: &Reply) -> End {
             })
             .collect();
         messages.push(WorkModelMessage::Assistant(outcome.assistant));
+        if exhausted && calls.is_empty() && reply.next_block() == 0 && text.block.is_none() {
+            reply.flush(&mut text);
+            return End::Failed(PageAssistFaultV1::TooLong);
+        }
         if outcome.stop != WorkModelStop::ToolUse || calls.is_empty() {
             break;
         }
@@ -582,6 +623,12 @@ async fn body(reply: &Reply) -> End {
                 Ok(content) => (content, false),
                 Err(content) => (content, true),
             };
+            reply.note(format_args!(
+                "tool name={} ok={} result_bytes={}",
+                tools::known(&call.name),
+                !is_error,
+                content.len()
+            ));
             results.push(WorkModelToolResult {
                 call: call.id,
                 content,
@@ -885,9 +932,13 @@ async fn restyle(
     let validated = match css::validate(sheet) {
         Ok(validated) => validated,
         Err(rejection) => {
+            reply.note(format_args!(
+                "restyle rejected={rejection:?} bytes={}",
+                sheet.len()
+            ));
             return Err(format!(
                 "The stylesheet was refused ({rejection:?}). Write it again within the rules."
-            ))
+            ));
         }
     };
     let Some(guarded) = guard::guard(&validated, outline.as_ref()) else {
@@ -1027,6 +1078,8 @@ fn admissible(record: &ReadRecord, step: &StepRequest) -> bool {
         (_, Role::Field(kind)) if kind.protected() => false,
         (Verb::Fill, Role::Field(_)) => true,
         (Verb::Fill, _) => false,
+        (Verb::Submit, Role::Field(_)) => true,
+        (Verb::Submit, _) => false,
         (Verb::Open, Role::Link { same_site }) => same_site,
         (Verb::Open, _) => false,
         (Verb::Select, Role::Select) => true,
@@ -1046,6 +1099,8 @@ struct Plan {
     record: ReadRecord,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
+    /// The engine's label once a step resolved, to recognise it after a pause.
+    resolved: Vec<Option<String>>,
     block: u16,
 }
 
@@ -1059,6 +1114,19 @@ impl Plan {
         );
     }
 
+    fn fail(&mut self, reply: &Reply, index: usize, failure: StepFailure) {
+        if let Some(row) = self.rows.get_mut(index) {
+            row.state = PageAssistStepStateV1::Failed;
+            row.reason = Some(match failure {
+                StepFailure::Refused => PageAssistStepReasonV1::Refused,
+                StepFailure::Unsuitable => PageAssistStepReasonV1::Unsuitable,
+                StepFailure::PageChanged => PageAssistStepReasonV1::PageChanged,
+                StepFailure::Failed => PageAssistStepReasonV1::NoEffect,
+            });
+        }
+        self.skip_from(reply, index + 1);
+    }
+
     fn mark(
         &mut self,
         reply: &Reply,
@@ -1067,6 +1135,9 @@ impl Plan {
         effect: StepEffect,
         state: PageAssistStepStateV1,
     ) {
+        if let Some(slot) = self.resolved.get_mut(index) {
+            *slot = Some(label.to_owned());
+        }
         if let Some(row) = self.rows.get_mut(index) {
             if !label.is_empty() {
                 row.label = text::bounded(&text::clean(label), 120);
@@ -1091,12 +1162,23 @@ impl Plan {
             .rows
             .iter()
             .map(|row| {
-                let state = match row.state {
-                    PageAssistStepStateV1::Done => "done",
-                    PageAssistStepStateV1::Declined => "declined by the person",
-                    PageAssistStepStateV1::Failed => "failed",
-                    PageAssistStepStateV1::Skipped => "skipped",
-                    PageAssistStepStateV1::Running | PageAssistStepStateV1::Confirm => "stopped",
+                let state = match (row.state, row.reason) {
+                    (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Refused)) => {
+                        "refused: a protected field or a link to another site"
+                    }
+                    (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Unsuitable)) => {
+                        "failed: that passage is not a control this verb can use"
+                    }
+                    (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::PageChanged)) => {
+                        "failed: the page changed"
+                    }
+                    (PageAssistStepStateV1::Failed, _) => "ran, but the page did not change",
+                    (PageAssistStepStateV1::Done, _) => "done",
+                    (PageAssistStepStateV1::Declined, _) => "declined by the person",
+                    (PageAssistStepStateV1::Skipped, _) => "skipped",
+                    (PageAssistStepStateV1::Running | PageAssistStepStateV1::Confirm, _) => {
+                        "stopped"
+                    }
                 };
                 format!("{} — {state}", row.label)
             })
@@ -1105,16 +1187,55 @@ impl Plan {
     }
 }
 
-fn verb_label(step: &Step) -> &'static str {
-    match step.verb {
-        Verb::Click => "Click",
-        Verb::Fill => "Type",
-        Verb::Select => "Choose",
-        Verb::Check => "Check",
-        Verb::Uncheck => "Uncheck",
-        Verb::Scroll => "Scroll",
-        Verb::Expand => "Expand",
-        Verb::Open => "Open",
+/// A step's row before the engine judged it, named from the read.
+fn planned_label(step: &Step, record: &ReadRecord) -> String {
+    let name = step
+        .target
+        .and_then(|target| {
+            record
+                .readout
+                .passages
+                .iter()
+                .find(|passage| passage.id == target.passage)
+        })
+        .map(|passage| text::bounded(&text::clean(&passage.text), 48))
+        .filter(|name| !name.is_empty());
+    let value = step
+        .value
+        .as_deref()
+        .map(|value| text::bounded(&text::clean(value), 40));
+    let quoted = |name: &str| format!("“{name}”");
+    match (step.verb, name.as_deref(), value.as_deref()) {
+        (Verb::Fill, Some(name), Some(value)) => {
+            format!("Type {} into {}", quoted(value), quoted(name))
+        }
+        (Verb::Fill, None, Some(value)) => format!("Type {}", quoted(value)),
+        (Verb::Select, Some(name), Some(value)) => {
+            format!("Choose {} in {}", quoted(value), quoted(name))
+        }
+        (Verb::Submit, Some(name), _) => format!("Press Return in {}", quoted(name)),
+        (Verb::Submit, None, _) => "Press Return".to_owned(),
+        (Verb::Scroll, None, _) => match step.direction {
+            Some(zephium_page_assist::actions::Direction::Up) => "Scroll up".to_owned(),
+            _ => "Scroll down".to_owned(),
+        },
+        (verb, name, _) => {
+            let word = match verb {
+                Verb::Click => "Click",
+                Verb::Fill => "Type",
+                Verb::Select => "Choose",
+                Verb::Check => "Check",
+                Verb::Uncheck => "Uncheck",
+                Verb::Scroll => "Scroll to",
+                Verb::Expand => "Expand",
+                Verb::Open => "Open",
+                Verb::Submit => "Press Return",
+            };
+            match name {
+                Some(name) => format!("{word} {}", quoted(name)),
+                None => word.to_owned(),
+            }
+        }
     }
 }
 
@@ -1178,9 +1299,10 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         .enumerate()
         .map(|(index, step)| PageAssistStepV1 {
             index: u8::try_from(index).unwrap_or(u8::MAX),
-            label: verb_label(step).to_owned(),
+            label: planned_label(step, &record),
             category: None,
             state: PageAssistStepStateV1::Running,
+            reason: None,
         })
         .collect();
     let block = reply.add_block(
@@ -1195,9 +1317,11 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         record,
         requests,
         rows,
+        resolved: Vec::new(),
         block,
     };
     plan.requests.truncate(last);
+    plan.resolved = vec![None; plan.requests.len()];
     reply
         .service
         .running_reply(&reply.conversation, reply.reply, |running| {
@@ -1205,7 +1329,10 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         });
     reply.leased.store(true, Ordering::Release);
     reply.phase(Some(PageAssistPhaseV1::Acting));
+    let page = reply.service.ports().page.clone();
+    page.glow(&plan.tab, Glow::Working);
     let result = run_steps(reply, text, &mut plan).await;
+    page.glow(&plan.tab, Glow::Off);
     reply.leased.store(false, Ordering::Release);
     reply
         .service
@@ -1236,15 +1363,8 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
         let resolved = match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
-                plan.mark(
-                    reply,
-                    index,
-                    "",
-                    StepEffect::Read,
-                    PageAssistStepStateV1::Failed,
-                );
-                plan.skip_from(reply, index + 1);
-                return Err(step_end(failure));
+                plan.fail(reply, index, failure);
+                return Err(None);
             }
         };
         if let StepEffect::Commit(_) = resolved.effect {
@@ -1287,28 +1407,12 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 PageAssistStepStateV1::Done,
             ),
             Err(failure) => {
-                plan.mark(
-                    reply,
-                    index,
-                    &resolved.label,
-                    resolved.effect,
-                    PageAssistStepStateV1::Failed,
-                );
-                plan.skip_from(reply, index + 1);
-                return Err(step_end(failure));
+                plan.fail(reply, index, failure);
+                return Err(None);
             }
         }
     }
     Ok(())
-}
-
-fn step_end(failure: StepFailure) -> Option<End> {
-    match failure {
-        StepFailure::PageChanged
-        | StepFailure::Unsuitable
-        | StepFailure::Refused
-        | StepFailure::Failed => None,
-    }
 }
 
 /// The person used the page: wait for Continue, then read it again and go
@@ -1328,6 +1432,7 @@ async fn take_over(
     reply.apply(PageAssistEventV1::State {
         state: PageAssistReplyStateV1::Paused,
     });
+    reply.service.ports().page.glow(&plan.tab, Glow::Paused);
     let (sender, receiver) = oneshot::channel();
     reply
         .service
@@ -1338,15 +1443,11 @@ async fn take_over(
         reason = reply.cancel.cancelled() => return Err(Some(End::Cancelled(reason))),
         resumed = receiver => resumed.map_err(|_| Some(End::Cancelled(CancelReason::Gone)))?,
     }
+    reply.service.ports().page.glow(&plan.tab, Glow::Working);
     reply.apply(PageAssistEventV1::State {
         state: PageAssistReplyStateV1::Working,
     });
-    let labels: Vec<String> = plan
-        .rows
-        .iter()
-        .skip(from)
-        .map(|row| row.label.clone())
-        .collect();
+    let labels: Vec<Option<String>> = plan.resolved.iter().skip(from).cloned().collect();
     let index = reply.read_tab(&plan.tab).await.map_err(|_| None)?;
     let Some(fresh) = reply
         .with_data(|data| data.reads.get(index).cloned())
@@ -1362,17 +1463,11 @@ async fn take_over(
     plan.record = fresh;
     let page = reply.service.ports().page.clone();
     for (step, label) in plan.requests.iter().skip(from).zip(labels) {
-        match page.resolve(&plan.tab, plan.epoch, step) {
-            Ok(resolved) if resolved.label == label || verb_label_matches(&label) => {}
+        match (page.resolve(&plan.tab, plan.epoch, step), label) {
+            (Ok(resolved), Some(label)) if resolved.label == label => {}
+            (Ok(_), None) => {}
             _ => return Err(None),
         }
     }
     Ok(())
-}
-
-fn verb_label_matches(label: &str) -> bool {
-    [
-        "Click", "Type", "Choose", "Check", "Uncheck", "Scroll", "Expand", "Open",
-    ]
-    .contains(&label)
 }

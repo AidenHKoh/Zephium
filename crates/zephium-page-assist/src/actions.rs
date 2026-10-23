@@ -28,6 +28,8 @@ pub enum Verb {
     Expand,
     /// Follow a link on the same site.
     Open,
+    /// Press Return in a field, as a search box asks.
+    Submit,
 }
 
 impl Verb {
@@ -42,6 +44,7 @@ impl Verb {
             "scroll" => Self::Scroll,
             "expand" => Self::Expand,
             "open" => Self::Open,
+            "submit" | "enter" | "return" => Self::Submit,
             _ => return None,
         })
     }
@@ -145,7 +148,7 @@ mod tests {
             ("fill", Some("a3"), Some("line\nbreak")),
             ("navigate", Some("https://evil.example"), None),
             ("eval", Some("a1"), None),
-            ("submit", Some("a1"), None),
+            ("delete", Some("a1"), None),
         ] {
             assert_eq!(
                 step(verb, target, value),

@@ -19,8 +19,9 @@ pub const MAX_HISTORY: usize = 10;
 pub const MAX_HISTORY_REPLY_CHARS: usize = 2_000;
 /// Longest selection or picked element sent, in characters.
 pub const MAX_SELECTION_CHARS: usize = 4_000;
-/// Output ceiling for one model call, in tokens.
-pub const MAX_OUTPUT_TOKENS: u32 = 4_000;
+/// Output ceiling for one model call, in tokens. Reasoning models spend it
+/// on thinking first, so it must leave room for a whole stylesheet after.
+pub const MAX_OUTPUT_TOKENS: u32 = 32_000;
 
 const MARKERS: [&str; 8] = [
     "<<<PAGE",
@@ -53,7 +54,7 @@ Answering:
 
 Acting:
 - open_tabs opens links in new background tabs, by the reference of the link passage or by an item's address you showed earlier. Never invent an address. At most 8 at once.
-- act runs small steps on one page: click, fill, select, check, uncheck, scroll, expand, open (a link on the same site). A step that sends, buys, deletes or saves waits for the person's confirm in the panel: don't ask first in text. Never type into password, card or one-time-code fields. At most 8 steps.
+- act runs small steps on one page: click, fill, select, check, uncheck, scroll, expand, open (a link on the same site), submit (press Return in a field: a search box with no button needs fill then submit). A field may have an empty name; its place on the page and the text beside it tell what it is. A step that sends, buys, deletes or saves waits for the person's confirm in the panel: don't ask first in text. Never type into password, card or one-time-code fields. At most 8 steps.
 - restyle changes how a site looks, with CSS only; the person applies it with one click. Call inspect_style first for the page's regions, colours and fonts unless an outline is already in the message. When the person attached an element, style that element, using its selector.
 - hand_off proposes Work for jobs that need many steps, several sites, research across the web, accounts, files, code, or running things. Give it a clear title, a one-line summary of what Work will do, and name what it should bring along. Then stop: the person decides.
 - After a tool, add a sentence only if it tells the person something new.

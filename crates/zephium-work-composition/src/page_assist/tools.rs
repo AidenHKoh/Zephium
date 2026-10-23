@@ -118,7 +118,7 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
         ),
         tool(
             "act",
-            "Runs small steps on one page, in order. Verbs: click, fill, select, check, uncheck, scroll, expand, open. fill and select take a value. scroll takes a passage, or up or down.",
+            "Runs small steps on one page, in order. Verbs: click, fill, select, check, uncheck, scroll, expand, open, submit (press Return in a field, as a search box needs after fill). fill and select take a value. scroll takes a passage, or up or down.",
             json!({
                 "type": "object",
                 "properties": {
@@ -128,7 +128,7 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "verb": {"type": "string", "enum": ["click", "fill", "select", "check", "uncheck", "scroll", "expand", "open"]},
+                                "verb": {"type": "string", "enum": ["click", "fill", "select", "check", "uncheck", "scroll", "expand", "open", "submit"]},
                                 "ref": {"type": "string", "description": "The control's passage, such as a7; up or down for a scroll."},
                                 "value": {"type": "string"}
                             },
@@ -212,6 +212,23 @@ fn strings(value: &Value, key: &str, max: usize, limit: usize) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The tool's own name for the log; anything else is "unknown".
+pub(crate) fn known(name: &str) -> &'static str {
+    [
+        "list_tabs",
+        "read_page",
+        "show_items",
+        "open_tabs",
+        "act",
+        "inspect_style",
+        "restyle",
+        "hand_off",
+    ]
+    .into_iter()
+    .find(|known| *known == name)
+    .unwrap_or("unknown")
 }
 
 /// The call `name` with `arguments`; none when it is not one of the tools
@@ -336,7 +353,10 @@ mod tests {
             None
         );
         assert_eq!(
-            parse("act", &json!({"steps": [{"verb": "submit", "ref": "a1"}]})),
+            parse(
+                "act",
+                &json!({"steps": [{"verb": "navigate", "ref": "a1"}]})
+            ),
             None
         );
         let nine: Vec<Value> = (0..9)

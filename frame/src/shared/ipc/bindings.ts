@@ -2184,6 +2184,17 @@ export type PageAssistStatusV1 = {
 	conversation: PageAssistConversationV1,
 };
 
+/**  Why a step did not run or did not take. */
+export type PageAssistStepReasonV1 =
+/**  A password, card or code field, or a link to another site. */
+"refused" |
+/**  What it names is not a control this step can use. */
+"unsuitable" |
+/**  The page changed before it ran. */
+"page_changed" |
+/**  It ran, but the page did not change as expected. */
+"no_effect";
+
 export type PageAssistStepStateV1 = "running" |
 /**  Waits on the person: Approve or Decline through `page_assist_decide`. */
 "confirm" | "done" | "declined" | "failed" |
@@ -2201,6 +2212,8 @@ export type PageAssistStepV1 = {
 	/**  Set when the step commits something and so needs the person's confirm. */
 	category: WorkConfirmCategoryV1 | null,
 	state: PageAssistStepStateV1,
+	/**  Set when `state` is `failed`. */
+	reason: PageAssistStepReasonV1 | null,
 };
 
 /**  One-click starts Rust offers for the page in front. The panel names them. */
