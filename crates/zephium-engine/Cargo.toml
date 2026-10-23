@@ -124,6 +124,10 @@ zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
+    "Foundation_Collections",
+    "Foundation_Numerics",
+    "System",
+    "UI_Composition_Desktop",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -138,6 +142,7 @@ windows = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_WinRT_Composition",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
@@ -148,6 +153,7 @@ windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = t
     "Win32_System_Threading",
 ] }
 windows-core = "0.61"
+windows-numerics = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 gtk = "0.18"

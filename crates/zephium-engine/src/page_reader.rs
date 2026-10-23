@@ -176,6 +176,18 @@ pub enum PagePickFailure {
     Unavailable,
 }
 
+/// The light along a page's edges that says the assistant is acting there.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PageGlow {
+    /// None.
+    #[default]
+    Off,
+    /// The assistant is acting: the light travels.
+    Working,
+    /// The person took over: the light holds still, dimmer.
+    Paused,
+}
+
 /// One read of a tab's document.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageReadout {

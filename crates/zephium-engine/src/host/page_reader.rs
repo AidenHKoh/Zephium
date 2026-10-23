@@ -13,7 +13,7 @@ use zephium_core::ids::ItemId;
 
 use super::EngineHost;
 use crate::page_reader::{
-    PageActFailure, PageMark, PageOutline, PagePick, PagePickFailure, PageReadFailure,
+    PageActFailure, PageGlow, PageMark, PageOutline, PagePick, PagePickFailure, PageReadFailure,
     PageReaderPolicy, PageReadout,
 };
 use crate::platform::imp::{schedule_content_policy_timeout, ContentPolicyTimeout};
@@ -273,6 +273,25 @@ impl EngineHost {
                 }
             }
         }
+        if !on {
+            crate::platform::imp::page_glow::clear();
+        }
+    }
+
+    /// The working glow on `id`'s page: only where the assistant may act
+    /// (AI on, not a private window); anything else turns it off.
+    pub(crate) fn page_glow(&mut self, id: ItemId, glow: PageGlow, reduce_motion: bool) {
+        let Some(view) = self.views.get(&id) else {
+            crate::platform::imp::page_glow::forget(id);
+            return;
+        };
+        let admitted = enabled()
+            && view
+                .page_reader
+                .try_borrow()
+                .is_ok_and(|reader| reader.is_some());
+        let glow = if admitted { glow } else { PageGlow::Off };
+        crate::platform::imp::page_glow::set(id, &view.view, glow, reduce_motion);
     }
 
     /// The committed address of `id`'s document at `epoch`.

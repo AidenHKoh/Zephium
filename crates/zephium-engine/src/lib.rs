@@ -1893,6 +1893,19 @@ impl WebviewEngine {
         let _ = (tab, epoch, n, scroll);
     }
 
+    /// Shows, holds or removes the light along `tab`'s page edges that says
+    /// the assistant is acting there. Native and composited; nothing reaches
+    /// the page.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_glow(&self, tab: ItemId, glow: page_reader::PageGlow, reduce_motion: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_glow(tab, glow, reduce_motion));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, glow, reduce_motion);
+    }
+
     /// Removes `tab`'s marks.
     #[cfg(feature = "agentic-browser")]
     pub fn page_marks_clear(&self, tab: ItemId) {

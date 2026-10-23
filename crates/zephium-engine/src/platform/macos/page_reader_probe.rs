@@ -35,6 +35,9 @@ use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use crate::page_reader::{PageReadFailure, PageReadout, PageRole};
 use crate::platform::page_recipe::{mark_outcome, parse_outline, MarkOutcome, PageRecipe};
 
+#[path = "page_glow_probe.rs"]
+mod page_glow_probe;
+
 const STEP_TIMEOUT: Duration = Duration::from_secs(20);
 
 const ARTICLE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><title>Rivers of the North</title>
@@ -2722,6 +2725,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
     let measuring = arguments.iter().any(|a| a == "--measure");
     let assist_only = arguments.iter().any(|a| a == "--assist");
     let fields_only = arguments.iter().any(|a| a == "--fields");
+    let glow_only = arguments.iter().any(|a| a == "--glow");
     let wikipedia = arguments
         .iter()
         .position(|a| a == "--article")
@@ -2734,10 +2738,13 @@ pub(crate) fn run(arguments: &[String]) -> Result<(), String> {
             assist(mtm, &fixture)
         } else if fields_only {
             fields(mtm, &fixture)
+        } else if glow_only {
+            page_glow_probe::run(mtm, &fixture)
         } else {
             fixtures(mtm, &fixture)
                 .and_then(|()| assist(mtm, &fixture))
                 .and_then(|()| fields(mtm, &fixture))
+                .and_then(|()| page_glow_probe::run(mtm, &fixture))
         }
     });
     drop(fixture);

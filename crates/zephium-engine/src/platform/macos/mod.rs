@@ -31,6 +31,8 @@ mod apps;
 mod automatic_pip;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod browse_reader;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod page_glow;
 #[cfg(feature = "page-reader-probe")]
 mod page_reader_probe;
 #[cfg(feature = "page-reader-probe")]

@@ -41,6 +41,8 @@ pub(crate) use cookie_storage_diagnostic::shutdown_admission as diagnose_shutdow
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod browse_reader;
 #[cfg(feature = "agentic-browser")]
+pub(crate) mod page_glow;
+#[cfg(feature = "agentic-browser")]
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
