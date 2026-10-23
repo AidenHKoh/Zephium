@@ -41,6 +41,23 @@ pub struct HistoryVisit {
     pub visited_at: i64,
 }
 
+/// A stored Kite conversation without its body, for a history list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatSummary {
+    pub id: String,
+    pub space: String,
+    pub title: String,
+    pub updated_ms: i64,
+}
+
+/// Conversations kept per profile; saving a new one past this drops the oldest.
+pub const MAX_CHATS: usize = 200;
+/// A conversation id is 1 to this many bytes of `[A-Za-z0-9-]`.
+pub const MAX_CHAT_ID_BYTES: usize = 40;
+pub const MAX_CHAT_SPACE_BYTES: usize = 128;
+pub const MAX_CHAT_TITLE_BYTES: usize = 200;
+pub const MAX_CHAT_BODY_BYTES: usize = 512 * 1024;
+
 /// Maximum number of exact origins that browser chrome may hydrate in one
 /// favicon-cache read. The returned raster for each origin is independently
 /// fixed at `icon::RGBA32_BYTES`, bounding a batch to two MiB before small
@@ -645,6 +662,41 @@ pub trait Store {
                     .map(|(_, bytes)| (origin.clone(), bytes))
             })
             .collect()
+    }
+
+    /// Kite conversations, newest first, at most `limit` (never more than
+    /// `MAX_CHATS`).
+    fn chats(&self, _profile: ProfileId, _limit: u32) -> Vec<ChatSummary> {
+        Vec::new()
+    }
+    /// The body stored with a conversation, exactly as it was saved.
+    fn chat(&self, _profile: ProfileId, _id: &str) -> Option<String> {
+        None
+    }
+    /// Inserts or replaces a conversation, dropping the oldest past
+    /// `MAX_CHATS`. False when a bound is exceeded, the profile is not
+    /// persisted, or the conversation is older than all the ones kept. `body`
+    /// is opaque to the store.
+    fn save_chat(
+        &self,
+        _profile: ProfileId,
+        _id: &str,
+        _space: &str,
+        _title: &str,
+        _updated_ms: i64,
+        _body: String,
+    ) -> bool {
+        false
+    }
+    /// True when a conversation was removed.
+    fn delete_chat(&self, _profile: ProfileId, _id: &str) -> bool {
+        false
+    }
+    /// Deletes conversations last updated at or after `since` (Unix seconds,
+    /// as for `clear_history`, which leaves conversations alone), or all of
+    /// them when it is absent. Returns how many went.
+    fn clear_chats(&self, _profile: ProfileId, _since: Option<i64>) -> u32 {
+        0
     }
 
     /// Returns the bounded, durable deletion work that survived the previous
