@@ -230,7 +230,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         repository.join("crates/zephium-agentic/src/semantic_runtime.rs"),
     )?);
     for required in [
-        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=212*1024;",
+        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=216*1024;",
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES:usize=2*1024;",
         "MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES:usize=512;",
         "SEMANTIC_RUNTIME_SOURCE_SHA256:[u8;32]",

@@ -823,6 +823,7 @@ const documentCreateRange=Document.prototype.createRange;
 const rangeSelectNodeContents=typeof Range==="function"?Range.prototype.selectNodeContents:null;
 const rangeSetStart=typeof Range==="function"?Range.prototype.setStart:null;
 const rangeSetEnd=typeof Range==="function"?Range.prototype.setEnd:null;
+const rangeCollapse=typeof Range==="function"?Range.prototype.collapse:null;
 const selectionRemoveAllRanges=typeof Selection==="function"?Selection.prototype.removeAllRanges:null;
 const selectionAddRange=typeof Selection==="function"?Selection.prototype.addRange:null;
 const selectionAnchorGetter=typeof Selection==="function"?getter(Selection.prototype,"anchorNode"):null;
@@ -960,6 +961,7 @@ let lastObservationInvocation=0;
 let lastObservationGeneration=0;
 let dialogKeys=new WeakMap();
 let nextDialogKey=1;
+let editorNames=new WeakMap();
 let pendingDialogSample=null;
 let pendingScrollSample=null;
 let transportActive=false;
@@ -980,6 +982,7 @@ lastObservationInvocation=0;
 lastObservationGeneration=0;
 dialogKeys=new WeakMap();
 nextDialogKey=1;
+editorNames=new WeakMap();
 pendingDialogSample=null;
 pendingScrollSample=null;
 }
@@ -1972,7 +1975,42 @@ const words=apply(stringSplit,raw,[/[\s_\-.[\]]+|(?=[A-Z][a-z])/u]);
 const text=normalizeText(lower(words.join(" ")),FALLBACK_NAME_BYTES);
 return text.truncated||text.value===""?null:text.value;
 }
+function editorPlaceholder(element,state){
+let current=element;
+for(let depth=0;depth<3&&current!==null;depth+=1){
+for(const name of depth===0?["aria-placeholder","data-placeholder"]:["placeholder","aria-placeholder","data-placeholder"]){
+const value=attribute(current,name,MAX_NAME_BYTES*4,state);
+if(value!==null&&apply(stringTrim,value,[])!=="")return value;
+}
+const children=read(nodeChildNodesGetter,current);
+let next=null;
+for(let index=0;index<mathMin(listLength(children),4)&&next===null;index+=1){
+if(nodeType(listItem(children,index))===1)next=listItem(children,index);
+}
+current=next;
+}
+let scope=element;
+for(let depth=0;depth<2;depth+=1){
+const parent=read(nodeParentGetter,scope);
+if(parent===null||nodeType(parent)!==1)return null;
+const children=read(nodeChildNodesGetter,parent);
+for(let index=0;index<mathMin(listLength(children),8);index+=1){
+const sibling=listItem(children,index);
+if(sibling===scope||nodeType(sibling)!==1||
+!apply(stringIncludes,lower(attribute(sibling,"class",256)||""),["placeholder"]))continue;
+const text=normalizeText(flatText(sibling,state,FALLBACK_NAME_BYTES+1),FALLBACK_NAME_BYTES);
+if(!text.truncated&&text.value!=="")return text.value;
+}
+scope=parent;
+}
+return null;
+}
 function fallbackFieldName(element,descriptor,state){
+if(descriptor.contentEditable===true){
+const description=attribute(element,"aria-description",MAX_NAME_BYTES*4,state);
+return editorPlaceholder(element,state)||adjacentLabel(element,false,state)||
+(description!==null&&apply(stringTrim,description,[])!==""?description:null);
+}
 if(!["input","textarea","select"].includes(descriptor.tag))return null;
 const check=descriptor.role==="checkbox"||descriptor.role==="radio";
 const beside=adjacentLabel(element,check,state)||(check?adjacentLabel(element,false,state):null);
@@ -2814,6 +2852,10 @@ typeof descriptor.pageFacts==="string"?"Page facts":labelledText(element,descrip
 if((name===null||name==="")&&descriptor.role==="image")name=ancestorLabel(element,state);
 else if((name===null||name==="")&&FALLBACK_NAMED_ROLES.includes(descriptor.role)){
 name=fallbackFieldName(element,descriptor,state);
+}
+if(descriptor.contentEditable===true){
+if(name!==null&&name!=="")apply(weakMapSet,editorNames,[element,name]);
+else name=apply(weakMapGet,editorNames,[element])||null;
 }
 if(name!==null&&name!=="")addName(record,name,state);
 record.sink=recordSink(descriptor,wire.n!==undefined);
@@ -4125,6 +4167,19 @@ chain.push([current,host,true]);current=host;
 }
 return null;
 }
+function caretInside(target){
+const selection=apply(documentGetSelection,document,[]);
+return selection!==null&&composedContains(target,read(selectionAnchorGetter,selection))&&
+composedContains(target,read(selectionFocusGetter,selection));
+}
+function caretAtEnd(target){
+const selection=apply(documentGetSelection,document,[]);
+const range=apply(documentCreateRange,document,[]);
+apply(rangeSelectNodeContents,range,[target]);
+apply(rangeCollapse,range,[false]);
+apply(selectionRemoveAllRanges,selection,[]);
+apply(selectionAddRange,selection,[range]);
+}
 function cdpRichSelectionInside(target){
 const selection=apply(documentGetSelection,document,[]);
 return read(documentActiveGetter,document)===target&&composedContains(target,read(selectionAnchorGetter,selection))&&composedContains(target,read(selectionFocusGetter,selection));
@@ -4684,8 +4739,13 @@ const current=runtimeDescriptor(target,request.g);
 return current!==null&&descriptorMatches({...request.f,s:request.f.s&~64,vt:value},
 {...current,s:current.s&~64});
 };
+const editor=descriptor.contentEditable===true&&[documentGetSelection,documentCreateRange,
+rangeSelectNodeContents,rangeCollapse,selectionRemoveAllRanges,selectionAddRange,documentExecCommand]
+.every(call=>typeof call==="function");
 try{
+const caretHeld=editor&&read(documentActiveGetter,document)===target&&caretInside(target);
 if(target!==document)apply(htmlElementFocus,target,[]);
+if(editor&& !caretHeld)caretAtEnd(target);
 if(request.ap!==undefined&& !approvalMatches(request.ap,target))return actionFault("applied_unverified_postcondition");
 if(numericDefault&& !sameNumber(numberValue))return actionFault("applied_unverified_postcondition");
 if(cdpPreparing){
@@ -4694,9 +4754,10 @@ return guardedCdpInputs(request,target,[cdpKey(key,false),cdpKey(key,true)],vali
 }
 const init={key:key[0],code:key[1],keyCode:key[2],which:key[2],bubbles:true,cancelable:true,composed:true};
 const down=new nativeKeyboardEvent("keydown",init);
-const handled=apply(fixedDispatchEvent,target,[down])!==true;
+let handled=apply(fixedDispatchEvent,target,[down])!==true;
 if(key[0]==="Enter"||key[0]===" "){
-apply(fixedDispatchEvent,target,[new nativeKeyboardEvent("keypress",init)]);
+const pressed=apply(fixedDispatchEvent,target,[new nativeKeyboardEvent("keypress",init)])!==true;
+if(editor)handled=handled||pressed;
 }
 let numberAfter=numberValue;
 let numberUnverified=false;
@@ -4717,6 +4778,10 @@ else apply(fixedDispatchEvent,target,[new nativeEvent("change",{bubbles:true})])
 }
 apply(fixedDispatchEvent,target,[new nativeKeyboardEvent("keyup",init)]);
 if(numericDefault&& !handled&&(numberUnverified|| !sameNumber(numberAfter)))return actionFault("applied_unverified_postcondition");
+if(!handled&&key[0]==="Enter"&&editor&&caretInside(target)){
+if(request.ap!==undefined&& !approvalMatches(request.ap,target))return actionFault("applied_unverified_postcondition");
+if(apply(documentExecCommand,document,["insertParagraph",false,null])!==true)return actionFault("applied_unverified_postcondition");
+}
 if(!handled&&key[0]==="Enter"&&descriptor.tag==="input"){
 if(request.ap!==undefined&& !approvalMatches(request.ap,target))return actionFault("applied_unverified_postcondition");
 const form=read(inputFormGetter,target);
