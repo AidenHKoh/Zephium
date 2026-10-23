@@ -653,6 +653,8 @@ pub enum Command {
         space: zephium_core::ids::SpaceId,
         after: Option<ItemId>,
         url: String,
+        /// Show it at once instead of behind the person's work.
+        focus: bool,
         done: TabCompletion,
     },
     /// Hands the shell the anonymous origin prober, once, after startup.

@@ -1048,6 +1048,18 @@ impl Handle {
         after: Option<ItemId>,
         url: String,
     ) -> Option<ItemId> {
+        self.open_tab(profile, space, after, url, false).await
+    }
+
+    /// As [`Self::open_background_tab`], shown at once when `focus`.
+    pub async fn open_tab(
+        &self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: String,
+        focus: bool,
+    ) -> Option<ItemId> {
         let (replier, reply) = crate::reply::channel();
         // A refused command drops its completion, which resolves the reply.
         let _ = self.queue.try_push(Command::OpenBackgroundTab {
@@ -1055,6 +1067,7 @@ impl Handle {
             space,
             after,
             url,
+            focus,
             done: crate::TabCompletion::new(move |tab| replier.send(tab)),
         });
         reply.await.flatten()

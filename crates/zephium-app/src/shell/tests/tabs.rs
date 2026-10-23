@@ -799,6 +799,7 @@ fn a_background_tab_command_answers_through_its_completion() {
             space,
             after: Some(first),
             url: url.into(),
+            focus: false,
             done: crate::TabCompletion::new(move |tab| sink.lock().unwrap().push(tab)),
         });
     }
@@ -832,4 +833,24 @@ fn a_background_tab_opens_through_the_handle() {
         );
     }
     assert_eq!(handle.window_tabs(profile).recv().unwrap().len(), 2);
+}
+
+#[test]
+fn a_tab_opened_in_front_is_shown_after_its_source() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Activate(first));
+    let (profile, space) = shell
+        .windows
+        .focused()
+        .map(|win| (win.profile, win.space))
+        .unwrap();
+    let opened = shell
+        .open_page_tab(profile, space, Some(first), "https://example.test/", true)
+        .expect("a tab in front");
+    assert_eq!(today_of(&shell, space), [first, opened, second]);
+    assert_eq!(shell.windows.focused().unwrap().active, Some(opened));
 }

@@ -1180,8 +1180,9 @@ impl Shell {
                 space,
                 after,
                 url,
+                focus,
                 done,
-            } => done.finish(self.open_background_tab(profile, space, after, &url)),
+            } => done.finish(self.open_page_tab(profile, space, after, &url, focus)),
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,

@@ -748,12 +748,24 @@ impl Shell {
     /// A new Today tab of `space` for an ordinary web page, right after
     /// `after` when that tab is a root of the same Today, never focused:
     /// the active tab, window focus and split stay as they are.
+    #[cfg(test)]
     pub(super) fn open_background_tab(
         &mut self,
         profile: ProfileId,
         space: SpaceId,
         after: Option<ItemId>,
         url: &str,
+    ) -> Option<ItemId> {
+        self.open_page_tab(profile, space, after, url, false)
+    }
+
+    pub(super) fn open_page_tab(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: &str,
+        focus: bool,
     ) -> Option<ItemId> {
         let url = url::Url::parse(url.trim()).ok().filter(|url| {
             matches!(url.scheme(), "http" | "https") && navigation::is_allowed(url)
@@ -787,7 +799,12 @@ impl Shell {
         if let Some(next) = next {
             self.items.move_tab_to_root(id, today, Some(next));
         }
-        let effects = self.items.navigate(id, url.as_str());
+        let mut effects = if focus {
+            self.focus_tab(id)
+        } else {
+            Default::default()
+        };
+        effects.extend(self.items.navigate(id, url.as_str()));
         let native = self.commit(effects);
         // A view the engine refused and no capacity wait explains is a dead
         // tab; nothing was opened.
