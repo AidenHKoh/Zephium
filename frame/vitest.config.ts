@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { globSync, readFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
@@ -6,6 +6,20 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { alias } from "./aliases.ts";
 import { i18nLocales } from "./i18n-locales.ts";
 import { benchPhotos, webkitFootprint } from "./vitest.bench-commands.ts";
+
+// Icons are imported one module each, and Vite meets each only when a test
+// first reaches it. On a cold cache (every CI runner) that re-optimises the
+// dependencies mid-run and reloads the page under the running tests, so the
+// whole set is named up front.
+const icons = [
+  ...new Set(
+    globSync("src/**/*.{ts,svelte}").flatMap((file) =>
+      [...readFileSync(file, "utf8").matchAll(/["'](@hugeicons\/core-free-icons\/\w+)["']/gu)].map(
+        (match) => match[1]!,
+      ),
+    ),
+  ),
+].sort();
 
 export default defineConfig({
   test: {
@@ -52,6 +66,7 @@ export default defineConfig({
             "@tiptap/pm/view",
             "marked",
             "@hugeicons/core-free-icons",
+            ...icons,
           ],
         },
         test: {
