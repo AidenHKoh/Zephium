@@ -42,6 +42,32 @@ test("presentation sentinels expose the exact title and revision synchronously",
   expect(received).toHaveBeenCalledTimes(1);
 });
 
+test("close buttons show on hover by default and on every row when chosen", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  await render(TabRow, {
+    target: host,
+    props: {
+      tab: tabFixture(),
+      active: false,
+      splitCandidate: false,
+      onSelect: vi.fn(),
+      onClose: vi.fn(),
+      onContextMenu: vi.fn(),
+      onPointerDown: vi.fn(),
+      onPointerMove: vi.fn(),
+      onPointerUp: vi.fn(),
+      onPointerCancel: vi.fn(),
+    },
+  });
+  const close = host.querySelector<HTMLElement>(".tab-close")!;
+  const shown = () => getComputedStyle(close).opacity;
+  await expect.poll(shown).toBe("0");
+  host.dataset.closeButtons = "always";
+  await expect.poll(shown).toBe("1");
+  host.remove();
+});
+
 function renderRow(closable: boolean) {
   const tab = tabFixture({ title: "Docs" });
   const props = {

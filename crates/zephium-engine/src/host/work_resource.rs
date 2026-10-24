@@ -39,6 +39,9 @@ const DOCUMENT_FINALIZATION_QUIET_PERIOD: Duration = Duration::from_millis(500);
 /// A page an action's admitted load committed but never reported loaded is
 /// taken as loaded after this long.
 const HAND_ON_COMMITTED_SETTLE: Duration = Duration::from_secs(4);
+/// A site's first document that committed but keeps loading (a mail app with
+/// a loading screen and open channels) is taken as loaded after this long.
+const INITIAL_COMMITTED_SETTLE: Duration = Duration::from_secs(6);
 
 struct DocumentFinalizationWake {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -56,20 +59,30 @@ enum DocumentFinalizationProgress {
 #[path = "work_resource_witness.rs"]
 mod witness;
 
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[path = "work_resource_form_oracle.rs"]
+mod form_oracle;
+
 #[path = "work_resource_action.rs"]
 mod action;
 #[path = "work_frame_schedule.rs"]
 mod frame_schedule;
 #[path = "work_resource_human.rs"]
 mod human;
+#[path = "work_resource_media.rs"]
+mod media;
 #[path = "work_resource_navigation.rs"]
 mod navigation;
 #[path = "work_resource_observation.rs"]
 mod observation;
 
+#[path = "work_visual_store.rs"]
+pub(crate) mod visual_store;
+
 #[cfg(target_os = "macos")]
 pub(super) struct AnonymousWorkStore {
     session: zephium_agentic::WeakWorkBrowserSession,
+    visual: Option<visual_store::FreshNativeStore>,
     pub(super) profile: zephium_core::ids::ProfileId,
     pub(super) store: crate::platform::imp::WebsiteDataStore,
 }
@@ -116,19 +129,61 @@ impl EngineHost {
         })) {
             return Err(ContextPortFailure::Stale);
         }
+        let visual = visual_store::FreshNativeStore::after_native_allocation(session);
         self.anonymous_work_stores.insert(
             id,
             AnonymousWorkStore {
                 session: session.downgrade(),
+                visual,
                 profile: session.profile(),
                 store: store.clone(),
             },
         );
         Ok(store)
     }
+
+    /// Work's persistent store for a durable profile. Pages of one run and of
+    /// parallel runs share the one retained object, as tabs share a profile's.
+    pub(super) fn work_data_store(
+        &mut self,
+        profile: ProfileId,
+    ) -> Result<crate::platform::imp::WebsiteDataStore, ContextPortFailure> {
+        if self.erasure_tombstones.contains(&profile)
+            || self.profile_persistence_classes.get(&profile)
+                != Some(&super::profiles::ProfilePersistenceClass::Durable)
+        {
+            return Err(ContextPortFailure::ProfileUnavailable);
+        }
+        if let Some(store) = self.work_data_stores.get(&profile) {
+            return Ok(store.clone());
+        }
+        if self.work_data_stores.len() >= MAX_PROFILE_PERSISTENCE_BINDINGS {
+            return Err(ContextPortFailure::ResourceExhausted);
+        }
+        let store = crate::platform::imp::work_data_store(profile)
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        self.work_data_stores.insert(profile, store.clone());
+        Ok(store)
+    }
+
+    /// Empties the profile's Work store; its pages keep running on it.
+    pub(crate) fn clear_work_website_data(
+        &mut self,
+        profile: ProfileId,
+        reply: std::sync::mpsc::Sender<bool>,
+    ) {
+        if self.erasure_tombstones.contains(&profile) {
+            let _ = reply.send(false);
+            return;
+        }
+        crate::platform::imp::clear_work_data_store(profile, reply);
+    }
 }
 
 pub(super) struct WorkNativeResource {
+    media_pending: bool,
+    media_batch: Option<std::rc::Rc<media::Batch>>,
+    media_wake: Option<observation::ObservationWake>,
     pub(super) guard: Arc<WorkResourceGuard>,
     construction: Option<WorkLifecycleTask>,
     construction_presentation: Option<crate::platform::imp::WorkObservationPresentation>,
@@ -137,6 +192,11 @@ pub(super) struct WorkNativeResource {
     human_progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
     /// Handed over without a presentation, for a decision made elsewhere.
     human_unpresented: bool,
+    /// A continued sign-in waiting for its site's cookies to reach the
+    /// person's profile; the page goes idle only after that copy, so the
+    /// copy never runs under the page's own suspension.
+    #[cfg(target_os = "windows")]
+    pub(super) human_return: Option<(WorkLifecycleTask, zephium_agentic::ContextNavigationTarget)>,
     revocation: Option<WorkLifecycleTask>,
     destruction: Option<WorkLifecycleTask>,
     watchdog: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -148,7 +208,6 @@ pub(super) struct WorkNativeResource {
     frame_in_flight: Arc<std::sync::atomic::AtomicBool>,
     frame_rendering_pending: Arc<std::sync::atomic::AtomicBool>,
     frame_schedule: frame_schedule::WorkFrameSchedule,
-    #[cfg(target_os = "windows")]
     frame_initial_requested: bool,
     frame_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
     navigation: Option<navigation::WorkNavigation>,
@@ -159,6 +218,10 @@ pub(super) struct WorkNativeResource {
     document_finalization_ready:
         Option<crate::platform::work_document_navigation::WorkDocumentFinalizationTicket>,
     hand_on_wake: Option<crate::platform::imp::ContentPolicyTimeout>,
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    form_oracle: form_oracle::State,
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    pub(super) form_actions: crate::platform::form_qualification::ActionAudit,
     pub(super) last_invocation: u64,
     /// The document a look last completed on: a document's first look waits
     /// longer for a heavy app still starting its own scripts.
@@ -233,6 +296,8 @@ impl WorkNativeResource {
             human_wake: None,
             human_progress: None,
             human_unpresented: false,
+            #[cfg(target_os = "windows")]
+            human_return: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -240,11 +305,13 @@ impl WorkNativeResource {
             action: None,
             reading_presentation: None,
             presentation_wake: None,
+            media_pending: false,
+            media_batch: None,
+            media_wake: None,
             frame_generation: 0,
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_schedule: frame_schedule::WorkFrameSchedule::default(),
-            #[cfg(target_os = "windows")]
             frame_initial_requested: false,
             frame_wake: None,
             navigation: None,
@@ -254,6 +321,10 @@ impl WorkNativeResource {
             document_finalization_wake: None,
             document_finalization_ready: None,
             hand_on_wake: None,
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_oracle: form_oracle::State::default(),
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_actions: crate::platform::form_qualification::ActionAudit::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,
@@ -292,7 +363,8 @@ impl WorkNativeResource {
         self.history_back.is_some()
     }
     pub(super) fn pending(&self) -> bool {
-        self.construction.is_some()
+        self.media_pending
+            || self.construction.is_some()
             || self.revocation.is_some()
             || self.destruction.is_some()
             || self.observation.is_some()
@@ -306,7 +378,7 @@ impl WorkNativeResource {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    false
+                    self.human_return.is_some()
                 }
             }
     }
@@ -377,7 +449,7 @@ impl WorkNativeResource {
     /// is taken as loaded after a short wait, then the quiet period and the
     /// location sample make it ready.
     fn progress_hand_on(&mut self) {
-        if self.construction.is_some() || self.navigation.is_some() || self.history_back_pending() {
+        if self.navigation.is_some() || self.history_back_pending() {
             return;
         }
         let Some(gate) = self
@@ -388,16 +460,25 @@ impl WorkNativeResource {
         else {
             return;
         };
-        if !gate.handed_on() {
+        // The construction's own load is finalized by the construction; only
+        // its committed-but-never-finished wait is settled here.
+        let constructing = self.construction.is_some();
+        if !constructing && !gate.handed_on() {
             return;
         }
-        if let Some(since) = gate.hand_on_committed_since() {
-            if since.elapsed() >= HAND_ON_COMMITTED_SETTLE {
+        let (committed, settle) = if constructing {
+            (gate.committed_unfinished_since(), INITIAL_COMMITTED_SETTLE)
+        } else {
+            (gate.hand_on_committed_since(), HAND_ON_COMMITTED_SETTLE)
+        };
+        if let Some(since) = committed {
+            if since.elapsed() >= settle {
                 gate.accept_committed_load();
+                self.hand_on_wake = None;
             } else if self.hand_on_wake.is_none() {
                 let guard = self.guard.clone();
                 self.hand_on_wake = crate::platform::imp::schedule_content_policy_timeout(
-                    HAND_ON_COMMITTED_SETTLE.saturating_sub(since.elapsed()),
+                    settle.saturating_sub(since.elapsed()) + Duration::from_millis(100),
                     move || {
                         let rejected = guard.clone();
                         if !crate::host::try_with_agent_context_terminal(move |host| {
@@ -409,7 +490,7 @@ impl WorkNativeResource {
                 );
             }
         }
-        if gate.finalization_pending() {
+        if !constructing && gate.finalization_pending() {
             self.hand_on_wake = None;
             match self.progress_document_finalization(&gate) {
                 DocumentFinalizationProgress::Ready(_) | DocumentFinalizationProgress::Pending => {}
@@ -583,9 +664,10 @@ impl WorkNativeResource {
             }
             Operation::Revoke => Stage::RevocationDrain,
             Operation::Destroy => Stage::DestructionDrain,
-            Operation::Acquire | Operation::PresentHuman | Operation::ContinueAfterHuman => {
-                Stage::Unattributed
-            }
+            Operation::Acquire
+            | Operation::PresentHuman
+            | Operation::ContinueAfterHuman
+            | Operation::ReadMedia => Stage::Unattributed,
         };
         ResourceFailureCause::LifecycleDeadline(stage)
     }
@@ -605,7 +687,6 @@ impl WorkNativeResource {
         self.progress_frame_capture();
     }
 
-    #[cfg(target_os = "windows")]
     fn request_initial_frame(&mut self) {
         if self.frame_initial_requested
             || self.construction.is_none()
@@ -644,7 +725,6 @@ impl WorkNativeResource {
             self.frame_schedule.discard();
             self.frame_wake = None;
         }
-        #[cfg(target_os = "windows")]
         if self.construction.is_some()
             && !in_flight
             && self.ready()
@@ -725,10 +805,7 @@ impl WorkNativeResource {
                 .store(in_flight, Ordering::Release);
             return;
         };
-        #[cfg(target_os = "windows")]
         let stamp = gate.preview_document_stamp();
-        #[cfg(not(target_os = "windows"))]
-        let stamp = gate.document_stamp();
         let Some(stamp) = stamp else {
             self.frame_rendering_pending
                 .store(in_flight, Ordering::Release);
@@ -760,10 +837,7 @@ impl WorkNativeResource {
             view.diagnose_work_cookie_disk();
         }
         let dispatched = crate::platform::imp::capture_work_frame(view.view(), move |encoded| {
-            #[cfg(target_os = "windows")]
             let document_current = gate.preview_document_stamp() == Some(stamp);
-            #[cfg(not(target_os = "windows"))]
-            let document_current = gate.document_stamp() == Some(stamp);
             #[cfg(target_os = "windows")]
             let projection_current = guard.frame_projection_current();
             #[cfg(not(target_os = "windows"))]
@@ -804,6 +878,14 @@ impl WorkNativeResource {
         }
     }
     fn retire_page(&mut self) -> bool {
+        #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+        if !form_oracle::before_retire(self) {
+            return false;
+        }
+        if let Some(media) = &self.media_batch {
+            media.cancel();
+            return false;
+        }
         #[cfg(target_os = "windows")]
         if self.frame_in_flight.load(Ordering::Acquire) {
             // Revoke the transferred reading/action fences, but preserve the
@@ -1039,8 +1121,11 @@ impl EngineHost {
             return;
         };
         match operation {
+            Operation::ReadMedia => {
+                resource.handle_media(task);
+            }
             Operation::PresentHuman | Operation::ContinueAfterHuman => {
-                resource.handle_human(task);
+                resource.handle_human(task, self.main_dispatch.clone());
             }
             Operation::Acquire => {
                 let mut accepted = request.lease().is_some_and(|lease| {
@@ -1247,10 +1332,20 @@ impl EngineHost {
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
         // Anonymous sessions never borrow the user's profile cookie store.
         #[cfg(target_os = "macos")]
-        let store = if guard.isolated_public() {
+        let store = if guard.work_website_data() {
+            Some(self.work_data_store(profile)?)
+        } else if guard.isolated_public() {
             Some(match guard.anonymous_session() {
                 Some(session) if session.admits(profile, guard.resource().identity().work()) => {
-                    self.anonymous_work_store(session)?
+                    let store = self.anonymous_work_store(session)?;
+                    if let Some(visual) = self
+                        .anonymous_work_stores
+                        .get(&session.id())
+                        .and_then(|entry| entry.visual.clone())
+                    {
+                        guard.bind_fresh_native_store(visual)?;
+                    }
+                    store
                 }
                 Some(_) => return Err(ContextPortFailure::Stale),
                 None => crate::platform::imp::new_ephemeral_data_store()
@@ -1295,6 +1390,8 @@ impl EngineHost {
         let invariant = guard.clone();
         #[cfg(target_os = "macos")]
         let panic = guard.clone();
+        #[cfg(target_os = "macos")]
+        let redirected = guard.clone();
         // Publish/retain this exact native reservation before a fallible
         // constructor can allocate a partial view/delegate graph. An error
         // is not absence proof and must not return its capacity to another
@@ -1303,6 +1400,9 @@ impl EngineHost {
             .reclassify(NativeResourceClass::AgentContext)
             .map_err(|_| ContextPortFailure::ResourceExhausted)?;
         let mut resource = WorkNativeResource {
+            media_pending: false,
+            media_batch: None,
+            media_wake: None,
             guard: guard.clone(),
             construction: None,
             construction_presentation: None,
@@ -1310,6 +1410,8 @@ impl EngineHost {
             human_wake: None,
             human_progress: None,
             human_unpresented: false,
+            #[cfg(target_os = "windows")]
+            human_return: None,
             revocation: None,
             destruction: None,
             watchdog: None,
@@ -1321,7 +1423,6 @@ impl EngineHost {
             frame_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_rendering_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_schedule: frame_schedule::WorkFrameSchedule::default(),
-            #[cfg(target_os = "windows")]
             frame_initial_requested: false,
             frame_wake: None,
             navigation: None,
@@ -1331,6 +1432,10 @@ impl EngineHost {
             document_finalization_wake: None,
             document_finalization_ready: None,
             hand_on_wake: None,
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_oracle: form_oracle::State::default(),
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_actions: crate::platform::form_qualification::ActionAudit::default(),
             last_invocation: 0,
             looked_document: None,
             document_started: false,
@@ -1349,6 +1454,8 @@ impl EngineHost {
             #[cfg(feature = "native-agentic-work-resource-probe")]
             presentation_observations: 0,
         };
+        #[cfg(target_os = "macos")]
+        let credential_denied = guard.clone();
         #[cfg(target_os = "macos")]
         let callbacks = crate::platform::imp::AgentOwnedViewCallbacks::new(
             move |_| {
@@ -1374,7 +1481,15 @@ impl EngineHost {
                 panic.fail();
                 resource_callback(panic.clone());
             },
-        );
+        )
+        .with_credential_denied(move || credential_denied.revoke_public_visual_lineage())
+        .with_redirect(move |destination| {
+            #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+            redirected.record_failure_cause(ResourceFailureCause::Redirected);
+            redirected.record_redirect(destination);
+            redirected.fail();
+            resource_callback(redirected.clone());
+        });
         #[cfg(all(
             target_os = "macos",
             feature = "native-agentic-work-lifetime-diagnostic"
@@ -1389,7 +1504,9 @@ impl EngineHost {
             &self.parent,
             ContextOwnedViewport::STANDARD,
             profile,
-            if guard.isolated_public() {
+            if guard.work_website_data() {
+                ContextProfileStorageClass::Durable
+            } else if guard.isolated_public() {
                 ContextProfileStorageClass::Ephemeral
             } else {
                 guard.storage()
@@ -1432,6 +1549,7 @@ impl EngineHost {
     pub(crate) fn progress_work_resource(&mut self, guard: &Arc<WorkResourceGuard>) {
         self.progress_work_action(guard);
         self.progress_work_observation(guard);
+        self.progress_work_media(guard);
         let id = guard.resource().identity().context();
         let Some(resource) = self
             .work_resources
@@ -1475,6 +1593,8 @@ impl EngineHost {
                 let task = resource.destruction.take();
                 drop(resource);
                 #[cfg(target_os = "windows")]
+                self.release_work_profile_cookie_source(id);
+                #[cfg(target_os = "windows")]
                 self.retire_windows_anonymous_work_sessions();
                 if let Some(task) = task {
                     task.complete(Outcome::Destroyed);
@@ -1490,7 +1610,6 @@ impl EngineHost {
         resource.progress_history_back(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_human(self.erasure_tombstones.contains(&resource.profile()));
         resource.progress_hand_on();
-        #[cfg(target_os = "windows")]
         resource.request_initial_frame();
         resource.progress_frame_capture();
         if resource
@@ -1547,6 +1666,10 @@ impl EngineHost {
                 task.complete(Outcome::Refused);
             }
             if let Some(task) = resource.revocation.take() {
+                task.complete(Outcome::Refused);
+            }
+            #[cfg(target_os = "windows")]
+            if let Some((task, _)) = resource.human_return.take() {
                 task.complete(Outcome::Refused);
             }
             return;

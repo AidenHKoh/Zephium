@@ -236,6 +236,26 @@ pub fn external_app_link(target: &str) -> Option<Url> {
     .then_some(url)
 }
 
+/// What a link for another application leads to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppLinkOutcome {
+    /// An app is registered: the person is asked before it opens.
+    Ask,
+    /// No app is registered but the person clicked: say so quietly.
+    Show,
+    /// No app is registered and the page acted by itself: do nothing, as
+    /// other browsers do, so a script redirect never nags.
+    Silent,
+}
+
+pub fn app_link_outcome(app_known: bool, user_gesture: bool) -> AppLinkOutcome {
+    match (app_known, user_gesture) {
+        (true, _) => AppLinkOutcome::Ask,
+        (false, true) => AppLinkOutcome::Show,
+        (false, false) => AppLinkOutcome::Silent,
+    }
+}
+
 /// Syntactic browser-tab target. Windows extension documents additionally
 /// require the engine's live, profile-specific installation grant. This is not
 /// permission to load an extension or to expose its resources to web pages.
@@ -281,6 +301,16 @@ fn looks_like_host(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{app_link_outcome, AppLinkOutcome};
+
+    #[test]
+    fn only_a_page_acting_alone_with_no_app_stays_silent() {
+        assert_eq!(app_link_outcome(true, true), AppLinkOutcome::Ask);
+        assert_eq!(app_link_outcome(true, false), AppLinkOutcome::Ask);
+        assert_eq!(app_link_outcome(false, true), AppLinkOutcome::Show);
+        assert_eq!(app_link_outcome(false, false), AppLinkOutcome::Silent);
+    }
+
     #[test]
     fn frames_may_hold_documents_their_page_builds() {
         for frame in [

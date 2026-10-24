@@ -764,6 +764,10 @@ struct WebViewAttributes<'a> {
   /// The callback is observational and must not grant page authority.
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+  /// Notification only: a native credential challenge is about to be cancelled.
+  /// Carries no challenge data and cannot change TLS or credential policy.
+  #[cfg(target_os = "macos")]
+  pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
 
   /// A download started handler to manage incoming downloads.
   ///
@@ -1019,6 +1023,8 @@ impl Default for WebViewAttributes<'_> {
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
       main_frame_navigation_attempt_handler: None,
+      #[cfg(target_os = "macos")]
+      credential_challenge_denied_handler: None,
       download_started_handler: Some(Box::new(|_, _| true)),
       download_completed_handler: None,
       download_policy: DownloadPolicy::UseHandlers,
@@ -1534,6 +1540,15 @@ impl<'a> WebViewBuilder<'a> {
     callback: impl Fn(String) + 'static,
   ) -> Self {
     self.attrs.main_frame_navigation_attempt_handler = Some(Box::new(callback));
+    self
+  }
+
+  /// Observe cancellation of a macOS native credential challenge, without
+  /// receiving its URL, protection space, or credential data. Server trust
+  /// continues through the ordinary system policy and is not reported here.
+  #[cfg(target_os = "macos")]
+  pub fn with_credential_challenge_denied_handler(mut self, callback: impl Fn() + 'static) -> Self {
+    self.attrs.credential_challenge_denied_handler = Some(std::rc::Rc::new(callback));
     self
   }
 

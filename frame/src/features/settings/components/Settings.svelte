@@ -6,24 +6,24 @@
   import {
     sections,
     searchSettings,
-    emptySections,
+    shownSections,
     type SettingsSection,
   } from "../lib/settings-model";
   import * as state from "../lib/settings-state.svelte";
-  import AppearancePage from "./sections/AppearancePage.svelte";
   import NewTabPage from "./sections/NewTabPage.svelte";
   import Icon from "$shared/ui/Icon";
   import { ArrowRight01Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import EmptyState from "$shared/ui/EmptyState";
   import Button from "$shared/ui/Button";
   const loaders = {
+    appearance: () => import("./sections/AppearancePage.svelte"),
     general: () => import("./sections/GeneralPage.svelte"),
     tabs: () => import("./sections/TabsPage.svelte"),
     profiles: () => import("./sections/ProfilesPage.svelte"),
     search: () => import("./sections/SearchPage.svelte"),
     privacy: () => import("./sections/PrivacyPage.svelte"),
     shortcuts: () => import("./sections/KeyboardPage.svelte"),
-    languages: () => import("./sections/LanguagesPage.svelte"),
+    features: () => import("./sections/FeaturesPage.svelte"),
     focus: () => import("./sections/FocusPage.svelte"),
     work: () => import("./sections/WorkPage.svelte"),
     ai: () => import("./sections/AiPage.svelte"),
@@ -35,10 +35,17 @@
     account: () => import("./sections/AccountPage.svelte"),
     about: () => import("./sections/AboutPage.svelte"),
   };
-  // A section this build does not offer opens the first one instead.
-  let current = $derived(
-    sections.find((section) => section.id === state.section()) ?? sections[0]!,
-  );
+  // A section this build does not offer opens the first one instead; one
+  // that left with Work and AI opens the Work page, where they come back.
+  let offered = $derived(shownSections());
+  let current = $derived.by(() => {
+    const wanted = sections.find((section) => section.id === state.section());
+    return (
+      offered.find((section) => section === wanted) ??
+      offered.find((section) => wanted?.group === "work" && section.id === "work") ??
+      offered[0]!
+    );
+  });
   let loader = $derived(current.id in loaders ? loaders[current.id as keyof typeof loaders] : null);
   let results = $derived(searchSettings(state.query()));
   let content: HTMLElement;
@@ -89,7 +96,6 @@
     <div class="settings-page">
       {#key state.query() ? "search" : current.id}<div class="settings-view">
           <header class="settings-page-heading">
-            <span class="settings-eyebrow">{m.settings_title()}</span>
             <h1 tabindex="-1">
               {state.query() ? m.settings_search_results() : current.title()}
             </h1>
@@ -115,14 +121,12 @@
                     onclick={() => state.select(result.section as SettingsSection, result.target)}
                     ><span
                       ><span class="settings-result-section"
-                        >{sections.find((section) => section.id === result.section)?.title()}</span
+                        >{offered.find((section) => section.id === result.section)?.title()}</span
                       ><strong>{result.label()}</strong><small>{result.description()}</small></span
                     ><Icon icon={ArrowRight01Icon} size={16} /></button
                   >{/each}
               </div>{/if}
-          {:else if current.id === "appearance"}<AppearancePage />
           {:else if current.id === "newtab"}<NewTabPage />
-          {:else if emptySections.has(current.id)}<!-- Reserved product section; intentionally empty. -->
           {:else if loader}<LazyView
               {loader}
               loadingLabel={m.surface_loading()}

@@ -57,6 +57,51 @@ fn settings(account: PublicReadWorkAccount) -> PublicReadWorkSettings {
     }
 }
 
+#[test]
+fn host_effect_overlap_does_not_break_initial_or_successor_admission() {
+    for class in [
+        SemanticEffectClass::Read,
+        SemanticEffectClass::LocalWrite,
+        SemanticEffectClass::ExternalWrite,
+        SemanticEffectClass::Communication,
+        SemanticEffectClass::Purchase,
+        SemanticEffectClass::Destructive,
+    ] {
+        for read_only in [false, true] {
+            for allow_edits in [false, true] {
+                for approved in [false, true] {
+                    let mut commits = if approved { vec![class, class] } else { vec![] };
+                    if allow_edits {
+                        commits.push(SemanticEffectClass::ExternalWrite);
+                    }
+                    // Fresh and resumed runs get independent identities, but the same
+                    // exact approved effect union must admit in both.
+                    for _ in 0..2 {
+                        let mut definition = objective();
+                        definition.navigation = AgentNavigationDiscovery::try_new_site_session(
+                            ContextNavigationTarget::parse("https://example.test/project").unwrap(),
+                            16,
+                        )
+                        .unwrap();
+                        assert!(assemble_with_actions(
+                            identity(),
+                            ContextProfileStorageClass::Durable,
+                            definition,
+                            settings(PublicReadWorkAccount::Anonymous),
+                            Some(LocalActions {
+                                policy: Box::new(read_interactions::SessionReadingPolicy),
+                                max_actions: 8,
+                                read_only,
+                                commits: commits.clone(),
+                            }),
+                        ).is_ok(), "class={class:?} read_only={read_only} allow_edits={allow_edits} approved={approved}");
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn join(identity: ContextIdentity) -> ContextJoin {
     let mut registry = ContextRegistry::new();
     registry
@@ -372,7 +417,21 @@ pub(super) fn reading_observation(
     nodes: serde_json::Value,
     completeness: &str,
 ) -> SemanticObservation {
-    let context = join(identity());
+    reading_observation_with_approval(nodes, completeness, None)
+}
+
+#[cfg(feature = "durable-runtime")]
+pub(super) fn reading_observation_with_approval(
+    nodes: serde_json::Value,
+    completeness: &str,
+    approval: Option<&str>,
+) -> SemanticObservation {
+    static APPROVAL_CONTEXT: std::sync::OnceLock<ContextIdentity> = std::sync::OnceLock::new();
+    let context = join(if approval.is_some() {
+        *APPROVAL_CONTEXT.get_or_init(identity)
+    } else {
+        identity()
+    });
     let frame = SemanticFrameJoin::try_new(
         context,
         FrameId::MAIN,
@@ -381,7 +440,10 @@ pub(super) fn reading_observation(
         SemanticFrameTrust::SameOrigin,
     )
     .unwrap();
-    let wire = serde_json::json!({"v":1,"i":1,"g":1,"c":completeness,"n":nodes});
+    let mut wire = serde_json::json!({"v":1,"i":1,"g":1,"c":completeness,"n":nodes});
+    if let Some(nonce) = approval {
+        wire["ap"] = nonce.into();
+    }
     let snapshot = decode_semantic_snapshot(
         SemanticDecodeContext::new(
             SemanticInvocationId::new(1).unwrap(),
@@ -391,7 +453,14 @@ pub(super) fn reading_observation(
         &serde_json::to_vec(&wire).unwrap(),
     )
     .unwrap();
-    SemanticObservationAssembler::new(
+    // Work captures mark every embedded frame unobserved, as here.
+    let boundaries = snapshot
+        .nodes()
+        .iter()
+        .filter(|node| node.role() == SemanticRole::FrameBoundary)
+        .map(SemanticNode::reference)
+        .collect::<Vec<_>>();
+    let mut assembler = SemanticObservationAssembler::new(
         SemanticObservationRequest::initial(
             SemanticObservationId::new(1).unwrap(),
             context,
@@ -399,9 +468,17 @@ pub(super) fn reading_observation(
         ),
         snapshot,
     )
-    .unwrap()
-    .finish()
-    .unwrap()
+    .unwrap();
+    for boundary in boundaries {
+        assembler
+            .mark_frame_unsupported(
+                FrameId::MAIN,
+                boundary,
+                SemanticFrameUnsupported::PolicyBlocked,
+            )
+            .unwrap();
+    }
+    assembler.finish().unwrap()
 }
 
 #[cfg(feature = "durable-runtime")]
@@ -716,6 +793,41 @@ fn human_account_attestation_keeps_isolated_storage_and_single_page_scope() {
 
 #[cfg(feature = "durable-runtime")]
 #[test]
+fn work_memory_is_isolated_from_the_profile_and_absent_for_a_private_profile() {
+    for (storage, remembered) in [
+        (ContextProfileStorageClass::Durable, true),
+        (ContextProfileStorageClass::Ephemeral, false),
+    ] {
+        let (input, _) = assemble(
+            identity(),
+            storage,
+            objective(),
+            settings(PublicReadWorkAccount::Anonymous),
+        )
+        .unwrap();
+        let input = input.with_work_website_data();
+        assert_eq!(input.uses_work_website_data(), remembered);
+        let spec = input.retained_resource_spec().unwrap();
+        assert!(spec.isolated_public);
+        assert_eq!(spec.work_website_data, remembered);
+        assert_eq!(spec.storage, storage);
+    }
+    let (input, _) = assemble(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        objective(),
+        settings(PublicReadWorkAccount::Anonymous),
+    )
+    .unwrap();
+    let spec = input
+        .with_isolated_website_data()
+        .retained_resource_spec()
+        .unwrap();
+    assert!(spec.isolated_public && !spec.work_website_data);
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
 fn a_recorded_consent_dialog_is_dismissed_by_its_refusing_control_only_by_recipe() {
     use serde_json::json;
     let policy = read_interactions::ReadingInteractionPolicy;
@@ -856,6 +968,32 @@ fn a_recorded_specifications_disclosure_in_view_is_toggled_by_recipe() {
 
 #[cfg(feature = "durable-runtime")]
 #[test]
+fn allegros_privacy_dialog_is_refused_by_its_do_not_agree_control() {
+    use serde_json::json;
+    let policy = read_interactions::ReadingInteractionPolicy;
+    let button = |key: u32, name: &str, y: u32| json!({"k":key,"p":0,"r":"button","n":name,"ak":1,"o":9,"fc":true,"b":{"x":10,"y":y,"w":300,"h":40}});
+    // Allegro's consent dialog as seen on 2026-10-14: an alert dialog about
+    // privacy with a language picker, agree, do not agree, and settings.
+    let observation = reading_observation(
+        json!([
+            {"k":1,"r":"dialog","n":"Dbamy o Twoją prywatność","fc":true,"b":{"x":0,"y":0,"w":800,"h":600}},
+            {"k":2,"p":0,"r":"combobox","n":"język","fc":true,"b":{"x":10,"y":20,"w":120,"h":30}},
+            {"k":3,"p":0,"r":"paragraph","t":"Dzięki plikom cookies i technologiom pokrewnym (np. piksele, SDK) oraz przetwarzaniu Twoich danych osobowych możemy zapewnić Ci dopasowany do Ciebie wyświetlane treści.","fc":true},
+            button(4, "Zgadzam się", 500),
+            button(5, "Nie zgadzam się", 500),
+            button(6, "Zmieniam zgody", 500)
+        ]),
+        "complete",
+    );
+    let nodes = observation.frames()[0].nodes();
+    assert_eq!(
+        policy.consent_dismissal(&observation),
+        Some(nodes[4].reference())
+    );
+}
+
+#[cfg(feature = "durable-runtime")]
+#[test]
 fn a_page_in_the_persons_session_is_read_never_dismissed_or_consented() {
     use serde_json::json;
     let policy = read_interactions::SessionReadingPolicy;
@@ -897,4 +1035,96 @@ fn a_page_in_the_persons_session_is_read_never_dismissed_or_consented() {
         .unwrap()
         .contains(SemanticOperationClass::Click));
     assert!(policy.consent_dismissal(&observation).is_none());
+}
+
+/// A page task on a site, in the person's session (after its entry
+/// question) or in Work's own website data: the shape the app compiles.
+#[cfg(feature = "durable-runtime")]
+fn site_task(
+    objective_bytes: usize,
+    yours: bool,
+) -> Result<(AgentWorkRunInput, Box<dyn AgentWorkTask>), AgentWorkFailure> {
+    let account = AgentAccountId::generate();
+    let mut definition = objective();
+    definition.objective = "x".repeat(objective_bytes);
+    definition.navigation = AgentNavigationDiscovery::try_new_site_session(
+        ContextNavigationTarget::parse("https://www.airbnb.com/s/San-Francisco/homes?adults=1")
+            .unwrap(),
+        16,
+    )
+    .unwrap();
+    let mut limits = settings(if yours {
+        PublicReadWorkAccount::Identified {
+            account,
+            source: Box::new(crate::account_scope::SessionAccount { account }),
+        }
+    } else {
+        PublicReadWorkAccount::Anonymous
+    });
+    limits.max_model_calls = 40;
+    assemble_with_actions(
+        identity(),
+        ContextProfileStorageClass::Durable,
+        definition,
+        limits,
+        Some(LocalActions {
+            policy: Box::new(RefuseLocalActions),
+            max_actions: 60,
+            read_only: false,
+            commits: Vec::new(),
+        }),
+    )
+}
+
+// The provider counts an objective conservatively, one token per byte: a
+// page task whose objective passed the Work text bound but not this one was
+// refused before its page opened, as "The browser was not available".
+#[cfg(feature = "durable-runtime")]
+#[test]
+fn a_site_task_admits_an_objective_up_to_the_provider_count_and_no_further() {
+    let limit = zephium_agentic::MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS as usize;
+    for yours in [false, true] {
+        let (input, task) = site_task(limit, yours).unwrap();
+        assert!(task.allows_actions_before_extraction());
+        let input = input.persist_extraction_result().unwrap();
+        assert!(zephium_agent_controller::AgentWorkController::try_new(
+            input,
+            zephium_agent_provider_transport::AgentProviderTransportConfig::STANDARD,
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "unused-test-credential".into()
+            )
+            .unwrap(),
+            Arc::new(DormantAudit),
+            task
+        )
+        .is_ok());
+        assert_eq!(
+            site_task(limit + 1, yours).err(),
+            Some(AgentWorkFailure::Contract)
+        );
+    }
+}
+
+#[test]
+fn committing_labels_cannot_become_read_actions_by_claiming_a_disclosure_or_tab_role() {
+    use serde_json::json;
+    for role in ["button", "tab"] {
+        for activation in [1, 6] {
+            for name in ["Send message", "Accept"] {
+                let observation = reading_observation(
+                    json!([
+                        {"k":1,"r":"document","o":16,"fc":true},
+                        {"k":2,"p":0,"r":role,"n":name,"ak":activation,"o":9,"fc":true}
+                    ]),
+                    "complete",
+                );
+                let frame = &observation.frames()[0];
+                assert_eq!(
+                    site_work::classify(SemanticActionKind::Click, None, &frame.nodes()[1], frame),
+                    site_work::SiteEffect::Commit(site_work::Consequence::Communication)
+                );
+            }
+        }
+    }
 }

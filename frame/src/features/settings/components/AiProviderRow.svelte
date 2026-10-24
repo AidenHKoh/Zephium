@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import { commands } from "$shared/ipc/bindings";
-  import type { WorkModelProvider } from "$shared/ipc/bindings";
-  import { type ModelsSession, keyState, providerMark, providerName } from "$domain/ai";
+  import type { WorkLocalServerV1, WorkModelProvider } from "$shared/ipc/bindings";
+  import { type ModelsSession, keyState, providerName } from "$domain/ai";
+  import ProviderMark from "$shared/ui/ProviderMark";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
   import Icon from "$shared/ui/Icon";
@@ -24,6 +25,10 @@
     google: "https://aistudio.google.com/apikey",
     deep_seek: "https://platform.deepseek.com/api_keys",
     open_router: "https://openrouter.ai/settings/keys",
+    xai: "https://console.x.ai",
+    mistral: "https://console.mistral.ai/api-keys",
+    groq: "https://console.groq.com/keys",
+    cerebras: "https://cloud.cerebras.ai",
   };
   const keyUrl = $derived(keyUrls[provider]);
   const configured = $derived(custom ? !!base : key !== "missing");
@@ -34,10 +39,35 @@
       google: m.ai_provider_google,
       deep_seek: m.ai_provider_deep_seek,
       open_router: m.ai_provider_open_router,
+      xai: m.ai_provider_xai,
+      mistral: m.ai_provider_mistral,
+      groq: m.ai_provider_groq,
+      cerebras: m.ai_provider_cerebras,
       compatible: m.ai_provider_compatible,
       cloud: m.ai_provider_compatible,
     }[provider](),
   );
+
+  /** Model servers already running here, offered in one click. */
+  let local = $state.raw<WorkLocalServerV1[]>([]);
+  onMount(() => {
+    if (!custom) return;
+    let live = true;
+    void Promise.resolve()
+      .then(() => commands.workLocalServers())
+      .then((found) => {
+        if (live) local = found;
+      })
+      .catch(() => {});
+    return () => (live = false);
+  });
+  const ollama = $derived(!!base && /^http:\/\/(localhost|127\.0\.0\.1):11434\b/u.test(base));
+
+  async function useLocal(server: WorkLocalServerV1) {
+    message = null;
+    if (!(await session.setEndpoint(server.base)))
+      message = { text: explain(session.fault?.fault), tone: "error" };
+  }
 
   let editing = $state(false);
   let secret = $state("");
@@ -73,6 +103,8 @@
         return m.ai_fault_request();
       case "keychain":
         return m.ai_key_keychain();
+      case "keychain_waiting":
+        return m.ai_key_keychain_waiting();
       case "invalid":
         return custom ? m.ai_endpoint_invalid() : m.ai_key_refused({ provider: name });
       default:
@@ -141,9 +173,7 @@
 
 <div class="ai-row" data-editing={editing}>
   <div class="head">
-    <span class="tile" aria-hidden="true"
-      ><Icon icon={providerMark(provider)} size={17} strokeWidth={1.5} /></span
-    >
+    <span class="tile" aria-hidden="true"><ProviderMark {provider} size={20} /></span>
     <div class="copy">
       <h3>{name}</h3>
       <p>
@@ -203,6 +233,15 @@
         }}>{m.ai_get_key({ provider: name })}</a
       >
     </p>{/if}
+  {#if custom && !configured && !editing && local.length}<div class="local">
+      {#each local as server (server.kind)}<Button
+          size="compact"
+          disabled={!!session.busy}
+          onclick={() => void useLocal(server)}
+          >{server.kind === "ollama" ? m.ai_local_use_ollama() : m.ai_local_use_lm_studio()}</Button
+        >{/each}
+    </div>{/if}
+  {#if custom && ollama && !editing}<p class="message">{m.ai_local_ollama_context()}</p>{/if}
   {#if providerFault && !message}<p class="message" role="status">{explain(providerFault)}</p>{/if}
   {#if editing}
     <form
@@ -397,6 +436,12 @@
   .message {
     margin: 8px 0 0 44px;
     white-space: normal;
+  }
+
+  .local {
+    display: flex;
+    gap: 6px;
+    margin: 10px 0 0 44px;
   }
 
   a {

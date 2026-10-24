@@ -23,6 +23,7 @@
           actions={card.actions}
           dismissLabel={m.update_dismiss()}
           ondismiss={card.dismiss}
+          expires={card.expires}
         />{/key}
     {/if}
     {#if pill}

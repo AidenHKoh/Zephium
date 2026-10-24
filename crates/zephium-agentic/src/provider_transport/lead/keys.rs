@@ -20,6 +20,10 @@ pub fn service(provider: WorkModelProvider) -> Option<&'static str> {
         WorkModelProvider::Google => "app.zephium.agent-provider.google",
         WorkModelProvider::DeepSeek => "app.zephium.agent-provider.deepseek",
         WorkModelProvider::OpenRouter => "app.zephium.agent-provider.openrouter",
+        WorkModelProvider::XAi => "app.zephium.agent-provider.xai",
+        WorkModelProvider::Mistral => "app.zephium.agent-provider.mistral",
+        WorkModelProvider::Groq => "app.zephium.agent-provider.groq",
+        WorkModelProvider::Cerebras => "app.zephium.agent-provider.cerebras",
         WorkModelProvider::Compatible => "app.zephium.agent-provider.compatible",
         WorkModelProvider::Cloud => return None,
     })
@@ -34,6 +38,9 @@ pub enum LeadKeyError {
     Inaccessible,
     /// The value is not a usable key.
     Invalid,
+    /// An earlier Keychain call is waiting on a prompt the person has not
+    /// answered; this one never reached the Keychain.
+    AwaitingApproval,
 }
 
 fn cache() -> &'static Mutex<HashMap<WorkModelProvider, Arc<LeadSecret>>> {
@@ -159,6 +166,8 @@ impl LeadCredential for KeychainCredential {
                 Ok(Err(LeadKeyError::Missing | LeadKeyError::Invalid)) => {
                     Err(WorkModelError::MissingKey)
                 }
+                // Not the provider refusing the key: the Keychain is busy.
+                Ok(Err(LeadKeyError::AwaitingApproval)) => Err(WorkModelError::MissingKey),
                 Ok(Err(LeadKeyError::Inaccessible)) | Err(_) => Err(WorkModelError::Unauthorized),
             }
         })
@@ -196,12 +205,12 @@ mod platform {
         options
     }
 
-    fn turn() -> std::sync::MutexGuard<'static, ()> {
-        crate::provider_transport::keychain_turn()
+    fn turn() -> Result<zephium_credentials::Turn, LeadKeyError> {
+        crate::provider_transport::keychain_turn().map_err(|_| LeadKeyError::AwaitingApproval)
     }
 
     pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         match read_once(service) {
             Err(LeadKeyError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -227,7 +236,7 @@ mod platform {
     }
 
     pub(super) fn write(service: &str, secret: &LeadSecret) -> Result<(), LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         let keychain = login()?;
         // Replace by delete + add: updating in place would first read the
         // old secret, which prompts when another binary created the item.
@@ -241,7 +250,7 @@ mod platform {
     }
 
     pub(super) fn delete(service: &str) -> Result<(), LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         let keychain = login()?;
         match search(service, &keychain).delete() {
             Ok(()) => Ok(()),
@@ -251,7 +260,7 @@ mod platform {
     }
 
     pub(super) fn present(service: &str) -> Result<bool, LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         let keychain = login()?;
         let mut options = search(service, &keychain);
         options.load_attributes(true);
@@ -273,11 +282,12 @@ mod platform {
             VaultError::Missing => LeadKeyError::Missing,
             VaultError::Invalid => LeadKeyError::Invalid,
             VaultError::Inaccessible | VaultError::Capacity => LeadKeyError::Inaccessible,
+            VaultError::AwaitingApproval => LeadKeyError::AwaitingApproval,
         }
     }
 
     pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         let loaded = match zephium_credentials::read(service) {
             Err(VaultError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -291,17 +301,17 @@ mod platform {
     }
 
     pub(super) fn write(service: &str, secret: &LeadSecret) -> Result<(), LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         zephium_credentials::write(service, secret.expose().as_bytes()).map_err(map)
     }
 
     pub(super) fn delete(service: &str) -> Result<(), LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         zephium_credentials::delete(service).map_err(map)
     }
 
     pub(super) fn present(service: &str) -> Result<bool, LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         zephium_credentials::present(service).map_err(map)
     }
 }

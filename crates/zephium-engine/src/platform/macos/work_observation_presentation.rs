@@ -5,9 +5,9 @@
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 use objc2::rc::{Retained, Weak};
-use objc2_app_kit::{
-    NSApplication, NSView, NSWindow, NSWindowOcclusionState, NSWindowOrderingMode,
-};
+#[cfg(feature = "agentic-browser-qa")]
+use objc2_app_kit::NSWindowOcclusionState;
+use objc2_app_kit::{NSApplication, NSView, NSWindow, NSWindowOrderingMode};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_web_kit::WKWebView;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -269,24 +269,17 @@ impl WorkObservationPresentation {
             !responder_inside(&self.main, &self.page),
         ];
         let exact = poll_facts.into_iter().all(|fact| fact);
-        // A hidden or minimized window pauses the page (Acquiring) until it is
-        // shown again; the deadline bounds the pause. Only a broken hierarchy fails.
-        let visible = !self.main.isMiniaturized()
-            && self
-                .main
-                .occlusionState()
-                .contains(NSWindowOcclusionState::Visible)
-            && !self.page.visibleRect().is_empty();
+        // Occlusion and minimization describe the person's window, not the
+        // retained page's authority. DOM work keeps its fixed viewport and
+        // input exclusion even while AppKit is not compositing that window.
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         if let Some(failure) = classify_predicates(poll_facts, POLL_FAILURES) {
             invoke_failure_diagnostic(self.failure_diagnostic.as_ref(), failure);
         }
         self.state = if !exact {
             PresentationState::Failed
-        } else if visible {
-            PresentationState::Ready
         } else {
-            PresentationState::Acquiring
+            PresentationState::Ready
         };
         self.state
     }
@@ -384,7 +377,7 @@ fn viewport() -> NSRect {
     NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1280.0, 800.0))
 }
 
-/// The human window must still exist, shown or minimized. Activation, key
+/// The exact human window must still exist. Visibility, activation, key
 /// status and the responder are not required: the page sits beneath the chrome,
 /// so no input reaches it whichever window the human is using.
 fn window_present(
@@ -395,9 +388,12 @@ fn window_present(
     ),
 ) -> bool {
     let facts = [main.isVisible(), main.isMiniaturized()];
-    let present = present_facts(facts);
+    let present = app
+        .windows()
+        .iter()
+        .any(|window| std::ptr::eq(&*window, main));
     #[cfg(not(feature = "native-agentic-work-lifetime-diagnostic"))]
-    let _ = app;
+    let _ = facts;
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     if !present {
         invoke_failure_diagnostic(
@@ -417,10 +413,6 @@ fn window_present(
         );
     }
     present
-}
-
-const fn present_facts([visible, miniaturized]: [bool; 2]) -> bool {
-    visible || miniaturized
 }
 
 /// Tolerate a changed human responder, never routing the human window's
@@ -468,6 +460,7 @@ fn human_owners(app: &NSApplication) -> HumanOwners {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     use super::*;
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     #[test]
@@ -500,10 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shown_or_minimized_window_keeps_the_page_without_repairing_focus() {
-        assert!(present_facts([true, false]));
-        assert!(present_facts([false, true]));
-        assert!(!present_facts([false, false]));
+    fn a_hidden_window_keeps_the_owned_page_without_repairing_focus() {
         let source = include_str!("work_observation_presentation.rs")
             .split("\n#[cfg(test)]")
             .next()
@@ -522,6 +512,28 @@ mod tests {
         ] {
             assert!(!source.contains(forbidden));
         }
+        let poll = source
+            .split("pub(crate) fn poll(&mut self)")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn retire")
+            .next()
+            .unwrap();
+        for visibility in [
+            "occlusionState",
+            "isMiniaturized",
+            "isOnActiveSpace",
+            "visibleRect",
+        ] {
+            assert!(
+                !poll.contains(visibility),
+                "{visibility} must not gate Work execution"
+            );
+        }
+        assert!(source
+            .split_whitespace()
+            .collect::<String>()
+            .contains("app.windows().iter().any"));
         assert!(source.contains("NSWindowOrderingMode::Below"));
         assert!(source.contains("passive_page::register(&self.page)"));
         assert!(source.contains("self.cleanup_failed |="));

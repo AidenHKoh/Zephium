@@ -49,21 +49,34 @@ test("the canvas lets its layer go once motion settles, never while a helper sti
   root.remove();
 });
 
-test("a person at the canvas holds its layer, and it goes once they leave it be or the window hides", async () => {
+test("a moving canvas holds its layers, and lets them go once it stops or the window hides", async () => {
   const { root, released } = canvas();
   const viewport = root.querySelector<HTMLElement>(".svelte-flow__viewport")!;
   const release = layerRelease(root);
+  // A pointer resting on the canvas, or crossing it, holds nothing.
   root.dispatchEvent(new PointerEvent("pointermove", { bubbles: true }));
+  expect(viewport.dataset.held).toBeUndefined();
+  // A pan step does, and it is let go a moment after the canvas stops.
+  root.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaX: 4 }));
   expect(viewport.style.willChange).toBe("transform");
+  expect(viewport.dataset.held).toBe("");
+  await wait(1400);
+  expect(viewport.dataset.held).toBeUndefined();
+  // A drag holds them too.
+  root.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons: 1 }));
+  expect(viewport.style.willChange).toBe("transform");
+  expect(viewport.dataset.held).toBe("");
+  const before = released();
   release.moved();
   await wait(400);
-  // Held: nothing lets it go while the person may pan.
-  expect(released()).toBe(0);
+  // Held: nothing lets it go while the canvas may still move.
+  expect(released()).toBe(before);
   Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
   document.dispatchEvent(new Event("visibilitychange"));
   expect(viewport.style.willChange).toBe("");
+  expect(viewport.dataset.held).toBeUndefined();
   await wait(400);
-  expect(released()).toBe(1);
+  expect(released()).toBe(before + 1);
   Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
   release.destroy();
   root.remove();

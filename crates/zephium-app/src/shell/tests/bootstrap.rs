@@ -113,6 +113,7 @@ fn qa_settings_tab_is_dropped_and_first_bootstrap_opens_a_usable_new_tab() {
                 id: space,
                 profile,
                 name: "Today".into(),
+                look: Default::default(),
             }],
             items: vec![PersistedItem {
                 id: settings,
@@ -165,6 +166,7 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
             url: format!("https://{host}/"),
             title: host.into(),
             zoom: 1.0,
+            last_active_ms: None,
         },
     };
     let store = Arc::new(FakeStore {
@@ -186,16 +188,19 @@ fn bootstrap_never_creates_views_for_foreign_focus_or_split_references() {
                     id: local_space,
                     profile: local_profile,
                     name: "Local".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: sibling_space,
                     profile: local_profile,
                     name: "Sibling".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: foreign_space,
                     profile: foreign_profile,
                     name: "Foreign".into(),
+                    look: Default::default(),
                 },
             ],
             items: vec![
@@ -318,6 +323,7 @@ fn exhausted_space_aggregate_refuses_first_run_without_panicking() {
             id: SpaceId::from(27_000 + index as u128),
             profile,
             name: "Full".into(),
+            look: Default::default(),
         }));
     }
 
@@ -411,6 +417,7 @@ fn degraded_ancillary_profiles_are_recorded_without_blocking_exact_session_boots
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()
@@ -443,6 +450,7 @@ fn forged_degraded_profile_report_cannot_bootstrap_an_unrelated_session() {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()

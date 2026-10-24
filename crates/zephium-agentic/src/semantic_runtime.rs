@@ -55,12 +55,15 @@ pub const MAX_SEMANTIC_RUNTIME_VISITED_NODES: u32 = 32 * 1024;
 pub const MAX_SEMANTIC_RUNTIME_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Maximum immutable production runtime source bytes installed per document.
 ///
-/// The fixed 176 KiB ceiling covers the digest-pinned semantic runtime including
+/// The fixed 216 KiB ceiling covers the digest-pinned semantic runtime including
 /// production Fill, native-select, public links and bounded source-coalesced
 /// windows, keyword discovery, independent page-dialog samples, bounded fill
 /// diagnostics, covered-target centring and the page's structured-data facts,
-/// with an explicit installation bound per platform.
-pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 176 * 1024;
+/// re-rendered target rebinding, settle quiet and custom listbox choice,
+/// guarded native number-key defaults, ARIA-owned listboxes, fallback names
+/// for unnamed form fields and editors, and Return in an editor, with an
+/// explicit installation bound per platform.
+pub const MAX_SEMANTIC_RUNTIME_SOURCE_BYTES: usize = 216 * 1024;
 /// Sole fixed isolated-world global installed by the production runtime.
 pub const SEMANTIC_RUNTIME_GLOBAL_NAME: &str = "__zephiumSemanticRuntimeV1";
 /// Sole fixed native message handler visible in the production isolated world.
@@ -80,6 +83,9 @@ pub const SEMANTIC_RUNTIME_CHANNEL_PARK: &str = "K1";
 pub const SEMANTIC_RUNTIME_CHANNEL_PARKED: &str = "K1:A";
 /// Exact runtime notice after exhausting its per-document invocation budget.
 pub const SEMANTIC_RUNTIME_CHANNEL_EXHAUSTED: &str = "X1";
+/// Exact closed invocation that runs the fixed human-wall survey; the
+/// result is a decimal code 0..=24 or an `E1:` fault.
+pub const SEMANTIC_RUNTIME_HUMAN_SURVEY: &str = "H1:survey";
 /// Maximum closed invocations accepted by one document before a fresh document is required.
 pub const MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS: u16 = 4096;
 /// Largest UTF-8 script-message body accepted from the fixed runtime.
@@ -88,8 +94,8 @@ pub const MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES: usize =
 
 const SEMANTIC_RUNTIME_SOURCE: &str = include_str!("../assets/semantic-runtime-v1.js");
 const SEMANTIC_RUNTIME_SOURCE_SHA256: [u8; 32] = [
-    0xc9, 0x8d, 0x00, 0x4a, 0xc3, 0x92, 0x15, 0xe0, 0x5a, 0xeb, 0x29, 0x26, 0x98, 0xc2, 0xeb, 0x43,
-    0x5c, 0xdf, 0x24, 0xcb, 0xfd, 0xba, 0x8e, 0x04, 0x83, 0xaa, 0x4f, 0xdf, 0x17, 0xec, 0xd2, 0xef,
+    0xcd, 0x26, 0x69, 0x89, 0xc1, 0x70, 0x63, 0x04, 0x30, 0x1b, 0xf0, 0x00, 0x08, 0xda, 0x68, 0x54,
+    0x6d, 0x34, 0x9b, 0x65, 0x48, 0x6a, 0xaf, 0x44, 0x4b, 0xa4, 0x8a, 0xb2, 0xa7, 0xf4, 0x45, 0x12,
 ];
 
 /// Immutable production program passed only to a trusted isolated-world adapter.
@@ -105,6 +111,38 @@ impl SemanticRuntimeProgram {
     /// the separately encoded closed request grammar.
     pub const fn source(self) -> &'static str {
         SEMANTIC_RUNTIME_SOURCE
+    }
+
+    /// Immutable installation containing the independently bounded pixel
+    /// privacy helper and the human-wall survey. The survey is reachable only
+    /// through the runtime's closed [`SEMANTIC_RUNTIME_HUMAN_SURVEY`] pull, so
+    /// no automated call needs an activation-granting evaluation API.
+    pub fn installation_source(self) -> &'static str {
+        concat!(
+            include_str!("../assets/semantic-record-media-v1.js"),
+            include_str!("../assets/semantic-pixel-privacy-v1.js"),
+            "// Fixed passive human-wall survey; closed numeric codes only.\n(() => {\nconst NAME = \"__zephiumHumanSurveyV1\";\nif (Object.hasOwn(globalThis, NAME)) return;\nconst survey = () => { const code =\n",
+            include_str!("../assets/work-human-wall-v1.js"),
+            ";\nreturn typeof code === \"number\" && Number.isInteger(code) && code >= 0 && code <= 24 ? String(code) : \"E1:survey\"; };\nObject.defineProperty(globalThis, NAME, {value: Object.freeze({survey}), writable: false, configurable: false, enumerable: false});\n})();\n",
+            include_str!("../assets/semantic-runtime-v1.js")
+        )
+    }
+
+    /// The fixed survey expression itself, for adapters that run it in a
+    /// private world they created (Windows CDP `Runtime.callFunctionOn`).
+    pub const fn human_survey_source(self) -> &'static str {
+        include_str!("../assets/work-human-wall-v1.js")
+    }
+
+    /// The source the Windows compact program is generated from; it has its
+    /// own survey path and does not carry the macOS survey helper.
+    #[cfg(test)]
+    fn cdp_basis(self) -> &'static str {
+        concat!(
+            include_str!("../assets/semantic-record-media-v1.js"),
+            include_str!("../assets/semantic-pixel-privacy-v1.js"),
+            include_str!("../assets/semantic-runtime-v1.js")
+        )
     }
 
     /// Precompacted identical program for the fixed Windows CDP wire ceiling.
@@ -695,6 +733,9 @@ pub fn encode_semantic_action_runtime_invocation(
         request.scroll_recipe()
     ));
     let wire = SemanticActionRuntimeInvocationWire {
+        approval: request
+            .approval_binding()
+            .map(crate::SemanticApprovalBinding::wire),
         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
         operation: "action_execute",
         attempt: attempt.get(),
@@ -714,6 +755,7 @@ pub fn encode_semantic_action_runtime_invocation(
         target_descriptor: request.target_runtime_descriptor(),
         option_descriptor,
         page_dialog_opened: request.page_dialog_opened(),
+        settle_quiet: request.settle_quiet_millis(),
         press: request.press_key().map(press_key_wire),
         scroll: request
             .scroll_recipe()
@@ -735,11 +777,7 @@ pub fn encode_semantic_action_runtime_invocation(
             })
             .transpose()?,
     };
-    let encoded =
-        serde_json::to_string(&wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
-    if encoded.len() > MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES {
-        return Err(SemanticActionRuntimeInvocationError::Encoding);
-    }
+    let encoded = encode_action_wire(&wire)?;
     Ok(SemanticActionRuntimeInvocation {
         attempt,
         checkpoint_invocation,
@@ -747,6 +785,17 @@ pub fn encode_semantic_action_runtime_invocation(
         frame: request.frame().clone(),
         encoded,
     })
+}
+
+fn encode_action_wire(
+    wire: &SemanticActionRuntimeInvocationWire<'_>,
+) -> Result<String, SemanticActionRuntimeInvocationError> {
+    let encoded =
+        serde_json::to_string(wire).map_err(|_| SemanticActionRuntimeInvocationError::Encoding)?;
+    if encoded.len() > MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES {
+        return Err(SemanticActionRuntimeInvocationError::Encoding);
+    }
+    Ok(encoded)
 }
 
 pub(crate) const fn semantic_role_wire(role: SemanticRole) -> &'static str {
@@ -848,6 +897,14 @@ pub enum SemanticActionRuntimeFault {
     TargetChanged,
     /// Captured semantic role, name, state or operation no longer matches.
     TargetDescriptorChanged,
+    /// Fresh descriptor could not be fully observed.
+    TargetDescriptorIncomplete,
+    /// The observed accessible name changed before dispatch.
+    TargetNameChanged,
+    /// The observed control state changed before dispatch.
+    TargetStateChanged,
+    /// The observed operation set changed before dispatch.
+    TargetOperationsChanged,
     /// Target layout moved beyond the admitted geometry tolerance.
     TargetGeometryChanged,
     /// Target became disabled or read-only for this operation.
@@ -917,11 +974,11 @@ impl SemanticActionRuntimeFault {
             "busy" => Some(Self::Busy),
             "stale_reference" => Some(Self::StaleReference),
             "target_changed" => Some(Self::TargetChanged),
-            "target_descriptor_changed"
-            | "target_descriptor_incomplete"
-            | "target_name_changed"
-            | "target_state_changed"
-            | "target_operations_changed" => Some(Self::TargetDescriptorChanged),
+            "target_descriptor_changed" => Some(Self::TargetDescriptorChanged),
+            "target_descriptor_incomplete" => Some(Self::TargetDescriptorIncomplete),
+            "target_name_changed" => Some(Self::TargetNameChanged),
+            "target_state_changed" => Some(Self::TargetStateChanged),
+            "target_operations_changed" => Some(Self::TargetOperationsChanged),
             "target_geometry_changed" => Some(Self::TargetGeometryChanged),
             "target_disabled" => Some(Self::TargetDisabled),
             "credential_boundary" => Some(Self::CredentialBoundary),
@@ -1289,12 +1346,16 @@ struct RuntimeBudgetWire {
 
 #[derive(Serialize)]
 struct SemanticActionRuntimeInvocationWire<'a> {
+    #[serde(rename = "ap", skip_serializing_if = "Option::is_none")]
+    approval: Option<(String, u16, Option<u16>)>,
     #[serde(rename = "sc", skip_serializing_if = "Option::is_none")]
     scroll: Option<[&'static str; 2]>,
     #[serde(rename = "pk", skip_serializing_if = "Option::is_none")]
     press: Option<&'static str>,
     #[serde(rename = "u", skip_serializing_if = "std::ops::Not::not")]
     page_dialog_opened: bool,
+    #[serde(rename = "q", skip_serializing_if = "Option::is_none")]
+    settle_quiet: Option<u32>,
     #[serde(rename = "v")]
     version: u16,
     #[serde(rename = "o")]
@@ -1460,6 +1521,38 @@ mod tests {
             .expect("assembler")
             .finish()
             .expect("observation")
+    }
+
+    #[test]
+    fn action_revalidation_diagnostics_preserve_the_closed_reason_without_content() {
+        for (code, expected) in [
+            (
+                "target_descriptor_changed",
+                SemanticActionRuntimeFault::TargetDescriptorChanged,
+            ),
+            (
+                "target_descriptor_incomplete",
+                SemanticActionRuntimeFault::TargetDescriptorIncomplete,
+            ),
+            (
+                "target_name_changed",
+                SemanticActionRuntimeFault::TargetNameChanged,
+            ),
+            (
+                "target_state_changed",
+                SemanticActionRuntimeFault::TargetStateChanged,
+            ),
+            (
+                "target_operations_changed",
+                SemanticActionRuntimeFault::TargetOperationsChanged,
+            ),
+        ] {
+            assert_eq!(SemanticActionRuntimeFault::parse(code), Some(expected));
+            assert_eq!(
+                SemanticActionRuntimeFault::parse(&format!("{code}:private value")),
+                None
+            );
+        }
     }
 
     #[test]
@@ -1678,10 +1771,22 @@ mod tests {
                 "forbidden runtime surface: {forbidden}"
             );
         }
-        // Fill has no page-originated transport or idle observer.
+        // Fill has no page-originated transport or idle observer. The one
+        // mutation observer only times an action's settle: it lives inside
+        // that pending action, reads no content and is always disconnected.
+        let (before_settle, settle) = source
+            .split_once("function settleQuiet(")
+            .expect("settle quiet");
+        let (settle, after_settle) = settle.split_once("function runAction(").expect("action");
+        assert_eq!(settle.matches("new nativeMutationObserver(").count(), 1);
+        assert!(settle.contains(".disconnect()") && settle.contains("[finish, ceiling]"));
+        let outside = format!("{before_settle}{after_settle}").replace(
+            "const nativeMutationObserver = globalThis.MutationObserver;",
+            "",
+        );
         for forbidden in ["MutationObserver", "CustomEvent", "PAGE_RELAY"] {
             assert!(
-                !source.contains(forbidden),
+                !outside.contains(forbidden),
                 "forbidden fill transport: {forbidden}"
             );
         }
@@ -1723,12 +1828,69 @@ mod tests {
     }
 
     #[test]
+    fn a_click_lets_the_pointer_arrive_before_it_presses() {
+        let source = SEMANTIC_RUNTIME_PROGRAM.source();
+        let (_, recipe) = source
+            .split_once("function pointerDown(target, point) {")
+            .expect("pointer recipe");
+        let recipe = recipe.split_once("\n  }\n").expect("recipe end").0;
+        let hover = recipe.find("[\"over\", true], [\"enter\", false], [\"move\", true]");
+        let press = recipe.find("\"pointerdown\"");
+        assert!(hover.is_some() && press.is_some() && hover < press);
+        assert!(recipe.contains("`mouse${type}`") && recipe.contains("`pointer${type}`"));
+    }
+
+    #[test]
+    fn record_media_program_has_independent_pin_and_bound() {
+        let source = include_str!("../assets/semantic-record-media-v1.js");
+        assert!(source.len() <= 36 * 1024);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(source.as_bytes())),
+            "46111abaf3e6cbbf0255fa65258184075d6af32b8d2be6436e9379627127bf6d"
+        );
+        assert!(source.contains("new AbortController()"));
+        assert!(source.contains("redirect:\"error\""));
+    }
+
+    #[test]
+    fn pixel_privacy_program_has_independent_pin_and_bound() {
+        let source = include_str!("../assets/semantic-pixel-privacy-v1.js");
+        assert!(source.len() <= 8 * 1024);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(source.as_bytes())),
+            "d035a1561338f91cbfb7fc4ace8fa65303a9f28e1c69bf0ac256b3ab45f28ace"
+        );
+        assert!(source.contains("observer.takeRecords()"));
+    }
+
+    #[test]
+    fn human_survey_is_installed_once_and_reached_only_by_its_closed_pull() {
+        let survey = SEMANTIC_RUNTIME_PROGRAM.human_survey_source();
+        assert!(survey.len() <= 32 * 1024 && survey.is_ascii());
+        let installation = SEMANTIC_RUNTIME_PROGRAM.installation_source();
+        assert_eq!(installation.matches(survey).count(), 1);
+        assert_eq!(
+            installation.matches("\"__zephiumHumanSurveyV1\"").count(),
+            1
+        );
+        assert!(installation.ends_with(SEMANTIC_RUNTIME_PROGRAM.source()));
+        let routed = format!("if (encoded === \"{SEMANTIC_RUNTIME_HUMAN_SURVEY}\")");
+        assert_eq!(
+            SEMANTIC_RUNTIME_PROGRAM.source().matches(&routed).count(),
+            1
+        );
+        assert!(!SEMANTIC_RUNTIME_PROGRAM
+            .cdp_source()
+            .contains("__zephiumHumanSurveyV1 ="));
+    }
+
+    #[test]
     fn compact_program_is_bound_to_the_reviewed_source_and_exact_output() {
         let manifest: serde_json::Value =
             serde_json::from_str(include_str!("../assets/semantic-runtime-cdp-v1.json"))
                 .expect("manifest");
         for (key, source) in [
-            ("source", SEMANTIC_RUNTIME_PROGRAM.source()),
+            ("source", SEMANTIC_RUNTIME_PROGRAM.cdp_basis()),
             ("compact", SEMANTIC_RUNTIME_PROGRAM.cdp_source()),
         ] {
             assert!(source.is_ascii());
@@ -2106,6 +2268,7 @@ mod tests {
         let descriptor =
             crate::SemanticActionRuntimeDescriptor::maximum_text_wire_witness(name, prior_value);
         let wire = SemanticActionRuntimeInvocationWire {
+            approval: None,
             press: None,
             version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
             operation: "action_execute",
@@ -2126,11 +2289,20 @@ mod tests {
             target_descriptor: &descriptor,
             option_descriptor: None,
             page_dialog_opened: false,
+            settle_quiet: None,
             scroll: None,
         };
         let encoded = serde_json::to_string(&wire).expect("maximum legal fill wire");
         assert_eq!(encoded.len(), 17_707);
         assert_eq!(encoded.len(), MAX_SEMANTIC_ACTION_RUNTIME_REQUEST_BYTES);
+        assert!(encode_action_wire(&wire).is_ok());
+        let mut sealed = wire;
+        sealed.approval = Some(("01010101010101010101010101010101".into(), 2048, None));
+        assert_eq!(
+            encode_action_wire(&sealed),
+            Err(SemanticActionRuntimeInvocationError::Encoding),
+            "the exact same ceiling applies; never discard the approval seal to fit"
+        );
 
         for value in [
             "\\".repeat(MAX_SEMANTIC_ACTION_TEXT_BYTES),
@@ -2155,6 +2327,7 @@ mod tests {
                             name, prior,
                         );
                     let wire = SemanticActionRuntimeInvocationWire {
+                        approval: None,
                         press: None,
                         version: SEMANTIC_RUNTIME_PROTOCOL_VERSION,
                         operation: "action_execute",
@@ -2175,6 +2348,7 @@ mod tests {
                         target_descriptor: &descriptor,
                         option_descriptor: None,
                         page_dialog_opened: false,
+                        settle_quiet: None,
                         scroll: None,
                     };
                     let encoded = serde_json::to_string(&wire).expect("legal fill variant");

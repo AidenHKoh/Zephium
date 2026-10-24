@@ -37,13 +37,12 @@ const two = (kind: ChartKind, extra: Partial<ChartSpec> = {}): ChartSpec => ({
 const texts = (root: Element, selector: string) =>
   [...root.querySelectorAll(selector)].map((node) => node.textContent?.trim() ?? "");
 
-/** LayerChart's band hit area for one category, entered the way a pointer would. */
+/** The pointer over one bar, the way a person would move it. */
 function hover(root: Element, index: number) {
-  const hit = root.querySelectorAll<SVGRectElement>(".lc-tooltip-rect")[index]!;
-  const box = hit.getBoundingClientRect();
+  const bar = root.querySelectorAll<SVGPathElement>(".mark.bar")[index]!;
+  const box = bar.getBoundingClientRect();
   const at = { clientX: box.x + box.width / 2, clientY: box.y + box.height / 2, bubbles: true };
-  hit.dispatchEvent(new PointerEvent("pointerenter", at));
-  hit.dispatchEvent(new PointerEvent("pointermove", at));
+  bar.dispatchEvent(new PointerEvent("pointermove", at));
 }
 
 test.each([
@@ -57,7 +56,7 @@ test.each([
   ["radar", "polygon.mark.web", 2],
   ["heat", "rect.mark.cell", 6],
   ["spark", "path.mark.line", 1],
-] as const)("%s draws its marks through LayerChart", async (kind, selector, count) => {
+] as const)("%s draws its marks as plain SVG", async (kind, selector, count) => {
   const { default: Chart } = await loadChart();
   const spec = two(kind);
   const screen = await render(Chart, {
@@ -95,7 +94,7 @@ test("the lift names the extremes to assistive technology, keeps a legend and co
   // The extremes are read aloud, never written under the plot.
   expect(screen.container.textContent).not.toContain("lowest Mon at 5");
   await expect.element(screen.getByRole("list").getByText("Reading")).toBeVisible();
-  expect(texts(screen.container, ".lc-axis-tick-label")).toEqual(
+  expect(texts(screen.container, "text.tick")).toEqual(
     expect.arrayContaining(["0", "30", "Mon", "Wed"]),
   );
   await screen.getByText("Values", { exact: true }).click();
@@ -138,7 +137,7 @@ test("the lift shows every series at the hovered x, and hands a source back", as
   await expect.element(screen.getByText("Basis: Same rig", { exact: true })).toBeVisible();
   // Known numbers keep their basis line and draw no disclaimer.
   expect(screen.container.textContent).not.toContain("agent knows");
-  await expect.poll(() => screen.container.querySelectorAll(".lc-tooltip-rect").length).toBe(2);
+  await expect.poll(() => screen.container.querySelectorAll(".mark.bar").length).toBe(4);
   expect(screen.container.querySelector(".chart-tooltip")).toBeNull();
   hover(screen.container, 0);
   await expect.poll(() => screen.container.querySelector(".chart-tooltip")).not.toBeNull();
@@ -177,7 +176,7 @@ test("a bars card writes its categories under the bars and each value on top", a
     },
   });
   await expect.poll(() => screen.container.querySelectorAll(".mark.bar").length).toBe(3);
-  expect(texts(screen.container, ".lc-axis-tick-label")).toEqual(["Acme", "Bolt", "Core"]);
+  expect(texts(screen.container, "text.tick")).toEqual(["Acme", "Bolt", "Core"]);
   expect(texts(screen.container, "text.value")).toEqual(["$3.4K", "$1.2K", "$800"]);
   // One series names itself; the card keeps no legend and no table.
   expect(screen.container.querySelector(".chart-legend")).toBeNull();
@@ -201,7 +200,7 @@ test("a line card reads its first and last x and its last value", async () => {
     },
   });
   await expect.poll(() => screen.container.querySelectorAll("path.mark.line").length).toBe(1);
-  expect(texts(screen.container, ".lc-axis-tick-label")).toEqual(["Jan", "Apr"]);
+  expect(texts(screen.container, "text.tick")).toEqual(["Jan", "Apr"]);
   expect(texts(screen.container, "text.value")).toEqual(["45%"]);
 });
 
@@ -258,7 +257,7 @@ test("a chart arrives once, and reduced motion draws it settled", async () => {
   const { default: Chart } = await loadChart();
   const moving = await render(Chart, { title: "Week", spec: two("area") });
   await expect.poll(() => moving.container.querySelectorAll("path.area.enter").length).toBe(2);
-  // The lines draw in through LayerChart once; the washes fade in beside them.
+  // The lines draw in once; the washes fade in beside them.
   const line = moving.container.querySelector("path.mark.line")!;
   expect(line.getAnimations().length).toBeGreaterThan(0);
   await expect

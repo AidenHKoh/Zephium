@@ -74,6 +74,8 @@ impl State {
 pub struct Overlay {
     window: WebviewWindow,
     state: Arc<Mutex<State>>,
+    #[cfg(target_os = "windows")]
+    recovery_document: Option<tauri::Url>,
 }
 impl Overlay {
     pub fn new(window: WebviewWindow, pending_document: Option<tauri::Url>) -> Self {
@@ -96,6 +98,8 @@ impl Overlay {
         }
         let this = Self {
             window,
+            #[cfg(target_os = "windows")]
+            recovery_document: pending_document.clone(),
             state: Arc::new(Mutex::new(State {
                 model,
                 pending: None,
@@ -173,6 +177,21 @@ impl Overlay {
         self.on_main(|this| this.present());
         self.snapshot()
     }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn prepare_recovery(&self) -> Option<tauri::Url> {
+        let document = self.recovery_document.clone()?;
+        {
+            let mut state = self.state();
+            state.model.ready = false;
+            state.pending = None;
+            // Recovery itself loads the fixed document. A concurrent launcher
+            // intent must not start a second navigation through present().
+            state.pending_document = None;
+        }
+        self.window.hide().ok()?;
+        self.wake();
+        Some(document)
+    }
     pub fn intent(&self, intent: PanelIntent) {
         if let PanelIntent::Idle { revision } = intent {
             self.idle(revision);
@@ -182,7 +201,7 @@ impl Overlay {
             if crate::resource_close::is_closing() {
                 return;
             }
-            let old = this.snapshot().session_id;
+            let old = this.state().model.session();
             match intent {
                 PanelIntent::Idle { .. } => {
                     unreachable!("idle intents are handled before presentation")
@@ -206,12 +225,31 @@ impl Overlay {
             this.present();
         });
     }
+    /// Opens on the current page's address, the way an address bar would.
+    pub fn edit(&self, tab: String, url: String) {
+        self.on_main(move |this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            {
+                let mut state = this.state();
+                state.pending = None;
+                state.model.edit(tab, url);
+            }
+            this.cancel_search(old);
+            this.present();
+        });
+    }
+    pub fn editing_tab(&self) -> Option<String> {
+        self.state().model.editing_tab()
+    }
     pub fn toggle(&self) {
         self.on_main(|this| {
             if crate::resource_close::is_closing() {
                 return;
             }
-            let old = this.snapshot().session_id;
+            let old = this.state().model.session();
             let dismissing = this.state().model.presented;
             if dismissing {
                 this.state().model.hide();
@@ -234,7 +272,7 @@ impl Overlay {
             if crate::resource_close::is_closing() {
                 return;
             }
-            let old = this.snapshot().session_id;
+            let old = this.state().model.session();
             if this.state().model.presented {
                 this.state().model.hide();
             } else {
@@ -426,7 +464,7 @@ impl Overlay {
     }
     pub fn operation(&self, result: OperationDisposition) {
         self.on_main(move |this| {
-            let old_session = this.snapshot().session_id;
+            let old_session = this.state().model.session();
             let mut state = this.state();
             let Some(pending) = state
                 .pending
@@ -499,13 +537,14 @@ impl Overlay {
                     .is_some_and(|window| window.is_focused().unwrap_or(false));
                 let app_active = application_active(panel_focused, main_focused);
                 let old = this.snapshot();
+                let old_session = this.state().model.session();
                 this.state()
                     .model
                     .focus(panel_focused, main_focused, app_active);
                 if this.snapshot() != old {
                     #[cfg(target_os = "macos")]
                     crate::panel::forget_previous();
-                    this.cancel_search(old.session_id);
+                    this.cancel_search(old_session);
                     this.present();
                 }
             });
@@ -678,13 +717,14 @@ pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     if let Some(overlay) = app.try_state::<Overlay>() {
         overlay.on_main(move |this| {
             let old = this.snapshot();
+            let old_session = this.state().model.session();
             this.state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .model
                 .set_owner(owner);
             if this.snapshot() != old {
-                this.cancel_search(old.session_id);
+                this.cancel_search(old_session);
                 this.present();
             }
         });

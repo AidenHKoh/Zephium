@@ -38,7 +38,7 @@ const MAX_CONTROL_PARAMETERS_BYTES: usize = 128 * 1_024;
 // Only the immutable, hash-pinned runtime installer needs this allowance:
 // its current JSON payload exceeds 128 KiB after Work's native editing support.
 // Other control messages and all page-supplied invocations keep their limits.
-const MAX_RUNTIME_INSTALL_PARAMETERS_BYTES: usize = 192 * 1_024;
+const MAX_RUNTIME_INSTALL_PARAMETERS_BYTES: usize = 256 * 1_024;
 pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENT_BYTES: usize = 32 * 1_024;
 pub(crate) const MAX_CONTEXT_EVENTS_PER_INVOCATION: u16 = 512;
@@ -493,6 +493,257 @@ pub(crate) fn invoke_runtime_command(
     )
 }
 
+/// The Ask panel's fixed recipes, installed beside the runtime in the same
+/// isolated context and reached only through [`invoke_page_recipe_command`].
+const PAGE_RECIPES_SOURCE: &str = concat!(
+    include_str!("../host/picker_kit.js"),
+    "\n",
+    include_str!("page_reader_recipes.js")
+);
+const PAGE_RECIPES_INSTALL_SUFFIX: &str = concat!(
+    ";const descriptor=Object.getOwnPropertyDescriptor(globalThis,\"",
+    "__zephiumPageAssistV1",
+    "\");const api=descriptor&&descriptor.value;return descriptor&&",
+    "descriptor.writable===false&&descriptor.configurable===false&&",
+    "Object.isFrozen(api)&&typeof api.recipe===\"function\"?\"I1\":\"F1\";}"
+);
+const PAGE_RECIPE_FUNCTION: &str =
+    "function(encoded){return globalThis.__zephiumPageAssistV1.recipe(encoded);}";
+const MAX_PAGE_RECIPE_PARAMETERS_BYTES: usize = 32 * 1_024;
+const MAX_PAGE_RECIPE_RESPONSE_BYTES: usize = 64 * 1_024;
+
+pub(crate) fn install_page_recipes_in_context_command(
+    context: &SemanticExecutionContext,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    if !PAGE_RECIPES_SOURCE.is_ascii() {
+        return Err(SemanticCdpProtocolError::Limit);
+    }
+    let declaration =
+        format!("{INSTALL_FUNCTION_PREFIX}{PAGE_RECIPES_SOURCE}{PAGE_RECIPES_INSTALL_SUFFIX}");
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": declaration,
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": false,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_CONTROL_PARAMETERS_BYTES,
+        MAX_CONTROL_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn invoke_page_recipe_command(
+    context: &SemanticExecutionContext,
+    recipe: &crate::platform::page_recipe::PageRecipe,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": PAGE_RECIPE_FUNCTION,
+            "arguments": [{ "value": recipe.as_str() }],
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": false,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_PAGE_RECIPE_PARAMETERS_BYTES,
+        MAX_PAGE_RECIPE_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn decode_page_recipe_response(
+    recipe: &crate::platform::page_recipe::PageRecipe,
+    response: &str,
+) -> Result<String, SemanticCdpProtocolError> {
+    let object = parse_success_object(response, MAX_PAGE_RECIPE_RESPONSE_BYTES)?;
+    object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| recipe.decode(value.as_bytes()))
+        .ok_or(SemanticCdpProtocolError::InvalidResponse)
+}
+
+const MAX_ACTION_RECIPE_PARAMETERS_BYTES: usize = 64 * 1_024;
+const MAX_ACTION_RECIPE_RESPONSE_BYTES: usize = 8 * 1_024;
+
+/// One person-directed step through the runtime's own fixed isolated-world
+/// recipe, never through native input: the page gains no user activation.
+pub(crate) fn invoke_action_recipe_command(
+    context: &SemanticExecutionContext,
+    invocation: &SemanticActionRuntimeInvocation,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration": INVOKE_FUNCTION,
+            "arguments": [{ "value": invocation.as_str() }],
+            "silent": true,
+            "returnByValue": true,
+            "generatePreview": false,
+            "userGesture": false,
+            "awaitPromise": true,
+            "uniqueContextId": context.unique_id(),
+        }),
+        MAX_ACTION_RECIPE_PARAMETERS_BYTES,
+        MAX_ACTION_RECIPE_RESPONSE_BYTES,
+    )
+}
+
+pub(crate) fn decode_action_recipe_response(
+    invocation: &SemanticActionRuntimeInvocation,
+    response: &str,
+) -> Result<SemanticActionRuntimeEvidence, SemanticActionRuntimeResultError> {
+    let object = parse_success_object(response, MAX_ACTION_RECIPE_RESPONSE_BYTES)
+        .map_err(|_| SemanticActionRuntimeResultError::InvalidEncoding)?;
+    let value = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .ok_or(SemanticActionRuntimeResultError::InvalidEncoding)?;
+    invocation.decode_result(value.as_bytes())
+}
+
+pub(crate) fn invoke_media_command(
+    context: &SemanticExecutionContext,
+    invocation: &crate::platform::record_media::MediaInvocation,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({"functionDeclaration":INVOKE_FUNCTION,
+        "arguments":[{"value":invocation.as_str()}],"silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":true,"uniqueContextId":context.unique_id()}),
+        MAX_INVOCATION_PARAMETERS_BYTES,
+        100 * 1024,
+    )
+}
+pub(crate) fn decode_media_response(
+    invocation: &crate::platform::record_media::MediaInvocation,
+    response: &str,
+) -> Result<crate::platform::record_media::NativeMediaResult, SemanticCdpInvocationError> {
+    let object =
+        parse_success_object(response, 100 * 1024).map_err(SemanticCdpInvocationError::Protocol)?;
+    let result = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| invocation.decode(value.as_bytes()));
+    result.ok_or(SemanticCdpInvocationError::Protocol(
+        SemanticCdpProtocolError::InvalidResponse,
+    ))
+}
+
+pub(crate) fn invoke_human_wall_command(
+    context: &SemanticExecutionContext,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration":format!("function() {{ return {}; }}",crate::platform::work_human_survey::program()),
+            "arguments":[],"silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":false,
+            "uniqueContextId":context.unique_id(),
+        }),
+        32 * 1024,
+        256,
+    )
+}
+pub(crate) fn decode_human_wall_response(
+    response: &str,
+) -> Result<String, SemanticCdpInvocationError> {
+    let object =
+        parse_success_object(response, 256).map_err(SemanticCdpInvocationError::Protocol)?;
+    object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.len() == 2 && result.get("type").and_then(Value::as_str) == Some("string")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(crate::platform::work_human_survey::decode)
+        .ok_or(SemanticCdpInvocationError::Protocol(
+            SemanticCdpProtocolError::InvalidResponse,
+        ))
+}
+
+pub(crate) fn invoke_privacy_command_mode(
+    context: &SemanticExecutionContext,
+    public: bool,
+) -> Result<FixedSemanticCdpCommand, SemanticCdpProtocolError> {
+    let invocation = if public {
+        crate::platform::semantic_pixel_privacy::PUBLIC_INVOCATION
+    } else {
+        crate::platform::semantic_pixel_privacy::INVOCATION
+    };
+    command(
+        FixedSemanticCdpMethod::CallFunctionOn,
+        json!({
+            "functionDeclaration":INVOKE_FUNCTION,
+            "arguments":[{"value":invocation}],
+            "silent":true,"returnByValue":true,"generatePreview":false,"userGesture":false,"awaitPromise":false,
+            "uniqueContextId":context.unique_id(),
+        }),
+        MAX_INVOCATION_PARAMETERS_BYTES,
+        1024,
+    )
+}
+
+pub(crate) fn decode_privacy_response(
+    response: &str,
+) -> Result<crate::platform::semantic_pixel_privacy::PixelPrivacyProof, SemanticCdpInvocationError>
+{
+    decode_privacy_response_mode(response, false)
+}
+pub(crate) fn decode_privacy_response_mode(
+    response: &str,
+    public: bool,
+) -> Result<crate::platform::semantic_pixel_privacy::PixelPrivacyProof, SemanticCdpInvocationError>
+{
+    let object =
+        parse_success_object(response, 1024).map_err(SemanticCdpInvocationError::Protocol)?;
+    let value = object
+        .get("result")
+        .and_then(Value::as_object)
+        .filter(|result| {
+            result.get("type").and_then(Value::as_str) == Some("string")
+                && !result.contains_key("subtype")
+        })
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_str)
+        .and_then(|value| {
+            if public {
+                crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode_public(
+                    value.as_bytes(),
+                )
+            } else {
+                crate::platform::semantic_pixel_privacy::PixelPrivacyProof::decode(value.as_bytes())
+            }
+        });
+    value.ok_or(SemanticCdpInvocationError::Protocol(
+        SemanticCdpProtocolError::InvalidResponse,
+    ))
+}
+
 pub(crate) fn prepare_action_command(
     context: &SemanticExecutionContext,
     invocation: &SemanticActionRuntimeInvocation,
@@ -784,6 +1035,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn human_survey_uses_only_the_original_isolated_context_and_closed_codes() {
+        let context = SemanticExecutionContext::new(19, "original-private-world").unwrap();
+        let command = invoke_human_wall_command(&context).unwrap();
+        assert_eq!(command.method(), FixedSemanticCdpMethod::CallFunctionOn);
+        assert_eq!(command.response_limit(), 256);
+        let body: Value = serde_json::from_str(command.parameters()).unwrap();
+        assert_eq!(body["uniqueContextId"], "original-private-world");
+        assert_eq!(body["userGesture"], false);
+        assert_eq!(body["awaitPromise"], false);
+        assert!(body.get("executionContextId").is_none());
+        assert_eq!(body["arguments"], json!([]));
+        assert_eq!(
+            body["functionDeclaration"],
+            format!(
+                "function() {{ return {}; }}",
+                crate::platform::work_human_survey::program()
+            )
+        );
+        for code in 0..=24 {
+            let response = json!({"result":{"type":"string","value":code.to_string()}}).to_string();
+            assert_eq!(
+                decode_human_wall_response(&response).unwrap(),
+                code.to_string()
+            );
+        }
+        for response in [
+            r#"{"result":{"type":"boolean","value":false}}"#,
+            r#"{"result":{"type":"number","value":0}}"#,
+            r#"{"result":{"type":"string","value":"25"}}"#,
+            r#"{"result":{"type":"string","value":"0","objectId":"foreign"}}"#,
+            r#"{"result":{"type":"string","value":"0"},"exceptionDetails":{}}"#,
+        ] {
+            assert!(decode_human_wall_response(response).is_err());
+        }
+    }
+    #[test]
     fn action_step_correlation_and_closed_authority_reject_replays_and_extra_fields() {
         let plan = json!({"a":17,"i":1,"k":"text","p":{"text":"Exact text"}});
         let command = decode_action_plan(17, 1, &plan.to_string()).expect("exact text step");
@@ -941,6 +1228,18 @@ mod tests {
         assert_eq!(parameters.as_object().map(|object| object.len()), Some(7));
         assert!(format!("{command:?}").contains("[redacted]"));
         assert!(!format!("{command:?}").contains(SEMANTIC_RUNTIME_GLOBAL_NAME));
+    }
+
+    #[test]
+    fn sealed_runtime_installation_fits_unchanged_cap_at_maximum_escaped_context() {
+        for character in ['\\', '"'] {
+            let identifier = character.to_string().repeat(MAX_BROWSER_IDENTIFIER_BYTES);
+            let context = SemanticExecutionContext::new(19, &identifier).unwrap();
+            let command = install_runtime_in_context_command(&context).expect("fixed source fits");
+            assert!(command.parameters().len() <= MAX_RUNTIME_INSTALL_PARAMETERS_BYTES);
+            let parameters: Value = serde_json::from_str(command.parameters()).unwrap();
+            assert_eq!(parameters["uniqueContextId"], identifier);
+        }
     }
 
     #[test]
@@ -1186,5 +1485,26 @@ mod tests {
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("private-root-identifier"));
         assert!(!debug.contains("private-page-identifier"));
+    }
+}
+
+#[cfg(test)]
+mod pixel_privacy_tests {
+    use super::*;
+    #[test]
+    fn closed_pixel_reply_accepts_no_page_object_or_arbitrary_fields() {
+        let value = r#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#;
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"string","value":value}}).to_string()
+        )
+        .is_ok());
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"object","value":{}}}).to_string()
+        )
+        .is_err());
+        assert!(decode_privacy_response(
+            &json!({"result":{"type":"string","value":value},"exceptionDetails":{}}).to_string()
+        )
+        .is_err());
     }
 }

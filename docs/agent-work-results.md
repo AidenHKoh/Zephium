@@ -32,9 +32,14 @@ and navigation are never admitted by this task; subtree capture requires the
 separate trusted opt-in described below. After a fresh actual
 native observation, the session validates the current frame cohort and consumes
 the exact provider tool continuation. The read uses `PublicOnly` sensitivity and
-admits at most 128 readable fragments and 32 KiB of source values. Compact
-`ZREAD3` preserves every admitted fragment and its provenance inside a separate
-112-KiB terminal-extraction encoding envelope derived from worst-case escaping,
+admits at most 256 readable fragments and 48 KiB of source values, collected
+past that and shed least useful first: the header, navigation, footer and
+search landmarks, then what sits beside the main landmark, then within each
+control labels, list options, filter checkbox states and bare facet counts
+such as "( 858 )", then addresses and picture text, so a listing's records
+survive the page chrome and filters before them. Compact `ZREAD3` preserves every admitted fragment and its
+provenance inside a separate terminal-extraction encoding envelope derived
+from worst-case escaping,
 bounded rows, frame provenance and the closed schema. This does not increase
 native capture, read, request, turn or run budgets; only the actual encoded
 request enters the existing exact provider count and policy reservation.
@@ -74,6 +79,28 @@ is priced and policy-settled, contains no tool output, and passes the existing
 Rust schema, field order, text/secret, sensitivity and exact-source validation.
 Wrong types, foreign citations, incomplete output and accounting failures do
 not become results. Ordinary assistant text is still discarded by the driver.
+
+## A viewport image for a page that shows too little text
+
+Some pages hold their records in pixels: an app drawn on a canvas, a gallery
+of pictures, prices rendered as images. When the look a model extracts from
+reads as sparse (under 1,200 bytes of text, or six or more pictures with
+under 80 bytes of text each), the chosen page model can see, the task allows
+screenshots and nothing in the look is sensitive or secret, the host captures
+one bounded viewport screenshot through the existing screenshot path right
+before mapping. The read then carries one `viewport_image` fragment on the
+document node, and the mapping request carries the image beside its text
+with a note that it is hostile page content. Only a text value may cite that
+fragment, and a value that does stands as the model read it from the pixels:
+a copy column takes it without a text match, while a url, image, money or
+other typed value cannot cite it. The archived source keeps field code 9,
+the flag that the value was read from pixels. The capture admits at most a
+1 MiB PNG, so the image's base64 beside the largest mapping stays under the
+2 MiB request ceiling; a larger image is refused at capture and the page is
+mapped from its text alone, never failed for size. The image never reaches
+a model without vision (the request is refused before dispatch), a mapping
+priced on an exact count, a subtree mapping or any log; without it the
+mapping runs as before.
 
 ## Content is not diagnostic data or execution authority
 

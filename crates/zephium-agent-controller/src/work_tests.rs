@@ -513,6 +513,10 @@ fn production_form_initial_completion_or_missing_field_never_calls_provider() {
     }
 }
 #[cfg(feature = "probe-harness")]
+#[path = "work_listing_tests.rs"]
+mod listing_tests;
+
+#[cfg(feature = "probe-harness")]
 #[path = "work_combined_tests.rs"]
 mod combined_tests;
 #[cfg(feature = "probe-harness")]
@@ -634,7 +638,7 @@ fn dormant_refusal_retains_original_identity_and_reconciles_only_exact_audit() {
     let AgentWorkOutcome::Recovery(mut recovery) = handle.take_outcome().unwrap() else {
         panic!("dormant controller cannot succeed");
     };
-    assert!(recovery.state.credential.is_none());
+    assert!(recovery.state.access.is_none());
     assert!(recovery.state.transport.is_none());
     assert!(recovery.state.input.as_ref().unwrap().objective.is_none());
     assert_eq!(recovery.journal_admission(owner).unwrap().next(), admission);
@@ -848,8 +852,17 @@ fn input_with_navigation_account(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
+    PlainRead,
+    #[cfg(feature = "probe-harness")]
+    CompoundFields(bool),
+    #[cfg(feature = "probe-harness")]
+    Listing,
     #[cfg(feature = "probe-harness")]
     DecisionClick(bool),
+    #[cfg(feature = "probe-harness")]
+    DecisionRefresh,
+    #[cfg(feature = "probe-harness")]
+    DecisionTargetChanged,
     #[cfg(feature = "probe-harness")]
     Navigation(NavigationFault),
     #[cfg(feature = "probe-harness")]
@@ -917,6 +930,8 @@ enum Fault {
     SuspendObservation,
     RevokeObservation,
     Readiness,
+    TimedOutLook,
+    TimedOutLooks,
     RendererObservation,
     MailboxPressure,
 }
@@ -1065,9 +1080,18 @@ impl AgentBrowserPort for Port {
             return scoped_tests::capture(self, invocation, fault);
         }
         let correlation = invocation.correlation();
+        #[cfg(not(feature = "probe-harness"))]
+        let third_call_generation = false;
+        #[cfg(feature = "probe-harness")]
+        let third_call_generation = matches!(
+            self.fault,
+            Fault::CompoundFields(_) | Fault::DecisionRefresh
+        );
         assert_eq!(
             correlation.snapshot_generation().get(),
-            if matches!(
+            if third_call_generation {
+                lock(&self.calls).iter().filter(|&&call| call == 3).count() as u64
+            } else if matches!(
                 self.fault,
                 Fault::Hydration | Fault::SkeletonHydration | Fault::SkeletonPersistent
             ) {
@@ -1079,6 +1103,23 @@ impl AgentBrowserPort for Port {
             }
         );
         let wire = format!("{{\"v\":1,\"i\":{},\"g\":{},\"c\":\"complete\",\"n\":[{{\"k\":1,\"r\":\"document\",\"o\":16}},{{\"k\":2,\"p\":0,\"r\":\"textbox\",\"n\":\"Field\",\"s\":64,\"o\":2,\"v\":{{\"k\":\"text\",\"value\":\"\"}},\"b\":{{\"x\":10,\"y\":20,\"w\":120,\"h\":30}}}}]}}", correlation.invocation().get(), correlation.snapshot_generation().get());
+        let wire = if self.fault == Fault::PlainRead {
+            let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            value["n"].as_array_mut().unwrap().push(serde_json::json!({"k":3,"p":0,"r":"paragraph","t":"This is ordinary public reference text. ".repeat(40),"fc":true}));
+            serde_json::to_string(&value).unwrap()
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if self.fault == Fault::Listing {
+            listing_tests::wire(
+                correlation.invocation().get(),
+                correlation.snapshot_generation().get(),
+                lock(&self.calls).contains(&7),
+            )
+        } else {
+            wire
+        };
         #[cfg(feature = "probe-harness")]
         let wire = if self.fault == Fault::ScrollVerification {
             wire.replace(
@@ -1149,7 +1190,11 @@ impl AgentBrowserPort for Port {
             wire
         };
         #[cfg(feature = "probe-harness")]
-        let wire = if let Fault::DecisionClick(applied) = self.fault {
+        let wire = if matches!(
+            self.fault,
+            Fault::DecisionClick(_) | Fault::DecisionTargetChanged | Fault::DecisionRefresh
+        ) {
+            let applied = matches!(self.fault, Fault::DecisionClick(true));
             format!(
                 r#"{{"v":1,"i":{},"g":{},"c":"complete","n":[{{"k":1,"r":"document"}},{{"k":2,"p":0,"r":"button","n":"Details","o":1,"s":{},"ak":6,"fc":true,"b":{{"x":10,"y":20,"w":120,"h":30}}}}]}}"#,
                 correlation.invocation().get(),
@@ -1160,6 +1205,19 @@ impl AgentBrowserPort for Port {
                     0
                 }
             )
+        } else {
+            wire
+        };
+        #[cfg(feature = "probe-harness")]
+        let wire = if matches!(self.fault, Fault::CompoundFields(_)) {
+            let attempts = lock(&self.calls).iter().filter(|&&call| call == 7).count();
+            let filled =
+                attempts.saturating_sub(usize::from(self.fault == Fault::CompoundFields(true)));
+            serde_json::json!({"v":SEMANTIC_WIRE_VERSION,"i":correlation.invocation().get(),"g":correlation.snapshot_generation().get(),"c":"complete","n":[
+                {"k":1,"r":"document","fc":true},
+                {"k":2,"p":0,"r":"textbox","n":"Field","s":64,"o":2,"fc":true,"v":{"k":"text","value":if filled > 0 {"fixture value"} else {""}},"b":{"x":10,"y":20,"w":120,"h":30}},
+                {"k":3,"p":0,"r":"textbox","n":"Second","o":2,"fc":true,"v":{"k":"text","value":if filled > 1 {"second value"} else {""}},"b":{"x":10,"y":70,"w":120,"h":30}}
+            ]}).to_string()
         } else {
             wire
         };
@@ -1237,6 +1295,11 @@ impl AgentBrowserPort for Port {
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
                 {
                     Err(SemanticRuntimePortFailure::NotReady)
+                } else if (self.fault == Fault::TimedOutLook
+                    && lock(&self.calls).iter().filter(|call| **call == 3).count() < 2)
+                    || self.fault == Fault::TimedOutLooks
+                {
+                    Err(SemanticRuntimePortFailure::TimedOut)
                 } else {
                     Ok(snapshot)
                 },
@@ -1319,8 +1382,33 @@ impl AgentBrowserPort for Port {
         completion: SemanticActionNativeCompletion,
     ) -> ContextDispatch {
         lock(&self.calls).push(7);
+        if navigation_tests::FILL_THEN_SCROLL.load(Ordering::Relaxed)
+            && self.fault == Fault::Navigation(NavigationFault::DiscoveryAction(true))
+            && lock(&self.calls).iter().filter(|&&call| call == 7).count() > 1
+        {
+            assert_eq!(
+                request.kind(),
+                SemanticActionKind::Scroll,
+                "the controller invented an unrequested key press"
+            );
+            let now = request.requested_at();
+            completion(request.fail(SemanticActionNativeFailure::TargetOccluded, now));
+            return ContextDispatch::Scheduled;
+        }
         match self.fault {
-            Fault::DecisionClick(_) => {
+            Fault::CompoundFields(true)
+                if lock(&self.calls).iter().filter(|&&call| call == 7).count() == 1 =>
+            {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
+                return ContextDispatch::Scheduled;
+            }
+            Fault::DecisionTargetChanged => {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
+                return ContextDispatch::Scheduled;
+            }
+            Fault::DecisionClick(_) | Fault::Listing => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
                 completion(request.complete(
@@ -1335,6 +1423,14 @@ impl AgentBrowserPort for Port {
             }
             Fault::ActionDispatch => return ContextDispatch::Unsupported,
             Fault::ActionCallback => {}
+            Fault::Navigation(NavigationFault::DiscoveryActionRefusal(
+                _,
+                navigation_tests::ActionRefusal::Rewritten,
+            )) if lock(&self.calls).iter().filter(|call| **call == 7).count() == 1 => {
+                let now = request.requested_at();
+                completion(request.fail(SemanticActionNativeFailure::AppliedUnverified, now));
+                return ContextDispatch::Scheduled;
+            }
             Fault::ScrollVerification => {
                 let now = request.requested_at();
                 let geometry = request.expected_geometry();
@@ -1349,6 +1445,7 @@ impl AgentBrowserPort for Port {
                 return ContextDispatch::Scheduled;
             }
             Fault::ActionVerification
+            | Fault::CompoundFields(_)
             | Fault::ActionApplied
             | Fault::ActionAppliedBoundary
             | Fault::ActionAppliedLargeDiff
@@ -1526,7 +1623,47 @@ fn drive_with_schedule(
     });
     let calls = lock(&port.calls).clone();
     events.extend(std::iter::from_fn(|| handle.take_event()));
+    // An intentionally unclean shutdown may hand its OS-thread join to the
+    // reaper. Keep SERIAL until that worker really releases admission; logical
+    // controller completion alone does not let the next fixture start.
+    let work = zephium_agentic::WorkId::generate();
+    let reaped_by = Instant::now() + Duration::from_secs(2);
+    loop {
+        match zephium_agent_runtime::AgentRuntimeWorkerGroup::try_new(work, 1) {
+            Ok(reservation) => {
+                drop(reservation);
+                break;
+            }
+            Err(zephium_agent_runtime::RuntimeSpawnError::AlreadyRunning)
+                if Instant::now() < reaped_by =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => panic!("fixture worker did not release admission: {error:?}"),
+        }
+    }
     (outcome, shutdown, calls, events)
+}
+
+#[test]
+fn a_look_a_busy_page_timed_out_is_taken_once_more_and_no_more() {
+    let _guard = lock(&SERIAL);
+    let (outcome, shutdown, calls, _) = run(Fault::TimedOutLook);
+    assert!(
+        matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+        "{outcome:?}"
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 3, 4, 5, 6]);
+    let (outcome, _, calls, _) = run(Fault::TimedOutLooks);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("a page that keeps timing out must close: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Observation(SemanticRuntimePortFailure::TimedOut)
+    );
+    assert_eq!(calls.iter().filter(|call| **call == 3).count(), 2);
 }
 
 #[test]
@@ -1632,6 +1769,95 @@ fn startup_loading_signal_distinguishes_skeletons_from_usable_progress_pages() {
                         .finish()
                         .unwrap();
                 assert_eq!(has_dominant_loading_placeholders(&candidate), expected);
+            }
+            // An empty shell (an app booting, a bot check about to reload)
+            // is not yet a page; a page with words on it is.
+            for (children, expected) in [
+                (vec![], true),
+                (vec![serde_json::json!({"r":"paragraph", "t":"Hi"})], true),
+                (
+                    vec![
+                        serde_json::json!({"r":"paragraph", "t":"Hotels in Krakow from 120 zł a night"});
+                        2
+                    ],
+                    false,
+                ),
+                (
+                    vec![serde_json::json!({"r":"button", "n":"Open", "o":1}); 4],
+                    false,
+                ),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, mut node) in children.into_iter().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                    nodes.push(node);
+                }
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(super::unrendered(&candidate), expected);
+            }
+            // A results page that says it is still loading them waits longer;
+            // a status about something else, or a long line, does not.
+            for (children, expected) in [
+                (
+                    vec![serde_json::json!({"r":"status", "n":"Loading trip planner"})],
+                    true,
+                ),
+                (
+                    vec![serde_json::json!({"r":"progress", "t":"Wyszukiwanie ofert…"})],
+                    true,
+                ),
+                (
+                    vec![serde_json::json!({"r":"paragraph", "t":"Loading bay opening hours"})],
+                    false,
+                ),
+                (
+                    vec![serde_json::json!({"r":"status", "n":"3 results found"})],
+                    false,
+                ),
+            ] {
+                let mut nodes = vec![serde_json::json!({"k":1,"r":"document","o":16})];
+                for (index, mut node) in children.into_iter().enumerate() {
+                    node["k"] = (index + 2).into();
+                    node["p"] = 0.into();
+                    nodes.push(node);
+                }
+                let frame = &source.frames()[0];
+                let wire = serde_json::to_vec(&serde_json::json!({
+                    "v":1,"i":frame.invocation().get(),"g":frame.generation().get(),"c":"complete","n":nodes
+                })).unwrap();
+                let snapshot = decode_semantic_snapshot(
+                    SemanticDecodeContext::new(
+                        frame.invocation(),
+                        frame.frame().clone(),
+                        frame.generation(),
+                    ),
+                    &wire,
+                )
+                .unwrap();
+                let candidate =
+                    SemanticObservationAssembler::new(source.request().clone(), snapshot)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                assert_eq!(super::announces_loading(&candidate), expected);
             }
             Ok(AgentWorkTaskProgress::Complete)
         }
@@ -1922,6 +2148,12 @@ fn variable_provider_turns_use_real_worker_io_and_stop_at_the_exact_ceiling() {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderFault {
+    CompoundForm,
+    CompoundFormRefused,
+
+    ActionRepair,
+    ActionRepairRepeated,
+    ActionRepairCancelled,
     Navigation(NavigationFault),
     Read(ReadFault),
     Scoped(ScopedFault),
@@ -1941,6 +2173,10 @@ enum ProviderFault {
 #[cfg(feature = "probe-harness")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtractionFault {
+    Direct,
+    DirectRecord,
+    Listing,
+    ListingDenied,
     None,
     RoleSelection,
     EmptyEvidence,
@@ -1951,6 +2187,20 @@ enum ExtractionFault {
     CancelCount,
     CancelStream,
     AuditLost,
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn a_single_public_record_maps_once_without_a_page_planner_turn() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Extraction(ExtractionFault::DirectRecord));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn a_plain_public_fact_read_maps_once_without_a_page_planner_turn() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::Extraction(ExtractionFault::Direct));
 }
 
 #[cfg(feature = "probe-harness")]
@@ -2057,6 +2307,27 @@ fn production_form_task_keeps_actor_refusal_and_callback_owners() {
         ProviderFault::Native(Fault::ActionApplied),
         Some("not authorized"),
     );
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn native_compound_field_prepares_then_extracts_with_existing_effect_policy() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundForm, Some("fixture value"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn native_compound_target_change_replans_from_a_fresh_look_without_pending_debt() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundFormRefused, Some("fixture value"));
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn native_compound_form_cannot_widen_the_trusted_field_value() {
+    let _guard = lock(&SERIAL);
+    provider_fixture_with_form(ProviderFault::CompoundForm, Some("not authorized"));
 }
 
 #[cfg(feature = "probe-harness")]
@@ -2182,6 +2453,15 @@ fn provider_fixture_with_discovery_account(
         2
     } else {
         match fault {
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused => {
+                if fault == ProviderFault::CompoundFormRefused {
+                    8
+                } else if form == Some("fixture value") {
+                    4
+                } else {
+                    2
+                }
+            }
             ProviderFault::Navigation(fault) => fault.requests(),
             ProviderFault::Read(fault) => fault.requests(),
             ProviderFault::Scoped(fault) => fault.requests(),
@@ -2200,15 +2480,25 @@ fn provider_fixture_with_discovery_account(
             ) => 4,
             ProviderFault::Combined(CombinedFault::CancelMapCount) => 5,
             ProviderFault::Combined(CombinedFault::Ceiling) => 16,
+            // A refused mapping is mapped once more, told why.
+            ProviderFault::Combined(
+                CombinedFault::ForeignSource | CombinedFault::MalformedAfterAction,
+            ) => 8,
             ProviderFault::Combined(_) => 6,
             ProviderFault::Ceiling => 16,
+            ProviderFault::ActionRepair | ProviderFault::ActionRepairRepeated => 4,
+            ProviderFault::ActionRepairCancelled => 3,
             ProviderFault::CountRefused | ProviderFault::CancelCount => 1,
+            ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord) => 2,
             ProviderFault::Extraction(ExtractionFault::CancelCount) => 3,
             ProviderFault::Extraction(
                 ExtractionFault::WrongSchema
                 | ExtractionFault::ExpandedScope
                 | ExtractionFault::EmptyEvidence,
             ) => 2,
+            ProviderFault::Extraction(
+                ExtractionFault::WrongKind | ExtractionFault::ForeignSource,
+            ) => 6,
             ProviderFault::Extraction(_) => 4,
             _ => 2,
         }
@@ -2273,7 +2563,10 @@ fn provider_fixture_with_discovery_account(
             } else {
                 None
             };
-            let cancelled = read_stop.is_some()
+            let cancelled = (fault == ProviderFault::ActionRepairCancelled
+                && turns == 1
+                && is_count)
+                || read_stop.is_some()
                 || matches!(fault, ProviderFault::Navigation(fault) if fault.cancelled(turns, is_count))
                 || matches!(fault, ProviderFault::Scoped(fault) if fault.cancelled(turns, is_count))
                 || (turns == 2
@@ -2297,6 +2590,36 @@ fn provider_fixture_with_discovery_account(
             let refused = (is_count && fault == ProviderFault::CountRefused)
                 || (!is_count && fault == ProviderFault::StreamRefused)
                 || matches!(fault, ProviderFault::Read(fault) if fault.refused(turns, is_count));
+            if matches!(
+                fault,
+                ProviderFault::ActionRepair
+                    | ProviderFault::ActionRepairRepeated
+                    | ProviderFault::ActionRepairCancelled
+            ) && turns == 1
+            {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let outputs = wire["input"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|item| item["type"] == "function_call_output")
+                    .collect::<Vec<_>>();
+                assert_eq!(outputs.len(), 1);
+                assert_eq!(outputs[0]["call_id"], "call_1");
+                let output: serde_json::Value =
+                    serde_json::from_str(outputs[0]["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["executed"], false);
+                assert!(output["guidance"]
+                    .as_str()
+                    .unwrap()
+                    .contains("settle_millis"));
+                assert!(wire["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tool| tool["strict"] == true));
+            }
             if let ProviderFault::Read(fault) = fault {
                 fault.check_request(&request[header + 4..], turns);
             }
@@ -2320,6 +2643,16 @@ fn provider_fixture_with_discovery_account(
                     .expect("verified action history reaches count and generation requests");
                 assert!(progress.contains("ExactTargetValue"));
                 assert!(!progress.contains("fixture value") && !progress.contains("@a2"));
+            }
+            if fault == ProviderFault::Combined(CombinedFault::MalformedAfterAction) && turns == 2 {
+                let wire: serde_json::Value =
+                    serde_json::from_slice(&request[header + 4..]).unwrap();
+                let input = serde_json::to_string(&wire["input"]).unwrap();
+                assert!(
+                    input.contains("ExactTargetValue"),
+                    "the repair remembers the verified write"
+                );
+                assert!(input.contains("invalid_tool_call"));
             }
             if fault == ProviderFault::Combined(CombinedFault::BoundaryAfterAction) && turns == 1 {
                 let wire: serde_json::Value =
@@ -2385,12 +2718,39 @@ fn provider_fixture_with_discovery_account(
                 turns += 1;
                 (
                     "text/event-stream",
-                    if let ProviderFault::Navigation(fault) = fault {
+                    if matches!(
+                        fault,
+                        ProviderFault::ActionRepair
+                            | ProviderFault::ActionRepairRepeated
+                            | ProviderFault::ActionRepairCancelled
+                    ) {
+                        let stream = tool_stream(turns, true);
+                        if turns == 1 || fault == ProviderFault::ActionRepairRepeated {
+                            stream.replace("settle_millis\\\":2000", "settle_millis\\\":0")
+                        } else {
+                            stream
+                        }
+                    } else if let ProviderFault::Navigation(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Read(fault) = fault {
                         fault.stream(turns)
                     } else if let ProviderFault::Scoped(fault) = fault {
                         fault.stream(turns)
+                    } else if fault == ProviderFault::Combined(CombinedFault::MalformedAfterAction)
+                    {
+                        match turns {
+                            1 => tool_stream(turns, true),
+                            2 => tool_stream(turns, true)
+                                .replace("settle_millis\\\":2000", "settle_millis\\\":0"),
+                            3 => named_tool_stream(
+                                turns,
+                                "extract",
+                                r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":1}"#,
+                            ),
+                            _ => extraction_stream(ExtractionFault::None)
+                                .replace("resp_2", &format!("resp_{turns}"))
+                                .replace("msg_2", &format!("msg_{turns}")),
+                        }
                     } else if let ProviderFault::Combined(fault) = fault {
                         if fault == CombinedFault::Ceiling && turns == 1 {
                             tool_stream(turns, true)
@@ -2431,7 +2791,14 @@ fn provider_fixture_with_discovery_account(
                             .replace("msg_2", "msg_3")
                         }
                     } else if let ProviderFault::Extraction(fault) = fault {
-                        if turns == 1 {
+                        if matches!(
+                            fault,
+                            ExtractionFault::Direct | ExtractionFault::DirectRecord
+                        ) {
+                            extraction_stream(fault)
+                                .replace("resp_2", "resp_1")
+                                .replace("msg_2", "msg_1")
+                        } else if turns == 1 {
                             let arguments = match fault {
                                 ExtractionFault::WrongSchema => {
                                     r#"{\"scope\":{\"kind\":\"initial\"},\"schema_id\":2}"#
@@ -2452,6 +2819,55 @@ fn provider_fixture_with_discovery_account(
                             | ProviderFault::HumanExtractionRequest
                     ) {
                         named_tool_stream(turns, "show_for_human", r#"{\"reason\":\"sign_in\"}"#)
+                    } else if matches!(
+                        fault,
+                        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+                    ) {
+                        if fault == ProviderFault::CompoundFormRefused && turns == 2 {
+                            named_tool_stream(
+                                turns,
+                                "act",
+                                r#"{\"actions\":[{\"kind\":\"fill\",\"target\":\"@a2\",\"value\":\"fixture value\",\"effect\":\"local_write\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"target_value_matches_input\"},\"settle_millis\":2000}]}"#,
+                            )
+                        } else if fault == ProviderFault::CompoundFormRefused && turns == 3 {
+                            fn reference(value: &serde_json::Value) -> Option<String> {
+                                match value {
+                                    serde_json::Value::String(text) => text
+                                        .lines()
+                                        .filter(|line| {
+                                            line.starts_with("N @")
+                                                && line.contains("name=\"Second\"")
+                                        })
+                                        .filter_map(|line| {
+                                            line.split_whitespace().nth(1).map(str::to_owned)
+                                        })
+                                        .last(),
+                                    serde_json::Value::Array(items) => {
+                                        items.iter().filter_map(reference).last()
+                                    }
+                                    serde_json::Value::Object(items) => {
+                                        items.values().filter_map(reference).last()
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&request[header + 4..expected]).unwrap();
+                            let target = reference(&body).expect("fresh second field");
+                            let args=serde_json::json!({"fields":[{"target":target,"value":"second value"}],"submit":null}).to_string();
+                            let escaped = serde_json::to_string(&args).unwrap();
+                            named_tool_stream(turns, "fill_form", &escaped[1..escaped.len() - 1])
+                        } else if turns == 1
+                            || (fault == ProviderFault::CompoundFormRefused && turns == 3)
+                        {
+                            named_tool_stream(
+                                turns,
+                                "fill_form",
+                                r#"{\"fields\":[{\"target\":\"@a2\",\"value\":\"fixture value\"},{\"target\":\"@a3\",\"value\":\"second value\"}],\"submit\":null}"#,
+                            )
+                        } else {
+                            extraction_stream(ExtractionFault::None)
+                        }
                     } else if fault == ProviderFault::Native(Fault::ScrollVerification) {
                         named_tool_stream(
                             turns,
@@ -2559,6 +2975,13 @@ fn provider_fixture_with_discovery_account(
             &[SemanticEffectClass::Read],
             Some(navigation_tests::route_tests::route()),
         )
+    } else if matches!(
+        fault,
+        ProviderFault::ActionRepair
+            | ProviderFault::ActionRepairRepeated
+            | ProviderFault::ActionRepairCancelled
+    ) {
+        input_with_effects(&[SemanticEffectClass::Read])
     } else if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
@@ -2591,23 +3014,49 @@ fn provider_fixture_with_discovery_account(
     if let Some(clock) = account_clock {
         approved.settings.clock = clock;
     }
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        approved.settings.clock = Arc::new(listing_tests::WallClock(Instant::now()));
+    }
     let task: Box<dyn AgentWorkTask> = if let Some(value) = form {
-        Box::new(
-            crate::AgentWorkFormTask::try_new_local_preparation(
-                approved.context.identity,
-                approved.context.origin.clone(),
-                AgentAccountScope::Anonymous,
-                vec![
-                    crate::AgentWorkFormPhase::try_new(vec![crate::AgentWorkFormGoal::fill(
-                        Some("Field".into()),
-                        value.into(),
+        let mut goals =
+            vec![crate::AgentWorkFormGoal::fill(Some("Field".into()), value.into()).unwrap()];
+        if matches!(
+            fault,
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+        ) {
+            goals.push(
+                crate::AgentWorkFormGoal::fill(Some("Second".into()), "second value".into())
+                    .unwrap(),
+            );
+        }
+        let task = crate::AgentWorkFormTask::try_new_local_preparation(
+            approved.context.identity,
+            approved.context.origin.clone(),
+            AgentAccountScope::Anonymous,
+            vec![crate::AgentWorkFormPhase::try_new(goals).unwrap()],
+        )
+        .unwrap();
+        if matches!(
+            fault,
+            ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+        ) {
+            Box::new(
+                task.with_baseline_read()
+                    .with_extraction(vec![SemanticExtractionFieldSchema::try_text(
+                        "label".into(),
+                        true,
+                        64,
                     )
                     .unwrap()])
-                    .unwrap(),
-                ],
+                    .unwrap()
+                    .with_compound_forms(),
             )
-            .unwrap(),
-        )
+        } else {
+            Box::new(task)
+        }
     } else if let ProviderFault::Navigation(fault) = fault {
         if matches!(
             fault,
@@ -2707,24 +3156,59 @@ fn provider_fixture_with_discovery_account(
             ready: None,
         })
     } else if let ProviderFault::Extraction(extraction_fault) = fault {
-        let extraction = AgentWorkExtractionTask::try_new(
-            vec![SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()],
-            AgentAccountScope::Anonymous,
-        )
-        .unwrap();
-        Box::new(if extraction_fault == ExtractionFault::EmptyEvidence {
-            // The native snapshot is valid but none of its fields qualify as
-            // evidence under the trusted schema's role selection.
-            extraction.with_source_roles(
-                SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+        let field = if extraction_fault == ExtractionFault::DirectRecord {
+            SemanticExtractionFieldSchema::try_rows(
+                "label".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 128).unwrap()],
+                1,
             )
-        } else if extraction_fault == ExtractionFault::RoleSelection {
-            extraction.with_source_roles(
-                SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
-            )
+            .unwrap()
+        } else if matches!(
+            extraction_fault,
+            ExtractionFault::Listing | ExtractionFault::ListingDenied
+        ) {
+            listing_tests::schema()
+        } else if matches!(
+            extraction_fault,
+            ExtractionFault::Direct | ExtractionFault::DirectRecord
+        ) {
+            SemanticExtractionFieldSchema::try_text_list("label".into(), true, 4, 128).unwrap()
         } else {
-            extraction
-        })
+            SemanticExtractionFieldSchema::try_text("label".into(), true, 64).unwrap()
+        };
+        let extraction =
+            AgentWorkExtractionTask::try_new(vec![field], AgentAccountScope::Anonymous).unwrap();
+        if matches!(
+            extraction_fault,
+            ExtractionFault::Listing | ExtractionFault::ListingDenied
+        ) {
+            Box::new(listing_tests::ListingTask(
+                extraction,
+                extraction_fault == ExtractionFault::ListingDenied,
+            )) as Box<dyn AgentWorkTask>
+        } else {
+            Box::new(
+                if matches!(
+                    extraction_fault,
+                    ExtractionFault::Direct | ExtractionFault::DirectRecord
+                ) {
+                    extraction.with_direct_extraction()
+                } else if extraction_fault == ExtractionFault::EmptyEvidence {
+                    // The native snapshot is valid but none of its fields qualify as
+                    // evidence under the trusted schema's role selection.
+                    extraction.with_source_roles(
+                        SemanticReadRoleSelection::try_new(&[SemanticRole::Paragraph]).unwrap(),
+                    )
+                } else if extraction_fault == ExtractionFault::RoleSelection {
+                    extraction.with_source_roles(
+                        SemanticReadRoleSelection::try_new(&[SemanticRole::Textbox]).unwrap(),
+                    )
+                } else {
+                    extraction
+                },
+            )
+        }
     } else if fault == ProviderFault::HumanExtractionRequest {
         Box::new(HumanExtraction(
             AgentWorkExtractionTask::try_new(
@@ -2781,7 +3265,22 @@ fn provider_fixture_with_discovery_account(
         state.input.as_mut().unwrap().settings.deadline = deadline;
         state.native.deadline = deadline;
     }
-    let native_fault = if let ProviderFault::Navigation(fault) = fault {
+    let native_fault = if matches!(
+        fault,
+        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+    ) {
+        Fault::CompoundFields(fault == ProviderFault::CompoundFormRefused)
+    } else if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
+    ) {
+        Fault::PlainRead
+    } else if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        Fault::Listing
+    } else if let ProviderFault::Navigation(fault) = fault {
         Fault::Navigation(fault)
     } else if let ProviderFault::Read(fault) = fault {
         if fault == ReadFault::ActionLost {
@@ -2814,6 +3313,58 @@ fn provider_fixture_with_discovery_account(
         fault == ProviderFault::Read(ReadFault::LongExtraction),
         navigation_schedule,
     );
+    if matches!(
+        fault,
+        ProviderFault::ActionRepair
+            | ProviderFault::ActionRepairRepeated
+            | ProviderFault::ActionRepairCancelled
+    ) {
+        let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+            panic!("{fault:?}: {outcome:?}");
+        };
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        assert_eq!(closed.policy_settlement().closure().effects(), 0);
+        assert!(
+            !calls.contains(&7),
+            "invalid or unapproved actions never dispatch"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelActionRejected(_)))
+                .count(),
+            if fault == ProviderFault::ActionRepairRepeated {
+                2
+            } else {
+                1
+            }
+        );
+        if fault == ProviderFault::ActionRepair {
+            assert!(
+                closed.human_review().is_some(),
+                "the corrected write still requires approval: {:?}",
+                closed.failure()
+            );
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+        } else if fault == ProviderFault::ActionRepairRepeated {
+            assert!(matches!(
+                closed.failure(),
+                AgentWorkFailure::Browser(AgentBrowserProviderError::ModelProtocol(..))
+            ));
+            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+        } else {
+            assert_eq!(closed.failure(), AgentWorkFailure::HumanTakeover);
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            if fault == ProviderFault::ActionRepairCancelled {
+                1
+            } else {
+                2
+            }
+        );
+        return;
+    }
     if let ProviderFault::Navigation(fault) = fault {
         // Report the original controller failure before a missing follow-up
         // request can obscure it as a fixture-server timeout.
@@ -2843,6 +3394,61 @@ fn provider_fixture_with_discovery_account(
             requests / 2
         );
         read_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
+        return;
+    }
+    if fault == ProviderFault::CompoundFormRefused {
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!(
+                "{outcome:?}; calls={calls:?}; events={:?}",
+                events.iter().map(|e| e.kind()).collect::<Vec<_>>()
+            );
+        };
+        assert!(
+            matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)),
+            "{shutdown:?}"
+        );
+        assert_eq!(calls.iter().filter(|&&call| call == 7).count(), 3);
+        assert_eq!(
+            success.closure().effects(),
+            3,
+            "one accounted refusal plus two verified writes"
+        );
+        assert_eq!(
+            success.closure().model_calls(),
+            4,
+            "replanning is a fresh acknowledged model turn"
+        );
+        assert_eq!(server.join().unwrap(), 4);
+        return;
+    }
+    if matches!(
+        fault,
+        ProviderFault::CompoundForm | ProviderFault::CompoundFormRefused
+    ) {
+        if form != Some("fixture value") {
+            let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(closed.policy_settlement().closure().effects(), 0);
+            assert!(!calls.contains(&7));
+            assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+            assert_eq!(server.join().unwrap(), 1);
+            return;
+        }
+
+        assert!(
+            matches!(outcome, AgentWorkOutcome::Succeeded(_)),
+            "{outcome:?}; native calls={calls:?}; events={:?}",
+            events.iter().map(|event| event.kind()).collect::<Vec<_>>()
+        );
+        assert_eq!(server.join().unwrap(), 2);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(success.closure().model_calls(), 2);
+        assert_eq!(success.closure().effects(), 2);
+        assert_eq!(calls.iter().filter(|&&call| call == 7).count(), 2);
         return;
     }
     if form.is_some() && fault == ProviderFault::Native(Fault::ActionApplied) {
@@ -2891,6 +3497,45 @@ fn provider_fixture_with_discovery_account(
         combined_tests::assert_outcome(fault, outcome, shutdown, &calls, &events);
         return;
     }
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Listing | ExtractionFault::ListingDenied)
+    ) {
+        listing_tests::assert_result(
+            outcome,
+            shutdown,
+            &calls,
+            fault == ProviderFault::Extraction(ExtractionFault::ListingDenied),
+        );
+        assert_eq!(server.join().unwrap(), 2);
+        return;
+    }
+    if matches!(
+        fault,
+        ProviderFault::Extraction(ExtractionFault::Direct | ExtractionFault::DirectRecord)
+    ) {
+        assert_eq!(server.join().unwrap(), 1);
+        let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(success.closure().model_calls(), 1);
+        assert_eq!(success.closure().effects(), 0);
+        let result = success.take_extraction().expect("owned facts");
+        if fault == ProviderFault::Extraction(ExtractionFault::DirectRecord) {
+            let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+                panic!("record")
+            };
+            assert_eq!(rows.items().len(), 1);
+        } else {
+            let SemanticExtractedValue::TextList(values) = result.fields()[0].value() else {
+                panic!("text list")
+            };
+            assert_eq!(values.items()[0].as_str(), "Field");
+        }
+        assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
     if let ProviderFault::Extraction(fault) = fault {
         assert_eq!(server.join().expect("fixture server"), requests / 2);
         assert_eq!(
@@ -2905,6 +3550,11 @@ fn provider_fixture_with_discovery_account(
                     | ExtractionFault::EmptyEvidence
             ) {
                 1
+            } else if matches!(
+                fault,
+                ExtractionFault::WrongKind | ExtractionFault::ForeignSource
+            ) {
+                3
             } else {
                 2
             }
@@ -2935,7 +3585,7 @@ fn provider_fixture_with_discovery_account(
                 panic!("audit debt cannot close: {outcome:?}");
             };
             if let Some(session) = recovery.state.session.as_ref() {
-                assert!(session.credential.is_none());
+                assert!(session.access.is_none());
                 assert!(session.extraction_output.is_none());
                 assert_eq!(session.policy.pending_model_calls(), 0);
                 assert_eq!(session.policy.pending_effects(), 0);
@@ -3160,7 +3810,7 @@ fn provider_fixture_with_discovery_account(
         assert!(matches!(recovery.failure(), AgentWorkFailure::Browser(_)));
     }
     let session = recovery.state.session.as_ref().expect("retained session");
-    assert!(session.credential.is_none());
+    assert!(session.access.is_none());
     assert_eq!(session.policy.pending_model_calls(), 0);
     assert!(session.transport.snapshot().expect("transport").is_idle());
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Unclean));
@@ -3369,8 +4019,29 @@ fn extraction_stream(fault: ExtractionFault) -> String {
     } else {
         "@r1"
     };
-    let value = if fault == ExtractionFault::WrongKind {
+    let value = if fault == ExtractionFault::DirectRecord {
+        serde_json::json!({"k":"rows","items":[{"fields":[{"name":"name","value":{"k":"text","value":"Field","sources":[source]}}]}]}).to_string()
+    } else if matches!(
+        fault,
+        ExtractionFault::Listing | ExtractionFault::ListingDenied
+    ) {
+        listing_tests::mapped_rows(if fault == ExtractionFault::ListingDenied {
+            2
+        } else {
+            3
+        })
+    } else if matches!(
+        fault,
+        ExtractionFault::Direct | ExtractionFault::DirectRecord
+    ) {
+        format!(
+            r#"{{"k":"text_list","items":[{{"value":"Field","sources":["{source}"]}}],"sources":["{source}"]}}"#
+        )
+    } else if fault == ExtractionFault::WrongKind {
         format!(r#"{{"k":"boolean","value":true,"sources":["{source}"]}}"#)
+    } else if fault == ExtractionFault::ForeignSource {
+        // A value the page never shows: no citation can be repaired for it.
+        format!(r#"{{"k":"text","value":"Elsewhere","sources":["{source}"]}}"#)
     } else {
         format!(r#"{{"k":"text","value":"Field","sources":["{source}"]}}"#)
     };
@@ -3556,4 +4227,264 @@ fn isolated_storage_requirement_preserves_the_approved_scope_and_deadline() {
         ),
         manifest
     );
+}
+
+/// Answers every page turn with one locate call, as a chosen model would; the
+/// first reply also narrates beside its call.
+struct ChosenModel {
+    requests: AtomicU64,
+}
+
+impl zephium_agentic::work_model::WorkModelClient for ChosenModel {
+    fn call<'a>(
+        &'a self,
+        request: zephium_agentic::work_model::WorkModelRequest,
+        _events: &'a (dyn Fn(zephium_agentic::work_model::WorkModelEvent) + Send + Sync),
+    ) -> zephium_agentic::work_model::WorkModelFuture<'a> {
+        use zephium_agentic::work_model::*;
+        let turn = self.requests.fetch_add(1, Ordering::Relaxed);
+        assert!(request.tools.iter().any(|tool| tool.name == "locate"));
+        assert!(!request.parallel_tools && !request.native_search);
+        let mut assistant = Vec::new();
+        if turn == 0 {
+            assistant.push(WorkModelPart::Text("Looking.".to_owned()));
+        }
+        assistant.push(WorkModelPart::ToolCall(WorkModelToolCall {
+            id: format!("toolu_{turn}"),
+            name: "locate".to_owned(),
+            arguments: serde_json::json!({"semantic_query": "document", "scope": {"kind": "initial"}}),
+        }));
+        Box::pin(async move {
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 120,
+                    output_tokens: 8,
+                    ..WorkModelUsage::default()
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+fn chosen_entry() -> zephium_agentic::work_model::WorkModelEntry {
+    use zephium_agentic::work_model::*;
+    WorkModelEntry {
+        id: "anthropic/claude-test-5".to_owned(),
+        model: WorkModelRef {
+            provider: WorkModelProvider::Anthropic,
+            wire: WorkModelWire::AnthropicMessages,
+            model: "claude-test-5".to_owned(),
+        },
+        display_name: "Claude Test".to_owned(),
+        roles: vec![WorkModelRole::Page],
+        recommended: false,
+        context_window: 200_000,
+        max_output: 64_000,
+        supports: WorkModelSupports {
+            tools: true,
+            vision: false,
+            prompt_cache: true,
+            reasoning: false,
+            native_search: false,
+        },
+        price: Some(WorkModelPrice {
+            input: 3_000_000,
+            cached_input: 300_000,
+            output: 15_000_000,
+        }),
+    }
+}
+
+/// Keeps the page going so each turn reaches the model.
+struct KeepGoing;
+
+impl AgentWorkTask for KeepGoing {
+    fn evaluate(
+        &mut self,
+        _: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        Ok(AgentWorkTaskProgress::Continue)
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        Ok(AgentEffectAssessment::new(
+            action,
+            action.frame().origin().clone(),
+            SemanticEffectClass::Read,
+        ))
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        Task.attest_account(context, now)
+    }
+}
+
+#[test]
+fn a_chosen_model_drives_the_same_turns_to_the_exact_ceiling() {
+    let _guard = lock(&SERIAL);
+    let client = Arc::new(ChosenModel {
+        requests: AtomicU64::new(0),
+    });
+    let model = zephium_agentic::AgentProviderModelClient::try_new(&chosen_entry(), client.clone())
+        .expect("chosen model");
+    let (controller, handle) = AgentWorkController::try_new(
+        input_with_navigation_budget(
+            &[SemanticEffectClass::Read, SemanticEffectClass::LocalWrite],
+            None,
+            None,
+            64,
+        ),
+        AgentProviderTransportConfig::STANDARD,
+        super::super::AgentBrowserModelAccess::Chosen(model),
+        Arc::new(Audit(Fault::None)),
+        Box::new(KeepGoing),
+    )
+    .expect("actor");
+    let (outcome, shutdown, calls, events) = drive(controller, handle, Fault::None);
+    let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
+        panic!("the turn ceiling closes the page: {outcome:?}");
+    };
+    assert_eq!(
+        closed.failure(),
+        AgentWorkFailure::Browser(AgentBrowserProviderError::TurnLimit)
+    );
+    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(closed.policy_settlement().closure().model_calls(), 8);
+    assert_eq!(client.requests.load(Ordering::Relaxed), 8);
+    let settled: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.kind() {
+            AgentWorkEventKind::ModelSettled {
+                input_tokens,
+                accounting,
+                ..
+            } => Some((input_tokens, accounting)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settled.len(), 8);
+    assert!(settled
+        .iter()
+        .all(|settled| *settled == (120, AgentModelUsageAccounting::PricedCeiling)));
+    let trimmed: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind(), AgentWorkEventKind::ModelReplyTrimmed { .. }))
+        .map(|event| event.kind())
+        .collect();
+    assert_eq!(
+        trimmed,
+        [AgentWorkEventKind::ModelReplyTrimmed {
+            dropped_tool_calls: 0,
+            dropped_text_bytes: 8,
+        }]
+    );
+}
+
+#[test]
+fn original_anonymous_read_proof_is_minted_once_before_construction_and_shared_across_specs() {
+    use zephium_agentic::{
+        WorkBrowserAnonymousReadStatus as Status, WorkBrowserResourceId, WorkBrowserResources,
+        WorkId,
+    };
+    let mut original = input().with_isolated_website_data();
+    original.mark_original_anonymous_read();
+    let first = original.retained_resource_spec().unwrap();
+    let proof = first.anonymous_read_authority.clone().unwrap();
+    let now = first.clock.now().unwrap();
+    let mut rows = WorkBrowserResources::new(WorkId::generate(), first.identity.profile());
+    let _request = rows
+        .construct_document_with_original_read(
+            WorkBrowserResourceId::generate(),
+            first.identity.id(),
+            first.storage,
+            first.target,
+            first.document_policy,
+            first.isolated_public,
+            proof.clone(),
+            now,
+        )
+        .unwrap();
+    assert_eq!(
+        original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .unwrap()
+            .status(now),
+        Status::Current
+    );
+    rows.seal();
+    original.mark_original_anonymous_read();
+    assert_eq!(
+        original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .unwrap()
+            .status(now),
+        Status::Closed
+    );
+}
+#[test]
+fn original_anonymous_read_requires_explicit_intent_and_original_account_scope_not_storage_label() {
+    assert!(input()
+        .with_isolated_website_data()
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    let mut normal = input();
+    normal.mark_original_anonymous_read();
+    assert!(normal
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    let mut identified = input_with_navigation_account(
+        &[SemanticEffectClass::Read],
+        None,
+        None,
+        24,
+        AgentAccountScope::Authenticated(zephium_agentic::AgentAccountId::generate()),
+    )
+    .with_isolated_website_data();
+    identified.mark_original_anonymous_read();
+    assert!(identified
+        .retained_resource_spec()
+        .unwrap()
+        .anonymous_read_authority
+        .is_none());
+    for storage in [
+        ContextProfileStorageClass::Durable,
+        ContextProfileStorageClass::Ephemeral,
+    ] {
+        let mut original = input();
+        original.context.storage = storage;
+        let mut original = original.with_work_website_data();
+        original.mark_original_anonymous_read();
+        assert!(original
+            .retained_resource_spec()
+            .unwrap()
+            .anonymous_read_authority
+            .is_some());
+        // An original anonymous task may use Work-memory cookies; this result
+        // proves neither cookie absence nor signed-out screenshot permission.
+    }
+}
+
+#[cfg(feature = "probe-harness")]
+#[test]
+fn malformed_action_gets_one_priced_repair_and_still_needs_approval() {
+    let _guard = lock(&SERIAL);
+    provider_fixture(ProviderFault::ActionRepair);
+    provider_fixture(ProviderFault::ActionRepairRepeated);
+    provider_fixture(ProviderFault::ActionRepairCancelled);
 }

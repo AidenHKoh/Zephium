@@ -12,9 +12,14 @@
   const MAX_WIRE_BYTES = 262144;
   const MAX_VISITED_NODES = 32768;
   const MAX_TREE_DEPTH = 32;
+  const MAX_DEFERRED_RECORDS = 64;
+  const MAX_DEFERRED_ANCHORS = 192;
+  const FIGURE_TEXT = /\d/u;
+  const CURRENCY_TEXT = /[$\u20ac\u00a3\u00a5\u20b9\u20a9\u20bd\u20ba\u20aa\u0e3f\u20ab]|(?:^|[^\p{L}])(?:z\u0142|pln|usd|eur|gbp|chf|sek|nok|dkk|czk|k\u010d|kr|huf|ft|ron|lei|aud|cad|nzd|jpy|inr|brl|mxn)(?=$|[^\p{L}])/iu;
   const MAX_NAME_BYTES = 512;
   const MAX_NODE_TEXT_BYTES = 4096;
   const MAX_VALUE_BYTES = 4096;
+  const MAX_READONLY_SCAN_UNITS = 65536;
   const MAX_SURROUNDING_BYTES = 8192;
   const MAX_TRACKED_IDENTITIES = 2048;
   const MAX_DOCUMENT_INVOCATIONS = 4096;
@@ -33,6 +38,7 @@
   const CHANNEL_PARKED = "K1:A";
   const CHANNEL_EXHAUSTED = "X1";
 
+  const objectCreate = Object.create;
   const objectDefineProperty = Object.defineProperty;
   const objectFreeze = Object.freeze;
   const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
@@ -58,6 +64,8 @@
   const stringTrim = String.prototype.trim;
   const stringStartsWith = String.prototype.startsWith;
   const stringIncludes = String.prototype.includes;
+  const stringIndexOf = String.prototype.indexOf;
+  const regexpExec = RegExp.prototype.exec;
 
   if (objectHasOwn(globalThis, GLOBAL_NAME)) {
     return;
@@ -112,18 +120,22 @@
   const removeAttribute = Element.prototype.removeAttribute;
   const getBoundingClientRect = Element.prototype.getBoundingClientRect;
   const documentGetElementById = Document.prototype.getElementById;
+  const shadowGetElementById = typeof ShadowRoot === "function" ? ShadowRoot.prototype.getElementById : null;
   const documentElementFromPoint = Document.prototype.elementFromPoint;
   const getComputedStyleFixed = globalThis.getComputedStyle;
   const htmlElementClick =
     typeof HTMLElement === "function" ? HTMLElement.prototype.click : null;
   const htmlElementFocus =
     typeof HTMLElement === "function" ? HTMLElement.prototype.focus : null;
+  const htmlElementBlur =
+    typeof HTMLElement === "function" ? HTMLElement.prototype.blur : null;
   const documentExecCommand = Document.prototype.execCommand;
   const documentGetSelection = Document.prototype.getSelection;
   const documentCreateRange = Document.prototype.createRange;
   const rangeSelectNodeContents = typeof Range === "function" ? Range.prototype.selectNodeContents : null;
   const rangeSetStart = typeof Range === "function" ? Range.prototype.setStart : null;
   const rangeSetEnd = typeof Range === "function" ? Range.prototype.setEnd : null;
+  const rangeCollapse = typeof Range === "function" ? Range.prototype.collapse : null;
   const selectionRemoveAllRanges = typeof Selection === "function" ? Selection.prototype.removeAllRanges : null;
   const selectionAddRange = typeof Selection === "function" ? Selection.prototype.addRange : null;
   const selectionAnchorGetter = typeof Selection === "function" ? getter(Selection.prototype,"anchorNode") : null;
@@ -143,8 +155,14 @@
   const fixedTimeout = globalThis.setTimeout;
   const fixedClearTimeout = globalThis.clearTimeout;
   const nativeInputEvent = globalThis.InputEvent;
+  const nativeEvent = globalThis.Event;
+  const nativeMutationObserver = globalThis.MutationObserver;
+  const dateNow = Date.now;
+  const nativePerformanceObserver = globalThis.PerformanceObserver;
   const fixedDispatchEvent = EventTarget.prototype.dispatchEvent;
   const inputValueSetter = setter(HTMLInputElement.prototype, "value");
+  const inputStepUp = HTMLInputElement.prototype.stepUp;
+  const inputStepDown = HTMLInputElement.prototype.stepDown;
   const textareaValueSetter = setter(HTMLTextAreaElement.prototype, "value");
   const nodeTextSetter = setter(Node.prototype, "textContent");
   const nodeTextGetter = getter(Node.prototype, "textContent");
@@ -158,6 +176,9 @@
     typeof HTMLInputElement === "function" ? getter(HTMLInputElement.prototype, "value") : null;
   const anchorHrefGetter =
     typeof HTMLAnchorElement === "function" ? getter(HTMLAnchorElement.prototype, "href") : null;
+  const imageCompleteGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "complete") : null;
+  const imageNaturalWidthGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "naturalWidth") : null;
+  const videoPosterGetter = typeof HTMLVideoElement === "function" ? getter(HTMLVideoElement.prototype, "poster") : null;
   const imageCurrentSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "currentSrc") : null;
   const imageSrcGetter = typeof HTMLImageElement === "function" ? getter(HTMLImageElement.prototype, "src") : null;
   const titleTextGetter = typeof HTMLTitleElement === "function" ? getter(HTMLTitleElement.prototype, "text") : null;
@@ -213,6 +234,40 @@
   const shadowHostGetter =
     typeof ShadowRoot === "function" ? getter(ShadowRoot.prototype, "host") : null;
 
+  const approvalCrypto = globalThis.crypto;
+  const approvalRandom = approvalCrypto && approvalCrypto.getRandomValues;
+  const approvalBytes = globalThis.Uint8Array;
+  function freshApprovalNonce() {
+    try {
+      if (typeof approvalRandom !== "function" || typeof approvalBytes !== "function") return null;
+      const bytes = new approvalBytes(16);
+      apply(approvalRandom, approvalCrypto, [bytes]);
+      const hex = "0123456789abcdef";
+      let value = "";
+      for (const byte of bytes) value += hex[byte >> 4] + hex[byte & 15];
+      return value === "00000000000000000000000000000000" ? null : value;
+    } catch (_) { return null; }
+  }
+  let approvalNonce = freshApprovalNonce();
+  let approvalUnavailable = approvalNonce === null;
+  const approvalNonces = new Set(approvalNonce === null ? [] : [approvalNonce]);
+  let approvalKeys = new WeakMap();
+  let nextApprovalKey = 1;
+  function approvalKey(element) {
+    if (approvalNonce === null) return null;
+    let key = apply(weakMapGet, approvalKeys, [element]);
+    if (key === undefined) {
+      if (nextApprovalKey > MAX_TRACKED_IDENTITIES) return null;
+      key = nextApprovalKey++;
+      apply(weakMapSet, approvalKeys, [element, key]);
+    }
+    return key;
+  }
+  function approvalMatches(proof, target, option = false) {
+    return proof[0] === approvalNonce && belongsToCurrentDocument(target) &&
+      apply(weakMapGet, approvalKeys, [target]) === proof[option ? 2 : 1];
+  }
+
   let nodeKeys = new WeakMap();
   const keyNodes = new Map();
   let nextNodeKey = 1;
@@ -223,11 +278,21 @@
   // Weak identities do not retain DOM nodes or enter the model projection.
   let dialogKeys = new WeakMap();
   let nextDialogKey = 1;
+  // An editor keeps the name its placeholder gave it once typing hides it.
+  let editorNames = new WeakMap();
   let pendingDialogSample = null;
   let pendingScrollSample = null;
   let transportActive = false;
 
   function clearDocumentState() {
+    approvalNonce = null;
+    approvalKeys = new WeakMap();
+    nextApprovalKey = 1;
+    if (!approvalUnavailable) {
+      const next = freshApprovalNonce();
+      if (next === null || approvalNonces.has(next) || approvalNonces.size >= MAX_TRACKED_IDENTITIES) approvalUnavailable = true;
+      else { approvalNonces.add(next); approvalNonce = next; }
+    }
     nodeKeys = new WeakMap();
     keyNodes.clear();
     nextNodeKey = 1;
@@ -236,6 +301,7 @@
     lastObservationGeneration = 0;
     dialogKeys = new WeakMap();
     nextDialogKey = 1;
+    editorNames = new WeakMap();
     pendingDialogSample = null;
     pendingScrollSample = null;
   }
@@ -348,6 +414,13 @@
 
   function parseActionRequest(request) {
     const actionKeys = ["v", "o", "a", "i", "g", "t", "r", "k", "e", "p", "z", "f", "of"];
+    if (objectHasOwn(request, "ap")) {
+      const proof = request.ap;
+      if (!arrayIsArray(proof) || proof.length !== 3 || typeof proof[0] !== "string" ||
+          !/^[0-9a-f]{32}$/.test(proof[0]) || !isPositiveSafeInteger(proof[1]) || proof[1] > MAX_TRACKED_IDENTITIES ||
+          (request.k === "select" ? !isPositiveSafeInteger(proof[2]) || proof[2] > MAX_TRACKED_IDENTITIES || proof[2] === proof[1] : proof[2] !== null)) return null;
+      actionKeys.push("ap");
+    }
     if (objectHasOwn(request, "sc")) actionKeys.push("sc");
     if (request.k === "scroll") {
       if (!arrayIsArray(request.sc) || request.sc.length !== 2 ||
@@ -355,6 +428,10 @@
           !["line", "half_page", "page", "into_view"].includes(request.sc[1])) return null;
     } else if (objectHasOwn(request, "sc")) return null;
     if (objectHasOwn(request, "u")) actionKeys.push("u");
+    if (objectHasOwn(request, "q")) {
+      if (!numberIsSafeInteger(request.q) || request.q < 1 || request.q > 5000 || request.k === "scroll") return null;
+      actionKeys.push("q");
+    }
     if (request.k === "press") {
       if (typeof request.pk !== "string" || PRESS_KEYS[request.pk] === undefined) return null;
       actionKeys.push("pk");
@@ -600,7 +677,11 @@
     if (
       lower.includes("-----begin private key-----") ||
       lower.includes("-----begin rsa private key-----") ||
-      lower.includes("-----begin ec private key-----")
+      lower.includes("-----begin ec private key-----") ||
+      lower.includes("-----begin openssh private key-----") ||
+      lower.includes("-----begin dsa private key-----") ||
+      lower.includes("-----begin encrypted private key-----") ||
+      lower.includes("-----begin pgp private key block-----")
     ) {
       return true;
     }
@@ -642,7 +723,7 @@
     return false;
   }
 
-  function classifyLiveValue(value) {
+  function classifyLiveValue(value, limit = MAX_VALUE_BYTES) {
     let bytes = 0;
     for (let index = 0; index < value.length; index += 1) {
       const first = apply(stringCharCodeAt, value, [index]);
@@ -663,7 +744,7 @@
         return 0;
       }
       bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-      if (bytes > MAX_VALUE_BYTES) return 1;
+      if (bytes > limit) return 1;
     }
     return 2;
   }
@@ -693,7 +774,10 @@
   }
 
   function mark(state, completeness, stop = true) {
-    if (completeness === "field_limit") state.fieldTruncations = (state.fieldTruncations || 0) + 1;
+    // Text exhaustion also clips the record being read: it is no longer whole.
+    if (completeness === "field_limit" || completeness === "text_limit") {
+      state.fieldTruncations = (state.fieldTruncations || 0) + 1;
+    }
     if (state.completeness === "complete" || completeness === "text_limit" ||
         (state.completeness === "field_limit" && completeness !== "field_limit")) {
       state.completeness = completeness;
@@ -701,10 +785,21 @@
     if (stop) state.stopped = true;
   }
 
+  // A look that would outlast the host's observation budget stops early and
+  // says so: a partial look beats a timed-out one that closes the page.
+  const MAX_TRAVERSAL_MILLIS = 2000;
   function visit(state) {
     if (state.visited >= state.request.b.x) {
       mark(state, "inspection_limit");
       return false;
+    }
+    if ((state.visited & 63) === 0) {
+      const now = apply(dateNow, Date, []);
+      if (state.startedAt === undefined) state.startedAt = now;
+      else if (now - state.startedAt > MAX_TRAVERSAL_MILLIS) {
+        mark(state, "inspection_limit");
+        return false;
+      }
     }
     state.visited += 1;
     return true;
@@ -761,6 +856,41 @@
       return null;
     }
     return entry.node;
+  }
+
+  // A target the page re-rendered after the look: the one element at its
+  // observed place whose whole descriptor still matches takes over its key,
+  // so the action and its proof stay on one identity. A second match, or an
+  // element observed under another key, leaves the reference stale.
+  function rebindReplaced(request) {
+    const entry = keyNodes.get(request.t);
+    if (entry !== undefined && belongsToCurrentDocument(entry.node)) return null;
+    let node;
+    try {
+      node = apply(documentElementFromPoint, document, [request.e.x + request.e.w / 2, request.e.y + request.e.h / 2]);
+    } catch (_) { return null; }
+    let found = null;
+    for (let depth = 0; node !== null && node !== undefined && depth <= MAX_TREE_DEPTH; depth += 1) {
+      const descriptor = nodeType(node) === 1 ? classify(node) : null;
+      if (descriptor !== null && descriptor.role === request.r) {
+        const key = apply(weakMapGet, nodeKeys, [node]);
+        const owner = key === undefined ? undefined : keyNodes.get(key);
+        if (owner !== undefined && owner.generation === request.g && key !== request.t) return null;
+        if (descriptorMatches(request.f, runtimeDescriptor(node, request.g))) {
+          if (found !== null) return null;
+          found = node;
+        }
+      }
+      let parent = read(nodeParentGetter, node);
+      if (parent !== null && nodeType(parent) === 11 && shadowHostGetter !== null) parent = read(shadowHostGetter, parent) || null;
+      node = parent;
+    }
+    if (found === null) return null;
+    const fresh = apply(weakMapGet, nodeKeys, [found]);
+    if (fresh !== undefined) keyNodes.delete(fresh);
+    apply(weakMapSet, nodeKeys, [found, request.t]);
+    keyNodes.set(request.t, { node: found, generation: request.g });
+    return found;
   }
 
   function resolveKeyAtGeneration(key, generation) {
@@ -859,6 +989,49 @@
     return null;
   }
 
+  // Framework menus sometimes expose only rendered text and a pointer cursor.
+  // Keep the text target, but never duplicate a native control or edit host.
+  function pointerTextControl(element) {
+    const interactive = node => {
+      const tag = tagName(node), role = explicitRole(node), editable = attribute(node,"contenteditable",16);
+      return ["a","area","button","label","input","textarea","select","option","summary","iframe","frame"].includes(tag) ||
+        (role !== null && ["button","link","checkbox","radio","tab","menu_item","option","textbox","searchbox","combobox","listbox","spinbutton","slider"].includes(role.role)) ||
+        (editable !== null && ["","true","plaintext-only"].includes(lower(editable)));
+    };
+    const nativeDescendant = root => {
+      const pending = [root]; let visited = 0;
+      while (pending.length > 0) {
+        if (++visited > 64) return true;
+        const at = pending.pop();
+        const children = childNodes(at);
+        if (listLength(children) > 64) return true;
+        for (let index=0; index<listLength(children); index+=1) {
+          const child=listItem(children,index);
+          if (nodeType(child)!==1) continue;
+          if (interactive(child)) return true;
+          pending.push(child);
+        }
+      }
+      return false;
+    };
+    try {
+      if (apply(getComputedStyleFixed,globalThis,[element]).cursor !== "pointer" || nativeDescendant(element)) return false;
+      let current=element;
+      for (let depth=0; depth<MAX_TREE_DEPTH; depth+=1) {
+        const parent=read(nodeParentGetter,current);
+        if (parent===document) return true;
+        if (parent===null || nodeType(parent)!==1) return false;
+        if (interactive(parent) || (["li","tr","td","th"].includes(tagName(parent)) && clickableItem(parent))) return false;
+        const cursor=apply(getComputedStyleFixed,globalThis,[current]).cursor;
+        if (cursor==="pointer" && apply(getComputedStyleFixed,globalThis,[parent]).cursor!=="pointer" && nativeDescendant(current)) return false;
+        if (parent!==element && genericTextDescriptor(parent,tagName(parent),"")!==null &&
+            apply(getComputedStyleFixed,globalThis,[parent]).cursor==="pointer") return false;
+        current=parent;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function classify(node) {
     if (node === document) return { role: "document", tag: "#document", inputType: "" };
     if (nodeType(node) !== 1) return null;
@@ -884,18 +1057,34 @@
     const richText = editable && editableSupport === 7 && richTextShape(node);
     const explicit = explicitRole(node);
     if (explicit !== null) {
-      if (explicit.suppressed === true) return null;
+      if (explicit.suppressed === true) return isRenderedPhoto(node, tag) ? { role: "image", tag, inputType } : null;
       return { role: explicit.role, landmark: explicit.landmark, tag, inputType, contentEditable: editable, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness && editableWitness.empty, editingContext: editableWitness && editableWitness.context };
     }
 
     if (editable) return { role: "textbox", tag, inputType, contentEditable: true, plainTextEditable, richText, editableSupport, editableStructure, editableEmpty: editableWitness.empty, editingContext: editableWitness.context };
 
+    // Some focus-managed widgets omit a role but declare enabled/disabled state.
+    if (["div","span"].includes(tag) && ["0","-1"].includes(attribute(node,"tabindex",8)) &&
+        ["true","false"].includes(lower(attribute(node,"aria-disabled",16)||""))) return {role:"button",tag,inputType};
+
+    if ((tag === "div" || tag === "span") && listLength(childNodes(node)) <= 1 && backgroundSource(node) !== null && isRenderedPhoto(node, tag)) {
+      return { role: "image", tag, inputType, mediaKind: "background" };
+    }
+    const moneyText=(tag==="div" || tag==="span")?shownMoneyText(node):null;
+    if(moneyText!==null && !pointerTextControl(node))return {role:"paragraph",tag,inputType,moneyText,noOperations:true};
+    if ((tag === "div" || tag === "span") && genericTextDescriptor(node,tag,inputType)!==null && pointerTextControl(node)) {
+      return {role:"button",tag,inputType,pointerText:true};
+    }
+
+    if (["video", "canvas", "svg"].includes(tag) && isRenderedPhoto(node, tag)) {
+      return { role: "image", tag, inputType, mediaKind: tag === "video" ? "poster" : tag };
+    }
     if (tag === "html" || tag === "body" || tag === "div" || tag === "fieldset" || tag === "details") {
       return tag === "fieldset" || tag === "details"
         ? { role: "group", tag, inputType }
         : genericTextDescriptor(node, tag, inputType);
     }
-    if (tag === "figure") return { role: "group", tag, inputType };
+    if (tag === "figure" || tag === "form" && !hasAuthorName(node)) return { role: "group", tag, inputType };
     if (tag === "article") return { role: "document", tag, inputType };
     if (tag === "main" || tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") {
       const landmark = { main: "main", nav: "navigation", header: "banner", footer: "contentinfo", aside: "complementary" }[tag];
@@ -940,7 +1129,7 @@
     if (tag === "tr") return { role: "row", tag, inputType };
     if (tag === "th") return { role: "cell_header", tag, inputType };
     if (tag === "td") return { role: "cell", tag, inputType };
-    if (tag === "img" && attribute(node, "alt", 1) !== null) {
+    if (tag === "img" && (attribute(node, "alt", 1) !== null || isRenderedPhoto(node, tag))) {
       return { role: "image", tag, inputType };
     }
     if (isPageImageMeta(node, tag)) return { role: "image", tag, inputType, pageImage: true, headMeta: true };
@@ -968,8 +1157,30 @@
       (tag === "link" && !isPageAddressMeta(element, tag)) ||
       has(element, "hidden") ||
       has(element, "inert") ||
-      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag))
+      (lower(attribute(element, "aria-hidden", 16) || "") === "true" && !isRenderedPhoto(element, tag) &&
+        !isShownPrice(element, tag))
     );
+  }
+
+  // A price can split integer and fractional parts into spans,
+  // hiding one from accessibility. Read the bounded inline unit atomically.
+  function shownMoneyText(element) {
+    const pending=[element];let text="",count=0;
+    while(pending.length) {
+      if(++count>16)return null;
+      const node=pending.pop(),type=nodeType(node);
+      if(type===3) {const raw=read(characterDataGetter,node);if(typeof raw!=="string" || text.length+raw.length>64 || /\d$/u.test(text) && /^\d/u.test(raw))return null;text+=raw;continue;}
+      if(type!==1 || !["div","span","b","strong","i","em","small","sup","sub"].includes(tagName(node)) ||
+          has(node,"hidden") || has(node,"inert") || has(node,"contenteditable") || explicitRole(node)!==null || !styleIsVisible(node))return null;
+      const children=childNodes(node),length=listLength(children);if(length+pending.length>16)return null;
+      for(let index=length-1;index>=0;index--)pending.push(listItem(children,index));
+    }
+    const rect=elementRect(element);
+    return rect!==null && rect.width>4 && rect.height>4 && FIGURE_TEXT.test(text) && CURRENCY_TEXT.test(text) &&
+      /^[\s\d.,'\u2019+\u2212()\-]+$/u.test(text.replace(CURRENCY_TEXT,"")) ? text : null;
+  }
+  function isShownPrice(element, tag) {
+    return tag!=="svg" && tag!=="img" && shownMoneyText(element)!==null;
   }
 
   // The page's own picture (og:image) is the one image every product or
@@ -1103,9 +1314,19 @@
   // carries the label; a photo drawn at a real size stays an image node,
   // while hidden icons and spacers still drop out.
   function isRenderedPhoto(element, tag) {
-    if (tag !== "img") return false;
+    if (!["img", "canvas", "svg"].includes(tag) &&
+        !(tag === "video" && attribute(element, "poster", 1) !== null) &&
+        !((tag === "div" || tag === "span") && listLength(childNodes(element)) <= 1 && backgroundSource(element) !== null)) return false;
     const rect = elementRect(element);
     return rect !== null && rect.width >= 64 && rect.height >= 64;
+  }
+
+  function backgroundSource(element) {
+    try {
+      const value = apply(getComputedStyleFixed, globalThis, [element]).backgroundImage;
+      const match = /^url\(["']?([^"'\\]+)["']?\)$/.exec(value);
+      return match && match[1].length <= 4096 ? match[1] : null;
+    } catch (_) { return null; }
   }
 
   // The label of the button or link an unnamed photo sits in.
@@ -1118,6 +1339,103 @@
       if (label !== null && label !== "") return label;
     }
     return null;
+  }
+
+  // A form control the page left unnamed reads by the words beside it, then
+  // its description, then its form name; never by any value.
+  const FALLBACK_NAMED_ROLES = ["textbox", "searchbox", "spinbutton", "combobox", "listbox", "checkbox", "radio"];
+  const FALLBACK_NAME_BYTES = 64;
+  const INLINE_LABEL_TAGS = ["span", "b", "strong", "em", "i", "small", "font"];
+
+  function adjacentLabel(element, following, state) {
+    const parent = read(nodeParentGetter, element);
+    if (parent === null || nodeType(parent) !== 1) return null;
+    const children = read(nodeChildNodesGetter, parent);
+    const length = mathMin(listLength(children), 256);
+    let at = -1;
+    for (let index = 0; index < length; index += 1) {
+      if (listItem(children, index) === element) { at = index; break; }
+    }
+    if (at < 0) return null;
+    const step = following ? 1 : -1;
+    for (let index = at + step, seen = 0; index >= 0 && index < length && seen < 4; index += step, seen += 1) {
+      const node = listItem(children, index);
+      const type = nodeType(node);
+      let raw;
+      if (type === 3) raw = read(characterDataGetter, node);
+      else if (type === 1 && INLINE_LABEL_TAGS.includes(tagName(node))) raw = flatText(node, state, FALLBACK_NAME_BYTES + 1);
+      else if (type === 1) return null;
+      else continue;
+      const text = normalizeText(raw, FALLBACK_NAME_BYTES);
+      if (text.truncated) return null;
+      if (text.value === "") continue;
+      // Words just after a check box are its own label, not the next field's.
+      if (!following && index > 0) {
+        const before = listItem(children, index - 1);
+        if (nodeType(before) === 1 && tagName(before) === "input" &&
+            ["checkbox", "radio"].includes(lower(attribute(before, "type", 16) || ""))) return null;
+      }
+      let end = text.value.length;
+      while (end > 0 && (text.value[end - 1] === ":" || text.value[end - 1] === " ")) end -= 1;
+      return end === 0 ? null : apply(stringSlice, text.value, [0, end]);
+    }
+    return null;
+  }
+
+  function nameWords(raw) {
+    const words = apply(stringSplit, raw, [/[\s_\-.[\]]+|(?=[A-Z][a-z])/u]);
+    const text = normalizeText(lower(words.join(" ")), FALLBACK_NAME_BYTES);
+    return text.truncated || text.value === "" ? null : text.value;
+  }
+
+  // An editor's placeholder sits on its host or its empty first block
+  // (ProseMirror, TipTap), or in a placeholder element beside it (Lexical,
+  // Draft.js).
+  function editorPlaceholder(element, state) {
+    let current = element;
+    for (let depth = 0; depth < 3 && current !== null; depth += 1) {
+      for (const name of depth === 0 ? ["aria-placeholder", "data-placeholder"] : ["placeholder", "aria-placeholder", "data-placeholder"]) {
+        const value = attribute(current, name, MAX_NAME_BYTES * 4, state);
+        if (value !== null && apply(stringTrim, value, []) !== "") return value;
+      }
+      const children = read(nodeChildNodesGetter, current);
+      let next = null;
+      for (let index = 0; index < mathMin(listLength(children), 4) && next === null; index += 1) {
+        if (nodeType(listItem(children, index)) === 1) next = listItem(children, index);
+      }
+      current = next;
+    }
+    let scope = element;
+    for (let depth = 0; depth < 2; depth += 1) {
+      const parent = read(nodeParentGetter, scope);
+      if (parent === null || nodeType(parent) !== 1) return null;
+      const children = read(nodeChildNodesGetter, parent);
+      for (let index = 0; index < mathMin(listLength(children), 8); index += 1) {
+        const sibling = listItem(children, index);
+        if (sibling === scope || nodeType(sibling) !== 1 ||
+            !apply(stringIncludes, lower(attribute(sibling, "class", 256) || ""), ["placeholder"])) continue;
+        const text = normalizeText(flatText(sibling, state, FALLBACK_NAME_BYTES + 1), FALLBACK_NAME_BYTES);
+        if (!text.truncated && text.value !== "") return text.value;
+      }
+      scope = parent;
+    }
+    return null;
+  }
+
+  function fallbackFieldName(element, descriptor, state) {
+    if (descriptor.contentEditable === true) {
+      const description = attribute(element, "aria-description", MAX_NAME_BYTES * 4, state);
+      return editorPlaceholder(element, state) || adjacentLabel(element, false, state) ||
+        (description !== null && apply(stringTrim, description, []) !== "" ? description : null);
+    }
+    if (!["input", "textarea", "select"].includes(descriptor.tag)) return null;
+    const check = descriptor.role === "checkbox" || descriptor.role === "radio";
+    const beside = adjacentLabel(element, check, state) || (check ? adjacentLabel(element, false, state) : null);
+    if (beside !== null) return beside;
+    const description = attribute(element, "aria-description", MAX_NAME_BYTES * 4, state);
+    if (description !== null && apply(stringTrim, description, []) !== "") return description;
+    const formName = attribute(element, "name", 128, state);
+    return formName === null ? null : nameWords(formName);
   }
 
   function styleIsVisible(element) {
@@ -1163,6 +1481,26 @@
     const width = numberIsFinite(Number(globalThis.innerWidth)) ? Number(globalThis.innerWidth) : 0;
     const height = numberIsFinite(Number(globalThis.innerHeight)) ? Number(globalThis.innerHeight) : 0;
     return rect.x + rect.width > 0 && rect.y + rect.height > 0 && rect.x < width && rect.y < height;
+  }
+
+  // An anchor inside a narrow column that also holds several checkboxes or
+  // radios: a listing's filter panel, not its results.
+  function facetPanel(anchor, choices) {
+    const width = numberIsFinite(Number(globalThis.innerWidth)) ? Number(globalThis.innerWidth) : 0;
+    if (width <= 0 || choices.length < 3 || anchor.rect === null || anchor.rect === undefined ||
+        anchor.rect.width >= width * 0.35) return false;
+    let current = anchor.element;
+    for (let depth = 0; depth < 12 && current !== null && current !== undefined; depth += 1) {
+      if (nodeType(current) !== 1) return false;
+      const rect = elementRect(current);
+      if (rect !== null && rect.width >= width * 0.35) return false;
+      let held = 0;
+      for (const choice of choices) {
+        if (apply(nodeContains, current, [choice]) && (held += 1) >= 3) return true;
+      }
+      current = read(nodeParentGetter, current);
+    }
+    return false;
   }
 
   function wireRect(rect) {
@@ -1277,10 +1615,27 @@
     return viewport === null ? null : {x: 0, y: 0, width: viewport.width, height: viewport.height};
   }
 
+  // Rows, cells and list items a page made clickable itself (mail threads,
+  // app lists) carry no interactive role. A click handler attribute, a tab
+  // stop or a pointer cursor set on the item, not inherited, says so.
+  function clickableItem(element) {
+    if (has(element, "onclick") || attribute(element, "tabindex", 8) === "0" ||
+        lower(attribute(element, "jsaction", 1024) || "").includes("click")) return true;
+    try {
+      const cursor = apply(getComputedStyleFixed, globalThis, [element]).cursor;
+      const parent = read(nodeParentGetter, element);
+      return cursor === "pointer" && !(parent !== null && nodeType(parent) === 1 &&
+        apply(getComputedStyleFixed, globalThis, [parent]).cursor === "pointer");
+    } catch (_) {
+      return false;
+    }
+  }
+
   function operationBits(descriptor, disabled, readonly, element) {
     if (disabled || descriptor.noOperations === true) return 0;
     switch (descriptor.role) {
       case "button": {
+        if (descriptor.pointerText === true) return 1;
         const rect = elementRect(element);
         if (nativeActivation(element, descriptor) === 6 && rect !== null && !inViewport(rect)) {
           const ancestors = scrollAncestors(element);
@@ -1300,14 +1655,22 @@
       case "searchbox":
         return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
       case "password":
-      case "spinbutton":
         return readonly ? 1 | 8 : 1 | 2 | 8;
+      case "spinbutton":
+        return readonly || fillControlKind(descriptor, "") === 0 ? 1 | 8 : 1 | 2 | 8;
       case "combobox":
-        // Role alone grants neither Fill nor Select.
-        return readonly ? 1 | 8 : descriptor.tag === "select" ? 1 | 4 | 8 :
+        // Role alone grants neither Fill nor Select. A native select is only
+        // chosen in: a click or key opens WebKit's own menu, whose modal loop
+        // holds the page until someone closes it.
+        if (descriptor.tag === "select") return readonly ? 0 : 4;
+        return readonly ? 1 | 8 :
           fillControlKind(descriptor, "") !== 0 ? 1 | 2 | 8 : 1 | 8;
       case "listbox":
-        return 4 | 8 | (scrollElement(element) === null ? 0 : 16);
+        return (descriptor.tag === "select" ? 4 : 0) | 8 | (scrollElement(element) === null ? 0 : 16);
+      case "row":
+      case "cell":
+      case "list_item":
+        return clickableItem(element) ? 1 : 0;
       case "group":
       case "document":
       case "landmark":
@@ -1376,7 +1739,19 @@
     }
   }
 
-  function flatText(root, state, limit) {
+  // The queued child holding focus goes on top of the stack.
+  function focusFirst(stack, from, focused) {
+    for (let at = stack.length - 1; at >= from; at -= 1) {
+      const child = stack[at].node;
+      if (nodeType(child) === 1 && [...focused].some(element => apply(nodeContains, child, [element]) === true)) {
+        stack.push(stack.splice(at, 1)[0]);
+        return;
+      }
+    }
+  }
+
+  // A referenced label names its control even when aria-hidden itself.
+  function flatText(root, state, limit, referenced) {
     const chunks = [];
     let bytes = 0;
     const stack = [{ node: root }];
@@ -1402,7 +1777,7 @@
         if (normalized.truncated) mark(state, "field_limit", false);
         continue;
       }
-      if (type === 1 && shouldSkipSubtree(current)) continue;
+      if (type === 1 && shouldSkipSubtree(current) && !(referenced && current === root)) continue;
       if (type === 1 || type === 9 || type === 11) pushChildren(stack, current, {}, state);
     }
     if (stack.length !== 0 && bytes >= limit) mark(state, "field_limit", false);
@@ -1421,7 +1796,7 @@
         if (identifier.length > 128) { mark(state, "field_limit", false); continue; }
         const target = apply(documentGetElementById, document, [identifier]);
         if (target !== null) {
-          const text = flatText(target, state, MAX_NAME_BYTES);
+          const text = flatText(target, state, MAX_NAME_BYTES, true);
           if (text !== "") labels.push(text);
         }
       }
@@ -1589,8 +1964,9 @@
 
   function boundedCredentialMetadata(raw, limit) {
     if (typeof raw !== "string") return null;
-    let bytes = 0;
+    let bytes = 0, kept = "", from = 0;
     for (let index = 0; index < raw.length; index += 1) {
+      const start = index;
       const first = apply(stringCharCodeAt, raw, [index]);
       let point = first;
       if (first >= 0xd800 && first <= 0xdbff) {
@@ -1602,16 +1978,18 @@
       } else if (first >= 0xdc00 && first <= 0xdfff) {
         return null;
       }
-      if (
-        (isForbiddenTextPoint(point) && point !== 0x09 && point !== 0x0a) ||
-        point === 0x0d
-      ) {
-        return null;
+      if (point < 0x20 ? point !== 0x09 && point !== 0x0a : point >= 0x7f && point <= 0x9f) return null;
+      // Invisible marks (Gmail wraps its Send label in direction marks) are
+      // dropped, so "pass\u200bword" still reads as password.
+      if (point > 0x0a && isForbiddenTextPoint(point)) {
+        kept += apply(stringSlice, raw, [from, start]);
+        from = index + 1;
+        continue;
       }
       bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
       if (bytes > limit) return null;
     }
-    return raw;
+    return kept + apply(stringSlice, raw, [from]);
   }
 
   function boundedCredentialLabelText(root) {
@@ -1624,6 +2002,7 @@
       visited += 1;
       const current = stack.pop();
       const type = nodeType(current);
+      if (type === 8) continue;
       if (type === 3) {
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") return null;
@@ -1680,10 +2059,19 @@
     return { value, bytes, secret, truncated: normalized.truncated };
   }
 
-  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES) {
+  function consumeValueField(raw, state, fieldLimit = MAX_VALUE_BYTES, readonlyText = false) {
     const remaining = mathMax(0, state.request.b.t - state.textBytes);
-    // Bound allocation; only complete <=4-KiB values reach classification.
-    const valueClass = classifyLiveValue(raw);
+    // Read-only document viewers may hold a long file. Inspect its whole value
+    // before copying any prefix; cap aggregate work and refuse an exhausted scan.
+    let valueClass;
+    if (readonlyText) {
+      const scanned = state.readonlyScanUnits || 0;
+      if (raw.length > MAX_READONLY_SCAN_UNITS - scanned) valueClass = 1;
+      else {
+        state.readonlyScanUnits = scanned + raw.length;
+        valueClass = classifyLiveValue(raw, MAX_READONLY_SCAN_UNITS);
+      }
+    } else valueClass = classifyLiveValue(raw);
     if (valueClass !== 2 || (raw !== "" && looksLikeSecret(raw))) {
       const redactedBytes = 10;
       if (redactedBytes > remaining) {
@@ -1717,10 +2105,11 @@
     if (field.secret) setSensitivity(record, "secret");
   }
 
-  function addValue(record, raw, state) {
-    const field = consumeValueField(raw, state);
+  function addValue(record, raw, state, readonlyText = false) {
+    const field = consumeValueField(raw, state, MAX_VALUE_BYTES, readonlyText);
     // Preserve proven public emptiness, never infer it from missing/clipped data.
-    const observedEmpty = raw === "" && record.sensitivity === "public" && (record.wire.o & 2) !== 0;
+    // Emptiness discloses nothing private, and a fill is verified against it.
+    const observedEmpty = raw === "" && record.sensitivity !== "secret" && (record.wire.o & 2) !== 0;
     if (field.value !== "" || observedEmpty) record.wire.v = { k: field.secret ? "redacted" : "text", value: field.value };
     if (field.secret) {
       record.wire.v = { k: "redacted" };
@@ -1800,6 +2189,7 @@
   }
 
   function recordSink(descriptor, hasName) {
+    if (descriptor.role === "option" && hasName) return "text";
     if (
       descriptor.role === "button" ||
       descriptor.role === "link" ||
@@ -1936,9 +2326,14 @@
     if (form !== null) wire.ff = form;
     if (states !== 0) wire.s = states;
     if (operations !== 0) wire.o = operations;
+    if ((operations & 15) !== 0) {
+      const identity = approvalKey(element);
+      if (identity !== null) wire.ai = identity;
+    }
     if (rect !== null && state.request.b.geo) wire.b = wireRect(rect);
 
-    const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element };
+    const record = { wire, sink: null, sinkBytes: 0, sensitivity: "public", element,
+      media: descriptor.mediaKind || (descriptor.tag === "article" || descriptor.role === "list_item" ? "record" : null) || (descriptor.role !== "image" ? null : descriptor.pageImage ? "page_image" : descriptor.tag === "img" ? "image" : ["canvas","svg"].includes(descriptor.tag) ? descriptor.tag : descriptor.tag === "video" ? "poster" : "graphic") };
     if (!isDocument) {
       const sensitivity = sensitivityFor(element);
       if (sensitivity !== "public") setSensitivity(record, sensitivity);
@@ -1947,6 +2342,13 @@
         descriptor.pageTitle === true ? "Page title" :
         typeof descriptor.pageFacts === "string" ? "Page facts" : labelledText(element, descriptor, state);
       if ((name === null || name === "") && descriptor.role === "image") name = ancestorLabel(element, state);
+      else if ((name === null || name === "") && FALLBACK_NAMED_ROLES.includes(descriptor.role)) {
+        name = fallbackFieldName(element, descriptor, state);
+      }
+      if (descriptor.contentEditable === true) {
+        if (name !== null && name !== "") apply(weakMapSet, editorNames, [element, name]);
+        else name = apply(weakMapGet, editorNames, [element]) || null;
+      }
       if (name !== null && name !== "") addName(record, name, state);
       record.sink = recordSink(descriptor, wire.n !== undefined);
       if (record.sink === "value") record.sinkBytes = 0;
@@ -1955,7 +2357,10 @@
         appendSink(record, descriptor.pageTitle === true ? pageTitleText(element, descriptor.tag) || "" : descriptor.pageFacts, state);
         record.sink = null;
       }
-      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true);
+      if(typeof descriptor.moneyText==="string") {
+        record.sinkBytes=0;appendSink(record,descriptor.moneyText,state);record.sink=null;
+      }
+      const imageSource = descriptor.role === "image" && (descriptor.tag === "img" || descriptor.pageImage === true || descriptor.mediaKind === "background" || descriptor.mediaKind === "poster");
       if (((descriptor.role === "link" && (descriptor.tag === "a" || descriptor.pageAddress === true)) || imageSource) &&
           record.sensitivity === "public") {
         let destination;
@@ -1963,6 +2368,8 @@
           if (descriptor.headMeta === true) {
             destination = attribute(element, descriptor.tag === "link" ? "href" : "content", 2048) || undefined;
           }
+          else if (descriptor.mediaKind === "background") destination = backgroundSource(element);
+          else if (descriptor.mediaKind === "poster") destination = read(videoPosterGetter, element);
           else destination = read(imageSource ? imageCurrentSrcGetter : anchorHrefGetter, element);
           if (imageSource && !destination && descriptor.headMeta !== true) destination = read(imageSrcGetter, element);
         } catch (_) { destination = undefined; }
@@ -2015,7 +2422,7 @@
           } catch (_) {
             value = null;
           }
-          if (typeof value === "string") addValue(record, value, state);
+          if (typeof value === "string") addValue(record, value, state, readonly && descriptor.tag === "textarea");
         }
       }
     }
@@ -2043,6 +2450,17 @@
     // headings consume spare output capacity afterward, never displacing a
     // visible control or prose record that appears later in document order.
     const headings = [];
+    // So do the main content's records below the fold (a results list's
+    // items, a table's rows, articles, a document's prose),
+    // before the headings: a listing page then shows its records in one
+    // look instead of its header and filters, a reference page its text.
+    const deferred = [];
+    // Unmarked product grids still need a bounded scan
+    // defers its content below the fold in document order instead.
+    const loose = [];
+    // Checkboxes and radios the pass met, to tell a filter panel by.
+    const choices = [];
+    let sawMain = false;
     const focused = focusedElements();
     const stack = [];
 
@@ -2066,8 +2484,10 @@
       stack.push({ node: root, parent: null, sink: null, depth: 0, disabled: false });
     }
 
+    let current = null;
     while (stack.length !== 0 && !state.stopped) {
       const item = stack.pop();
+      current = item;
       if (!visit(state)) break;
       const type = nodeType(item.node);
       if (type === 3) {
@@ -2124,8 +2544,31 @@
               ? optionOfAdmittedSelect || descriptor.headMeta === true || (rect !== null && (initialPriority || inViewport(rect)))
               : true
           );
+          if (!anchored && descriptor.role === "landmark" && descriptor.landmark === "main") sawMain = true;
+          const recordLike = descriptor.role === "list_item" || descriptor.role === "row" ||
+            (descriptor.role === "document" && descriptor.tag === "article");
+          if (!anchored && (descriptor.role === "checkbox" || descriptor.role === "radio") &&
+              choices.length < MAX_DEFERRED_RECORDS) {
+            choices.push(item.node);
+          }
+          if (!anchored && !admitted && visible && rect !== null &&
+              (recordLike || descriptor.role === "list" || descriptor.role === "table" ||
+               descriptor.role === "paragraph" || (item.main !== true && descriptor.role === "link"))) {
+            const into = item.main === true ? deferred : loose;
+            if (!into.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
+              // A filter panel's anchors have their own smaller allowance, so
+              // a long facet list cannot crowd the results out of the list.
+              const aside = facetPanel({ element: item.node, rect }, choices);
+              if (into.filter(anchor => anchor.aside === aside).length <
+                  (aside ? MAX_DEFERRED_RECORDS : MAX_DEFERRED_ANCHORS)) {
+                into.push({ element: item.node, parent, rect, aside });
+              }
+            }
+          }
           if (!anchored && !admitted && visible &&
               (descriptor.role === "heading" || summaryDetails(item.node) !== null) &&
+              !deferred.some(anchor => apply(nodeContains, anchor.element, [item.node])) &&
+              !loose.some(anchor => apply(nodeContains, anchor.element, [item.node])) &&
               !headings.some(anchor => apply(nodeContains, anchor.element, [item.node]))) {
             const details = summaryDetails(item.node);
             const priority = details === null ? 0 : read(detailsOpenGetter, details) ? 1 : 2;
@@ -2161,6 +2604,10 @@
             sink = record.sink !== null ? index :
               inheritsProse && record.sensitivity === "public" &&
                 sink !== null && records[sink].sink === "text" ? sink : null;
+            if(typeof descriptor.moneyText==="string") {
+              if(record.sensitivity==="public")appendVisibleText(records,{sink:null,parent:item.parent,nameAncestors},descriptor.moneyText,state);
+              continue;
+            }
             // A region is one structural level, not a full-DOM subtree. Keep
             // nested regions as current, independently expandable anchors so
             // an earlier navigation/sidebar cannot consume the parent's prose
@@ -2177,12 +2624,92 @@
         }
       }
       if (!state.stopped) {
+        const main = item.main === true ||
+          (descriptor !== null && descriptor.role === "landmark" && descriptor.landmark === "main");
+        const from = stack.length;
         pushChildren(
           stack,
           item.node,
-          { parent, sink, depth: item.depth + 1, disabled, nameAncestors },
+          { parent, sink, depth: item.depth + 1, disabled, nameAncestors, main },
           state
         );
+        // The part being worked in (a mail written over a long inbox) is read
+        // first; text gathered into one record keeps its order.
+        if (sink === null && focused.size !== 0) focusFirst(stack, from, focused);
+      }
+    }
+    // A look cut short leaves the records still collecting descendant text
+    // unfinished; every other record it holds was read whole.
+    if (state.stopped) {
+      const open = current === null ? stack : [...stack, current];
+      const unfinished = new Set();
+      for (const item of open) {
+        for (let index = item.parent, depth = 0;
+          index !== null && index !== undefined && records[index] !== undefined && depth <= MAX_TREE_DEPTH;
+          index = records[index].wire.p === undefined ? null : records[index].wire.p, depth += 1) {
+          if (unfinished.has(index)) break;
+          unfinished.add(index);
+          // Only a record that gathers descendant text can be left unfinished.
+          if (records[index].sink !== null && records[index].sink !== undefined) records[index].wire.fc = false;
+        }
+      }
+    }
+    const known = objectCreate(null);
+    const anchors = sawMain ? deferred : loose;
+    if (!anchored && !state.stopped && anchors.length !== 0) {
+      for (const record of records) known[record.wire.k] = true;
+      const original = state.request;
+      // A filter panel's records (a listing's facet counts) come after the
+      // rest, each in document order: otherwise the facets fill the room
+      // before the first product.
+      for (const anchor of anchors) anchor.aside = facetPanel(anchor, choices);
+      const work = [...anchors.filter(anchor => !anchor.aside),
+        ...anchors.filter(anchor => anchor.aside)];
+      for (let at = 0; at < work.length; at += 1) {
+        const anchor = work[at];
+        const room = original.b.n - records.length;
+        if (state.stopped || room <= 0) {
+          if (!state.stopped) mark(state, "node_limit", false);
+          break;
+        }
+        // An anchor holding a record the viewport pass took (a region
+        // landmark admitted out of view inside an article of results) is
+        // read child by child instead, under that record when it is one.
+        const own = records.findIndex(record => record.element === anchor.element);
+        if (own >= 0 || records.some(record => record.element !== anchor.element &&
+            nodeType(record.element) === 1 &&
+            apply(nodeContains, anchor.element, [record.element]))) {
+          const list = childNodes(anchor.element);
+          const children = [];
+          for (let index = 0; index < listLength(list) &&
+              work.length + children.length < MAX_DEFERRED_RECORDS * 4; index += 1) {
+            const child = listItem(list, index);
+            if (child !== null && nodeType(child) === 1) {
+              children.push({ element: child, parent: own >= 0 ? own : anchor.parent, aside: anchor.aside });
+            }
+          }
+          work.splice(at + 1, 0, ...children);
+          continue;
+        }
+        state.request = { ...original, b: { ...original.b, n: room } };
+        const scoped = traverse(anchor.element, state, true);
+        state.request = original;
+        // An element the viewport pass already holds keeps its one record.
+        if (scoped.length === 0 || scoped.some(record => known[record.wire.k] === true)) continue;
+        const offset = records.length;
+        const parentDepth = anchor.parent === null ? -1 : records[anchor.parent].depth;
+        if (parentDepth + 1 + scoped.reduce((deepest, record) => mathMax(deepest, record.depth), 0) > MAX_TREE_DEPTH) continue;
+        for (const record of scoped) {
+          if (record.wire.p === undefined) {
+            if (anchor.parent === null) delete record.wire.p;
+            else record.wire.p = anchor.parent;
+          } else {
+            record.wire.p += offset;
+          }
+          record.depth += parentDepth + 1;
+          known[record.wire.k] = true;
+          records.push(record);
+        }
       }
     }
     if (!anchored && !state.stopped) {
@@ -2197,7 +2724,7 @@
         // credential descendants), not a textContent/flat-text shortcut.
         const scoped = traverse(heading.element, state, true);
         const record = scoped[0];
-        if (record === undefined) continue;
+        if (record === undefined || known[record.wire.k] === true) continue;
         if (heading.parent !== null) record.wire.p = heading.parent;
         record.depth = heading.parent === null ? 0 : records[heading.parent].depth + 1;
         if (record.depth > MAX_TREE_DEPTH) { mark(state, "depth_limit"); break; }
@@ -2424,6 +2951,33 @@
       ["textbox", "password", "searchbox", "spinbutton", "combobox", "listbox", "option", "frame_boundary"].includes(role);
   }
 
+  function textSearchWindows(text, terms, literal) {
+    const windows = [], words = /[\p{Alphabetic}\p{N}]+/gu;
+    let covered = 0;
+    while (true) {
+      let at;
+      if (literal !== null) {
+        at = apply(stringIndexOf, text, [literal, covered]);
+        if (at < 0) break;
+      } else {
+        const match = apply(regexpExec, words, [text]);
+        if (match === null) break;
+        if (match.index < covered || !apply(stringSplit, lower(match[0]), [/[^\p{Alphabetic}\p{N}]+/u]).some(word => terms.has(word))) continue;
+        at = match.index;
+      }
+      let start = mathMax(0, at - 512);
+      if (start > 0) {
+        const space = apply(stringIndexOf, text, [" ", start]);
+        start = space >= 0 && space < at ? space + 1 : at;
+      }
+      const value = normalizeText(apply(stringSlice, text, [start]), 4096).value;
+      if (value === "" || start + value.length <= at) break;
+      covered = start + value.length;
+      windows.push(value);
+    }
+    return windows;
+  }
+
   function searchTextRecords(anchor, descriptor, state) {
     // Fixed native recipe: bounded literal-token matching over rendered source
     // passages. It does not query selectors, inspect hidden values, or execute
@@ -2485,10 +3039,19 @@
         const raw = read(characterDataGetter, current);
         if (typeof raw !== "string") continue;
         const remaining = 131072 - scannedBytes;
-        const normalized = normalizeText(raw, mathMin(4096, remaining), remaining);
+        const normalized = normalizeText(raw, remaining, remaining);
         scannedBytes += normalized.scannedBytes;
         if (normalized.truncated) mark(state, "scope_boundary", false);
-        if (normalized.value !== "") {
+        if (normalized.bytes > 4096) {
+          // A long text node is still one source. Keep only contiguous query
+          // windows, never stitch distant passages into a fabricated quote.
+          flush();
+          mark(state, "scope_boundary", false);
+          for (const text of textSearchWindows(normalized.value, terms, literal)) {
+            pending = { element: item.source, text, bytes: utf8Length(text, 4097), ordinal: ordinal++ };
+            flush();
+          }
+        } else if (normalized.value !== "") {
           if (pending !== null && pending.element !== item.source) flush();
           if (pending === null) pending = { element: item.source, text: "", bytes: 0, ordinal: ordinal++ };
           const part = normalizeText(normalized.value, mathMax(0, 4096 - pending.bytes - (pending.bytes === 0 ? 0 : 1)));
@@ -2552,6 +3115,68 @@
     return records;
   }
 
+  // Reflect observed ARIA popup ownership, never label similarity. Only a
+  // captured listbox with one active owner is joined; no hidden node is added.
+  function associateOwnedChoices(records, state) {
+    const owners = new Map();
+    for (let index = 0; index < records.length; index += 1) {
+      const owner = records[index];
+      if (owner.wire.r !== "combobox" || owner.wire.q === "secret" || owner.wire.fc === false) continue;
+      let root;
+      try { root = apply(nodeGetRoot, owner.element, []); } catch (_) { continue; }
+      const find = root === document ? documentGetElementById : shadowGetElementById;
+      if (typeof find !== "function") continue;
+      const ids = new Set();
+      for (const attributeName of ["aria-controls", "aria-owns"]) {
+        const raw = attribute(owner.element, attributeName, 512, state);
+        if (raw === null) continue;
+        const parts = apply(stringSplit, raw, [/\s+/]);
+        if (parts.length > 8) continue;
+        for (const id of parts) if (id.length > 0 && id.length <= 128) ids.add(id);
+      }
+      for (const id of ids) {
+        let element;
+        try { element = apply(find, root, [id]); } catch (_) { continue; }
+        if (element === null) continue;
+        const targets = [];
+        for (let at = index + 1; at < records.length; at += 1) {
+          const record = records[at];
+          if (record.wire.r === "listbox" && record.wire.q !== "secret" && record.wire.fc !== false &&
+              (record.element === element || apply(nodeContains, element, [record.element]))) targets.push(at);
+        }
+        if (targets.length !== 1) continue;
+        const target = targets[0];
+        const candidates = owners.get(target) || [];
+        if (!candidates.includes(index)) candidates.push(index);
+        owners.set(target, candidates);
+      }
+    }
+    for (const [target, candidates] of owners) {
+      const expanded = candidates.filter(index => ((records[index].wire.s || 0) & 4) !== 0);
+      const eligible = expanded.length > 0 ? expanded : candidates;
+      if (eligible.length !== 1) continue;
+      const prior = records[target].wire.p;
+      records[target].wire.p = eligible[0];
+      const depths = [];
+      for (let index = 0; index < records.length; index += 1) {
+        const parent = records[index].wire.p;
+        depths.push(parent === undefined ? 0 : depths[parent] + 1);
+      }
+      if (depths.some(depth => depth > MAX_TREE_DEPTH)) {
+        if (prior === undefined) delete records[target].wire.p;
+        else records[target].wire.p = prior;
+        continue;
+      }
+      for (let index = 0; index < records.length; index += 1) records[index].depth = depths[index];
+    }
+  }
+
+  // Exact native node keys, never label similarity. Only the nearest shared
+  // non-page ancestor and its geometry associate an image with record text.
+  function mediaEvidence(records, request) {
+    try { return globalThis.__zephiumRecordMediaV1.evidence(records, request.i, request.g, {apply,read,weakMapGet,weakMapSet,nodeContains,elementRect,tagName,nodeType,nodeParentGetter,imageCompleteGetter,imageNaturalWidthGetter,pageTitleText}); } catch (_) { return []; }
+  }
+
   function encodeSnapshot(request, records, completeness) {
     let dialogSample = "";
     const pending = pendingDialogSample;
@@ -2587,7 +3212,7 @@
     for (const record of records) encodedNodes.push(apply(jsonStringify, JSON, [record.wire]));
 
     const compose = (status) => {
-      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample},"n":[`;
+      const header = `{"v":${WIRE_VERSION},"i":${request.i},"g":${request.g},"c":"${status}"${dialogSample}${scrollSample}${approvalNonce === null ? "" : `,"ap":"${approvalNonce}"`},"n":[`;
       const parts = [];
       let bytes = utf8Length(header, request.b.w + 1) + 2;
       let truncated = false;
@@ -2601,7 +3226,13 @@
         parts.push(encodedNode);
         bytes += separator + nodeBytes;
       }
-      return { value: `${header}${parts.join(",")}]}`, truncated };
+      let value = `${header}${parts.join(",")}]}`;
+      const media = mediaEvidence(records.slice(0,parts.length),request);
+      if (media.length) {
+        const enriched = value.slice(0,-1) + ',"m":' + apply(jsonStringify,JSON,[media]) + '}';
+        if (utf8Length(enriched,request.b.w+1) <= request.b.w) value = enriched;
+      }
+      return { value, truncated };
     };
 
     let encoded = compose(completeness);
@@ -2697,6 +3328,19 @@
     return { width, height };
   }
 
+  // The middle of a target's visible part, whatever lies over it there.
+  function coveredPoint(rect, viewport) {
+    const left = mathMax(0, rect.x);
+    const top = mathMax(0, rect.y);
+    const right = mathMin(viewport.width, rect.x + rect.width);
+    const bottom = mathMin(viewport.height, rect.y + rect.height);
+    if (right <= left || bottom <= top) return null;
+    return {
+      x: mathMax(0, mathMin(viewport.width - 1, mathRound((left + right) / 2))),
+      y: mathMax(0, mathMin(viewport.height - 1, mathRound((top + bottom) / 2)))
+    };
+  }
+
   function actionPoint(target, rect, viewport) {
     const left = mathMax(0, rect.x);
     const top = mathMax(0, rect.y);
@@ -2718,7 +3362,7 @@
       let hit;
       try {
         hit = apply(documentElementFromPoint, document, [x, y]);
-        if (cdpPreparing && typeof shadowElementFromPoint === "function") {
+        if (typeof shadowElementFromPoint === "function") {
           for (let depth=0; hit!==null && depth<MAX_TREE_DEPTH; depth+=1) {
             const root=read(elementShadowGetter,hit);
             if (root===null || root===undefined) break;
@@ -2863,12 +3507,26 @@
     );
   }
 
+  function editingStatesMatch(expected, actual) {
+    // Focus and a combobox popup are normal consequences of typing. Clearing
+    // an existing invalid state is allowed; new invalidity and constraints are not.
+    const transient = 64 | (expected.r === 13 ? 4 : 0);
+    return (!(actual.s & 32) || (expected.s & 32) !== 0) &&
+      (expected.s & ~(transient | 32)) === (actual.s & ~(transient | 32));
+  }
+
+  function descriptorMatchesFocusedField(expected, actual) {
+    if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
+    return editingStatesMatch(expected, actual) &&
+      descriptorMatches({ ...expected, s: 0 }, { ...actual, s: 0 });
+  }
+
   function descriptorMatchesFilledValue(expected, actual, value) {
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     const valueMatches = actual.vo === 0 && !actual.vb && actual.vk === 1 && actual.vt === value;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      expected.s === actual.s && expected.n === actual.n && valueMatches
+      editingStatesMatch(expected, actual) && expected.n === actual.n && valueMatches
     );
   }
 
@@ -2885,7 +3543,7 @@
     if (!validRuntimeDescriptor(expected) || !validRuntimeDescriptor(actual)) return false;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      expected.s === actual.s && expected.n === actual.n &&
+      editingStatesMatch(expected, actual) && expected.n === actual.n &&
       actual.vk === 4 && actual.vt === null && actual.vo === desired && !actual.vb
     );
   }
@@ -2895,7 +3553,7 @@
     const selectedBit = 2;
     return (
       expected.a === actual.a && expected.r === actual.r && expected.o === actual.o && expected.q === actual.q &&
-      (expected.s & ~selectedBit) === (actual.s & ~selectedBit) &&
+      (expected.s & ~(selectedBit | 64)) === (actual.s & ~(selectedBit | 64)) &&
       (actual.s & selectedBit) !== 0 && expected.n === actual.n &&
       expected.vk === actual.vk && expected.vt === actual.vt &&
       expected.vo === actual.vo && expected.vb === actual.vb
@@ -3033,15 +3691,26 @@
     return role === "textbox" || role === "searchbox" || role === "combobox";
   }
 
+  // Typed inputs take only a value the browser stores unchanged, so the
+  // exact-value proof holds; any other value is refused before dispatch.
+  const FILL_FORMATS = {
+    text: /^[^\t\n\r]*$/u, search: /^[^\t\n\r]*$/u, tel: /^[^\t\n\r]*$/u,
+    email: /^\S*$/u, url: /^(\S(.*\S)?)?$/u,
+    number: /^(-?(\d+|\d*\.\d+)([eE][-+]?\d+)?)?$/u,
+    date: /^(\d{4}-\d{2}-\d{2})?$/u, month: /^(\d{4}-\d{2})?$/u,
+    time: /^(\d{2}:\d{2})?$/u, "datetime-local": /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})?$/u
+  };
+
   function fillControlKind(descriptor, value) {
+    if (descriptor.tag === "input" && descriptor.role === "spinbutton") {
+      // Segmented date/time widgets use text inputs with a numeric ARIA role.
+      return ["text", "number"].includes(descriptor.inputType) && FILL_FORMATS.number.test(value) ? 1 : 0;
+    }
     if (!textFillRole(descriptor.role)) return 0;
     if (descriptor.tag === "input") {
-      if (descriptor.inputType !== "text" && descriptor.inputType !== "search") return 0;
-      for (const character of value) {
-        const point = character.codePointAt(0);
-        if (point === 0x09 || point === 0x0a || point === 0x0d) return 0;
-      }
-      return 1;
+      const format = descriptor.inputType !== "number" && objectHasOwn(FILL_FORMATS, descriptor.inputType)
+        ? FILL_FORMATS[descriptor.inputType] : null;
+      return format !== null && format.test(value) ? 1 : 0;
     }
     if (descriptor.tag === "textarea" && descriptor.role !== "searchbox") return 2;
     if (descriptor.contentEditable === true && descriptor.plainTextEditable === true) return 3;
@@ -3103,7 +3772,7 @@
   function cdpTargetGuard(target,request,point,keyboard) {
     const ancestry=cdpAncestry(target);
     return started => {
-      if (resolveKeyAtGeneration(request.t,request.g)!==target) return false;
+      if (resolveKeyAtGeneration(request.t,request.g)!==target || (request.ap !== undefined && !approvalMatches(request.ap,target))) return false;
       if (ancestry===null || !ancestry()) return false;
       const current=runtimeDescriptor(target,request.g);
       if (current===null) return false;
@@ -3143,6 +3812,22 @@
       chain.push([current,host,true]);current=host;
     }
     return null;
+  }
+
+  function caretInside(target) {
+    const selection = apply(documentGetSelection, document, []);
+    return selection !== null && composedContains(target, read(selectionAnchorGetter, selection)) &&
+      composedContains(target, read(selectionFocusGetter, selection));
+  }
+
+  // Where a click after an editor's last word would put the caret.
+  function caretAtEnd(target) {
+    const selection = apply(documentGetSelection, document, []);
+    const range = apply(documentCreateRange, document, []);
+    apply(rangeSelectNodeContents, range, [target]);
+    apply(rangeCollapse, range, [false]);
+    apply(selectionRemoveAllRanges, selection, []);
+    apply(selectionAddRange, selection, [range]);
   }
 
   function cdpRichSelectionInside(target) {
@@ -3305,17 +3990,22 @@
           read(nodeConnectedGetter, target) !== true ||
           apply(nodeGetRoot, target, []) !== document) return false;
       const current = classify(target);
-      if (current === null || fillControlKind(current, value) !== kind ||
+      const now = current === null ? 0 : fillControlKind(current, value);
+      // An empty or text-only editor becomes a rich one once its first
+      // paragraph is typed, and that is the same editor.
+      if (now === 0 || (kind >= 3 ? now < 3 : now !== kind) ||
           disabledState(target, false) || has(target, "readonly") ||
           lower(attribute(target, "aria-readonly", 16) || "") === "true" ||
           credentialField(target, current, attribute(target, "aria-label", 512) || "")) return false;
-      if (kind === 3) return editingContextMatches(target, request, current.editingContext);
-      return kind !== 4 || read(nodeParentGetter, target) === parentAtAdmission;
+      if (kind === 3 && now === 3) return editingContextMatches(target, request, current.editingContext);
+      return kind < 3 || read(nodeParentGetter, target) === parentAtAdmission;
     };
-    const revalidate = () => sameTarget() && descriptorMatches(request.f, runtimeDescriptor(target, request.g));
-    // Every editable host is typed into through the browser's own editing, as
-    // a person types: editors that keep their own model (Notion's blocks,
-    // ProseMirror, Lexical) take it, where a raw text write is undone.
+    let focused = false;
+    const revalidate = () => sameTarget() && (focused
+      ? read(documentActiveGetter, document) === target &&
+        descriptorMatchesFocusedField(request.f, runtimeDescriptor(target, request.g))
+      : descriptorMatches(request.f, runtimeDescriptor(target, request.g)));
+    // Contenteditable hosts with an internal text model need native editing.
     if (kind === 3 || kind === 4) {
       if (!validActionText(value)) return "unsupported_interaction";
       // Before focusing, the whole descriptor must still match; from then on
@@ -3328,6 +4018,8 @@
     const valueSetter = kind === 1 ? inputValueSetter :
       kind === 2 ? textareaValueSetter : kind === 3 ? nodeTextSetter : null;
     if (valueSetter === null || typeof nativeInputEvent !== "function" ||
+        typeof htmlElementFocus !== "function" ||
+        (descriptor.role === "textbox" && typeof htmlElementBlur !== "function") ||
         typeof fixedDispatchEvent !== "function" || !validActionText(value)) {
       return "unsupported_interaction";
     }
@@ -3335,6 +4027,13 @@
     let input;
     try {
       if (!revalidate()) return "target_changed";
+    } catch (_) { return "unsupported_interaction"; }
+    try {
+      apply(htmlElementFocus, target, [{ preventScroll: true }]);
+      focused = true;
+      if (!revalidate()) return "applied_unverified_beforeinput_revalidation";
+    } catch (_) { return "applied_unverified_beforeinput_revalidation"; }
+    try {
       before = new nativeInputEvent("beforeinput", {
         bubbles: true, cancelable: true, composed: true, data: value,
         inputType: "insertReplacementText", isComposing: false
@@ -3353,6 +4052,12 @@
     try {
       write(valueSetter, target, value);
       apply(fixedDispatchEvent, target, [input]);
+      // A person's edit ends in change and leaving the field: forms validate
+      // and save on those. A combobox or search box keeps its suggestions.
+      apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
+      if (descriptor.role === "textbox" && read(documentActiveGetter, document) === target) {
+        apply(htmlElementBlur, target, []);
+      }
     } catch (_) { return "applied_unverified_mutation"; }
     try {
       if (kind === 3) {
@@ -3370,14 +4075,15 @@
     }
     try {
       write(selectIndexSetter, target, desired);
+      if (read(selectIndexGetter, target) !== desired) return "applied_unverified";
+      // A person's choice fires input then change; sort and filter menus act
+      // on them, and a write alone leaves the page's own state unchanged.
+      apply(fixedDispatchEvent, target, [new nativeEvent("input", { bubbles: true, composed: true })]);
+      apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
     } catch (_) {
       return "applied_unverified";
     }
-    try {
-      return read(selectIndexGetter, target) === desired ? "ok" : "applied_unverified";
-    } catch (_) {
-      return "applied_unverified";
-    }
+    return "ok";
   }
 
   function encodeActionEvidence(request, backend, readiness, geometry, viewport, point, delta) {
@@ -3428,6 +4134,43 @@
     });
   }
 
+  // A page settles once its DOM and its resource loads have been quiet for a
+  // moment, or at the host's ceiling: sockets, polling and animations bound
+  // the wait instead of holding it. Style-only changes are animation.
+  const SETTLE_QUIET_MILLIS = 200;
+  function settleQuiet(result, ceiling) {
+    if (typeof result !== "string") return apply(promiseThen, result, [(value) => settleQuiet(value, ceiling)]);
+    if (result.startsWith("E") || typeof nativeMutationObserver !== "function") return result;
+    return new nativePromise((resolve) => {
+      let quiet = null, done = false, changes = null, loads = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        apply(fixedClearTimeout, globalThis, [quiet]);
+        apply(fixedClearTimeout, globalThis, [cap]);
+        for (const observer of [changes, loads]) try { if (observer !== null) observer.disconnect(); } catch (_) {}
+        resolve(result);
+      };
+      const restart = () => {
+        if (done) return;
+        apply(fixedClearTimeout, globalThis, [quiet]);
+        quiet = apply(fixedTimeout, globalThis, [finish, SETTLE_QUIET_MILLIS]);
+      };
+      const cap = apply(fixedTimeout, globalThis, [finish, ceiling]);
+      try {
+        changes = new nativeMutationObserver((records) => {
+          if (records.some(record => record.type !== "attributes" || record.attributeName !== "style")) restart();
+        });
+        changes.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+        if (typeof nativePerformanceObserver === "function") {
+          loads = new nativePerformanceObserver(restart);
+          loads.observe({ type: "resource" });
+        }
+      } catch (_) {}
+      restart();
+    });
+  }
+
   function runAction(request) {
     pendingDialogSample = null;
     pendingScrollSample = null;
@@ -3447,8 +4190,11 @@
       return actionFault("target_changed");
     }
     sweepIdentities(request.g);
-    const target = resolveKeyAtGeneration(request.t, request.g);
+    if (request.ap !== undefined && request.ap[0] !== approvalNonce) return actionFault("target_changed");
+    const target = resolveKeyAtGeneration(request.t, request.g) ||
+      (request.k === "scroll" || request.ap !== undefined ? null : rebindReplaced(request));
     if (target === null || (nodeType(target) !== 1 && !(request.k === "scroll" && target === document))) return actionFault("stale_reference");
+    if (request.ap !== undefined && !approvalMatches(request.ap, target)) return actionFault("target_changed");
     const descriptor = classify(target);
     if (descriptor === null) return actionFault("target_changed");
     const credential = target === document ? 0 : credentialField(target, descriptor, attribute(target, "aria-label", 512) || "");
@@ -3475,12 +4221,15 @@
     if (request.k === "select") {
       const option = resolveKeyAtGeneration(request.p, request.g);
       if (option === null) return actionFault("stale_reference");
+      if (request.ap !== undefined && !approvalMatches(request.ap, option, true)) return actionFault("target_changed");
       selectedOption = option;
       const optionDescriptor = runtimeDescriptor(option, request.g);
       if (!descriptorMatches(request.of, optionDescriptor)) {
         return actionFault("target_changed");
       }
-      const computed = selectDelta(target, option);
+      const computed = tagName(target) === "select" ? selectDelta(target, option)
+        : classify(option)?.role === "option" && option !== target && composedContains(target, option) &&
+          !disabledState(option, false) && elementRect(option) !== null ? 0 : null;
       if (computed === null) return actionFault("target_changed");
       delta = computed;
     }
@@ -3521,6 +4270,12 @@
         } catch (_) {
           point = null;
         }
+      }
+      // Typing and keys reach a field through its own setter and events, not
+      // the pointer: a banner over part of a visible field does not stop them.
+      if (point === null && rect !== null && !cdpPreparing && target !== document &&
+          (request.k === "fill" || request.k === "press" || (request.k === "select" && tagName(target) === "select"))) {
+        point = coveredPoint(rect, viewport);
       }
       if (point === null || rect === null) return actionFault("target_occluded");
       readiness = "visible";
@@ -3570,6 +4325,7 @@
       }
       try {
         pointerDown(target, point);
+        if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
         apply(htmlElementClick, target, []);
       } catch (_) {
         pendingDialogSample = null;
@@ -3654,21 +4410,78 @@
       if (key === undefined || typeof nativeKeyboardEvent !== "function" || typeof htmlElementFocus !== "function") {
         return actionFault("unsupported_interaction");
       }
+      const numericDefault = !cdpPreparing && descriptor.tag === "input" &&
+        read(inputTypeGetter, target) === "number" && (key[0] === "ArrowUp" || key[0] === "ArrowDown");
+      const stepNumber = key[0] === "ArrowUp" ? inputStepUp : inputStepDown;
+      // Native stepping owns number parsing, alignment, bounds and empty values.
+      // This recipe grants no new target or operation; only the admitted Press reaches it.
+      if (numericDefault && (readonly || typeof stepNumber !== "function")) {
+        return actionFault(readonly ? "target_disabled" : "unsupported_interaction");
+      }
+      const numberConstraints = numericDefault ? ["min", "max", "step"].map(name => apply(getAttribute, target, [name])) : null;
+      if (numericDefault && numberConstraints.some(value => value !== null && value.length > 128)) return actionFault("unsupported_interaction");
+      const numberValue = numericDefault ? read(inputValueGetter, target) : null;
+      const sameNumber = (value) => {
+        if (!numericDefault || lastObservationInvocation !== request.i || lastObservationGeneration !== request.g ||
+            resolveKeyAtGeneration(request.t, request.g) !== target || read(nodeConnectedGetter, target) !== true ||
+            apply(nodeGetRoot, target, []) !== document || read(inputTypeGetter, target) !== "number" ||
+            disabledState(target, false) || has(target, "readonly") ||
+            lower(attribute(target, "aria-readonly", 16) || "") === "true" || read(inputValueGetter, target) !== value ||
+            ["min", "max", "step"].some((name, index) => apply(getAttribute, target, [name]) !== numberConstraints[index])) return false;
+        const current = runtimeDescriptor(target, request.g);
+        // Focusing is expected; every other descriptor field must still match.
+        return current !== null && descriptorMatches({ ...request.f, s: request.f.s & ~64, vt: value },
+          { ...current, s: current.s & ~64 });
+      };
+      // A key in an editor lands at its caret: one the step did not find
+      // there is placed after the editor's text.
+      const editor = descriptor.contentEditable === true && [documentGetSelection, documentCreateRange,
+        rangeSelectNodeContents, rangeCollapse, selectionRemoveAllRanges, selectionAddRange, documentExecCommand]
+        .every(call => typeof call === "function");
       try {
+        const caretHeld = editor && read(documentActiveGetter, document) === target && caretInside(target);
         if (target !== document) apply(htmlElementFocus, target, []);
+        if (editor && !caretHeld) caretAtEnd(target);
+        if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
+        if (numericDefault && !sameNumber(numberValue)) return actionFault("applied_unverified_postcondition");
         if (cdpPreparing) {
           const validate = cdpTargetGuard(target,request,point,true);
           return guardedCdpInputs(request,target,[cdpKey(key,false),cdpKey(key,true)],validate,() => finishActionRendering(encodeActionEvidence(request,"engine_native_input",readiness,geometry,viewport,point,delta)));
         }
         const init = { key: key[0], code: key[1], keyCode: key[2], which: key[2], bubbles: true, cancelable: true, composed: true };
         const down = new nativeKeyboardEvent("keydown", init);
-        const handled = apply(fixedDispatchEvent, target, [down]) !== true;
+        let handled = apply(fixedDispatchEvent, target, [down]) !== true;
         if (key[0] === "Enter" || key[0] === " ") {
-          apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keypress", init)]);
+          const pressed = apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keypress", init)]) !== true;
+          if (editor) handled = handled || pressed;
+        }
+        let numberAfter = numberValue;
+        let numberUnverified = false;
+        if (numericDefault && !handled) {
+          try {
+            if (!sameNumber(numberValue)) numberUnverified = true;
+            else {
+              apply(stepNumber, target, []);
+              numberAfter = read(inputValueGetter, target);
+              if (!sameNumber(numberAfter)) numberUnverified = true;
+              else if (numberAfter !== numberValue) {
+                apply(fixedDispatchEvent, target, [new nativeEvent("input", { bubbles: true, composed: true })]);
+                if (!sameNumber(numberAfter)) numberUnverified = true;
+                else apply(fixedDispatchEvent, target, [new nativeEvent("change", { bubbles: true })]);
+              }
+            }
+          } catch (_) { numberUnverified = true; }
         }
         apply(fixedDispatchEvent, target, [new nativeKeyboardEvent("keyup", init)]);
-        // A key the page did not handle does what the browser would.
+        if (numericDefault && !handled && (numberUnverified || !sameNumber(numberAfter))) return actionFault("applied_unverified_postcondition");
+        // A key the page did not handle does what the browser would: Return
+        // in an editor starts a new paragraph through its own editing.
+        if (!handled && key[0] === "Enter" && editor && caretInside(target)) {
+          if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
+          if (apply(documentExecCommand, document, ["insertParagraph", false, null]) !== true) return actionFault("applied_unverified_postcondition");
+        }
         if (!handled && key[0] === "Enter" && descriptor.tag === "input") {
+          if (request.ap !== undefined && !approvalMatches(request.ap,target)) return actionFault("applied_unverified_postcondition");
           const form = read(inputFormGetter, target);
           if (form !== null && form !== undefined && typeof formRequestSubmit === "function") {
             apply(formRequestSubmit, form, []);
@@ -3701,6 +4514,13 @@
       button: 0, buttons: 1, view: globalThis };
     const pointer = typeof nativePointerEvent === "function";
     const pointerInit = { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // A person's pointer arrives before it presses: menus that open on
+    // script hover see it. CSS :hover needs real input and stays closed.
+    const over = { ...init, buttons: 0 };
+    for (const [type, bubbles] of [["over", true], ["enter", false], ["move", true]]) {
+      if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent(`pointer${type}`, { ...pointerInit, ...over, bubbles })]);
+      apply(fixedDispatchEvent, target, [new nativeMouseEvent(`mouse${type}`, { ...over, bubbles })]);
+    }
     if (pointer) apply(fixedDispatchEvent, target, [new nativePointerEvent("pointerdown", pointerInit)]);
     apply(fixedDispatchEvent, target, [new nativeMouseEvent("mousedown", init)]);
     if (typeof htmlElementFocus === "function" && read(nodeConnectedGetter, target) === true) {
@@ -3773,12 +4593,29 @@
         records = traverse(anchor, state, true);
       }
     }
+    associateOwnedChoices(records, state);
     if (state.regionBoundary) mark(state, "scope_boundary", false);
     return encodeSnapshot(request, records, state.completeness);
   }
 
+  function pixelPrivacy(publicOnly = false) {
+    try {
+      return globalThis.__zephiumPixelPrivacyV1.probe((element,value,field) => {
+        if (element === null) return looksLikeSecret(value) || (field && classifyLiveValue(value) !== 2);
+        const descriptor=classify(element)||{role:"group",tag:tagName(element)};
+        if(credentialField(element,descriptor,attribute(element,"aria-label",512)||"")!==0)return true;
+        if(!["input","textarea","select"].includes(descriptor.tag) && descriptor.role!=="textbox" && !descriptor.contentEditable)return false;
+        return attribute(element,"maxlength",4)==="1" || /(?:^|[^a-z])(?:code|otp[0-9]*|pin)(?:$|[^a-z])|(?:verification|confirmation|security)code/iu.test(
+          ["name","id","aria-label","placeholder"].map(name=>attribute(element,name,512)||"").join(" "));
+      }, publicOnly);
+    } catch (_) { return "E1:privacy"; }
+  }
   function invoke(encoded) {
     if (busy) return fault("busy");
+    if (typeof encoded === "string" && ["M1:","V1:","U1:"].includes(encoded.slice(0,3))) return globalThis.__zephiumRecordMediaV1.invoke(encoded, pixelPrivacy);
+    if (encoded === "P1:privacy") return pixelPrivacy();
+    if (encoded === "P1:public") return pixelPrivacy(true);
+    if (encoded === "H1:survey") { try { return globalThis.__zephiumHumanSurveyV1.survey(); } catch (_) { return "E1:survey"; } }
     const request = parseRequest(encoded);
     if (request === null) return fault("invalid_request");
     busy = true;
@@ -3786,6 +4623,7 @@
       let result;
       try {
         result = runAction(request);
+        if (objectHasOwn(request, "q")) result = settleQuiet(result, request.q);
       } catch (_) {
         busy = false;
         return actionFault("internal");

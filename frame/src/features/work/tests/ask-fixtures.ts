@@ -205,6 +205,8 @@ export const notionWall: WorkHumanPageV1 = {
   remaining_millis: 540_000,
   document_revision: "1",
   can_continue: true,
+  can_extend: false,
+  work_memory: false,
 };
 
 export const notionTask = running("read-notion", {

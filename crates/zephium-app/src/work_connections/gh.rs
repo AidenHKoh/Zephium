@@ -14,8 +14,8 @@ use crate::work_computer::ToolReply;
 pub const SERVICE: &str = "github";
 /// The question the first use in a work asks, with GitHub's mark; the ask
 /// card reads the service and tool from it.
-pub const ASK: &str = "Use GitHub (gh)?";
-pub const USE: &str = "Use GitHub";
+pub const ASK: &str = "Use GitHub CLI (gh) for public reads?";
+pub const USE: &str = "Use GitHub CLI (gh)";
 pub const DECLINE: &str = "Use the website instead";
 
 /// Why the first call wants gh, in a sentence the ask card shows.
@@ -51,6 +51,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         name: name.into(),
         description: description.into(),
         schema,
+        strict: false,
     }
 }
 
@@ -518,6 +519,9 @@ impl GitHub {
     }
 
     pub async fn call(&self, host: &dyn ConnectionHost, name: &str, args: &Value) -> ToolReply {
+        if let Err(note) = super::cli::ensure_available() {
+            return fault(note);
+        }
         if let Err(reply) = self.allowed(host, name, args).await {
             return reply;
         }
@@ -1170,6 +1174,59 @@ mod tests {
             .join("src/work_connections/fixtures")
             .join(name);
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn prior_service_consent_cannot_enable_unconfined_gh() {
+        use super::super::{Decision, HostFuture};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use zephium_core::work::WorkError;
+        struct Approved(AtomicUsize);
+        impl ConnectionHost for Approved {
+            fn record(
+                &self,
+                _: CallFact,
+                _: bool,
+                _: Option<String>,
+            ) -> HostFuture<'_, Result<(), WorkError>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(()) })
+            }
+            fn confirm(&self, _: WorkConfirmV1) -> HostFuture<'_, Result<Decision, WorkError>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(Decision::Approved) })
+            }
+            fn ask<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a [&'a str],
+            ) -> HostFuture<'a, Result<Option<String>, WorkError>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async { Ok(Some(USE.into())) })
+            }
+        }
+        let host = Approved(AtomicUsize::new(0));
+        let github = GitHub::new(
+            PathBuf::from("fixture-never-spawned"),
+            None,
+            Some("fixture-account".into()),
+        );
+        for name in [
+            "github_issue",
+            "github_api",
+            "github_comment",
+            "github_merge_pr",
+        ] {
+            let reply = github
+                .call(
+                    &host,
+                    name,
+                    &json!({"repo":"fixture/repo","number":1,"path":"user","body":"inert"}),
+                )
+                .await;
+            assert!(reply.is_error && reply.content.contains("unavailable"));
+        }
+        assert_eq!(host.0.load(Ordering::Relaxed), 0);
     }
 
     #[test]

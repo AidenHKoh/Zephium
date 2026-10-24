@@ -428,6 +428,7 @@ pub(crate) fn install(
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            page_styles: HashMap::new(),
             picker: None,
             next_picker: 0,
             declarative_content_policy_cache: HashMap::new(),
@@ -475,6 +476,8 @@ pub(crate) fn install(
             macos_ephemeral_data_stores: HashMap::new(),
             #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
             anonymous_work_stores: HashMap::new(),
+            #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+            work_data_stores: HashMap::new(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
@@ -509,6 +512,8 @@ pub(crate) fn install(
             anonymous_work_environments: HashMap::new(),
             #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
             work_site_stores: HashMap::new(),
+            #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+            work_profile_cookie_sources: HashMap::new(),
             #[cfg(target_os = "windows")]
             browser_processes: HashMap::new(),
             #[cfg(target_os = "windows")]

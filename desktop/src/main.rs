@@ -5,6 +5,8 @@
 )]
 
 fn main() -> std::process::ExitCode {
+    #[cfg(all(target_os = "macos", feature = "work-product"))]
+    zephium_app::work_commands::private_guard_main();
     #[cfg(all(target_os = "macos", feature = "work-integration-qa", debug_assertions))]
     if let Some((_, stage)) = [
         (

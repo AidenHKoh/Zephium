@@ -248,11 +248,12 @@ fn expected_manifest(
 }
 
 /// Separate protected Work lineage. No ordinary AppData tables are imported.
-pub(crate) static WORK: &[Migration] = &[Migration {
-    version: 1,
-    up: |tx| {
-        (META[16].up)(tx)?;
-        tx.execute_batch(
+pub(crate) static WORK: &[Migration] = &[
+    Migration {
+        version: 1,
+        up: |tx| {
+            (META[16].up)(tx)?;
+            tx.execute_batch(
             "ALTER TABLE agent_work_runs ADD COLUMN result_profile TEXT
                  CHECK (result_profile IS NULL OR length(result_profile) = 26);
              CREATE TRIGGER agent_work_result_intent_immutable BEFORE UPDATE ON agent_work_runs
@@ -289,8 +290,17 @@ pub(crate) static WORK: &[Migration] = &[Migration {
              WHEN EXISTS(SELECT 1 FROM agent_work_profile_deletion WHERE profile_id = NEW.result_profile)
              BEGIN SELECT RAISE(ABORT, 'work result profile is retired'); END;",
         )
+        },
     },
-}];
+    Migration {
+        version: 2,
+        up: retain_clean_work_runs,
+    },
+    Migration {
+        version: 3,
+        up: record_media,
+    },
+];
 
 fn schema_manifest(conn: &Connection) -> rusqlite::Result<Vec<SchemaObject>> {
     let count = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
@@ -1775,7 +1785,84 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 25,
+        up: retain_clean_work_runs,
+    },
+    Migration {
+        version: 26,
+        up: record_media,
+    },
+    Migration {
+        version: 27,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profile_avatars (
+                     profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26),
+                     style TEXT NOT NULL CHECK (style IN ('initials', 'symbol', 'photo')),
+                     color INTEGER NOT NULL CHECK (color BETWEEN 0 AND 255),
+                     symbol INTEGER NOT NULL CHECK (symbol BETWEEN 0 AND 255),
+                     revision INTEGER NOT NULL CHECK (revision BETWEEN 1 AND 4294967295),
+                     photo BLOB CHECK (photo IS NULL OR length(photo) BETWEEN 1 AND 65536),
+                     CHECK ((style = 'photo') = (photo IS NOT NULL))
+                 ) STRICT;",
+            )
+        },
+    },
 ];
+
+fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE work_record_media (
+            profile_id TEXT NOT NULL CHECK (length(profile_id) = 26),
+            work_id TEXT NOT NULL CHECK (length(work_id) = 26),
+            execution_id TEXT NOT NULL CHECK (length(execution_id) = 26),
+            attempt_id TEXT NOT NULL CHECK (length(attempt_id) = 26),
+            step_id TEXT NOT NULL CHECK (length(step_id) = 26),
+            record_index INTEGER NOT NULL CHECK (record_index BETWEEN 0 AND 65535),
+            extraction_id BLOB NOT NULL REFERENCES agent_work_artifacts(artifact_id) ON DELETE CASCADE,
+            metadata BLOB NOT NULL CHECK (length(metadata) BETWEEN 1 AND 2048),
+            png BLOB NOT NULL CHECK (length(png) BETWEEN 1 AND 65536),
+            PRIMARY KEY (profile_id, attempt_id, step_id, record_index)
+         ) STRICT, WITHOUT ROWID;
+         CREATE INDEX work_record_media_work ON work_record_media(profile_id, work_id);
+         CREATE TRIGGER work_record_media_immutable BEFORE UPDATE ON work_record_media
+         BEGIN SELECT RAISE(ABORT, 'record media is immutable'); END;
+         CREATE TRIGGER work_record_media_capacity BEFORE INSERT ON work_record_media
+         WHEN (SELECT count(*) FROM work_record_media WHERE profile_id = NEW.profile_id
+                 AND attempt_id = NEW.attempt_id AND step_id = NEW.step_id) >= 12
+           OR (SELECT count(*) FROM work_record_media WHERE profile_id = NEW.profile_id) >= 256
+           OR (SELECT coalesce(sum(length(png)),0) FROM work_record_media) + length(NEW.png) > 67108864
+         BEGIN SELECT RAISE(ABORT, 'record media capacity exceeded'); END;",
+    )
+}
+
+/// Clean terminal runs become history the Store may prune; anything live or
+/// carrying debt stays recovery history that no statement can delete. Only
+/// live or debt-bearing runs count against admission. Runs settled before
+/// this migration keep a NULL order and are pruned first, by key.
+fn retain_clean_work_runs(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "DROP TRIGGER agent_work_capacity;
+         DROP TRIGGER agent_work_retained;
+         ALTER TABLE agent_work_runs ADD COLUMN settled INTEGER
+             CHECK (settled IS NULL OR (terminal = 1 AND settled >= 1));
+         CREATE UNIQUE INDEX agent_work_run_settlement
+             ON agent_work_runs(settled) WHERE settled IS NOT NULL;
+         CREATE TRIGGER agent_work_capacity BEFORE INSERT ON agent_work_runs
+         WHEN (SELECT count(*) FROM agent_work_runs
+               WHERE terminal = 0 OR substr(record, 3, 1) != X'00') >= 1024
+             OR (SELECT count(*) FROM agent_work_runs) >= 4096
+         BEGIN SELECT RAISE(ABORT, 'work capacity exceeded'); END;
+         CREATE TRIGGER agent_work_settlement BEFORE UPDATE ON agent_work_runs
+         WHEN OLD.terminal = 0 AND NEW.terminal = 1 AND NEW.settled IS NULL
+         BEGIN SELECT RAISE(ABORT, 'work settlement is ordered'); END;
+         CREATE TRIGGER agent_work_retained BEFORE DELETE ON agent_work_runs
+         WHEN OLD.terminal = 0 OR substr(OLD.record, 3, 1) != X'00'
+         BEGIN SELECT RAISE(ABORT, 'work recovery history is retained'); END;",
+    )
+}
 
 // These statements are the exact extension-branch PROFILE v14 artifact. The
 // schema manifest uses their stored CREATE text to recognize existing files.
@@ -2583,6 +2670,26 @@ pub static PROFILE: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 36,
+        up: |tx| {
+            // Assistant conversations. The body is opaque to the store; the count
+            // cap is held by the write. Bounds mirror zephium_core::ports::store.
+            tx.execute_batch(
+                "CREATE TABLE chats (
+                     id TEXT PRIMARY KEY NOT NULL CHECK (
+                         length(CAST(id AS BLOB)) BETWEEN 1 AND 40
+                         AND id NOT GLOB '*[^A-Za-z0-9-]*'
+                     ),
+                     space TEXT NOT NULL CHECK (length(CAST(space AS BLOB)) <= 128),
+                     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 200),
+                     updated_ms INTEGER NOT NULL,
+                     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) <= 524288)
+                 ) STRICT;
+                 CREATE INDEX idx_chats_updated ON chats(updated_ms DESC, id DESC);",
+            )
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -2635,6 +2742,9 @@ mod tests {
         (22, 0x6a156db401738842),
         (23, 0x6a156db401738842),
         (24, 0xb38257a2cbe5bad8),
+        (25, 0xdd0b59247509897e),
+        (26, 0x8cf0e4639f17eb73),
+        (27, 0x6c555aa33142ef81),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2672,6 +2782,7 @@ mod tests {
         (33, 0x101002bc7ceb482a),
         (34, 0x1a93a832df64a4a1),
         (35, 0x3c4c67becd54e02a),
+        (36, 0xa35d00504cb31a89),
     ];
 
     #[test]
@@ -2892,7 +3003,7 @@ mod tests {
             assert_eq!(validate_current(&conn, PROFILE).unwrap(), version as i64);
             apply(&mut conn, PROFILE).unwrap();
             apply(&mut conn, PROFILE).unwrap();
-            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 35);
+            assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
             assert_eq!(
                 conn.query_row("SELECT title FROM history", [], |r| r.get::<_, String>(0))
                     .unwrap(),
@@ -2955,6 +3066,72 @@ mod tests {
         assert!(conn
             .execute(
                 "INSERT INTO time_batch_receipts(batch_id,digest) VALUES(zeroblob(16),x'00')",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn profile_v36_adds_empty_bounded_chats_and_keeps_existing_data() {
+        use zephium_core::ports::store::{
+            MAX_CHAT_BODY_BYTES, MAX_CHAT_ID_BYTES, MAX_CHAT_SPACE_BYTES, MAX_CHAT_TITLE_BYTES,
+        };
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply(&mut conn, &PROFILE[..35]).unwrap();
+        conn.execute(
+            "INSERT INTO history(url,title,visited_at) VALUES('https://example.com/','Kept',1)",
+            [],
+        )
+        .unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        apply(&mut conn, PROFILE).unwrap();
+        assert_eq!(validate_current(&conn, PROFILE).unwrap(), 36);
+        assert_eq!(
+            conn.query_row("SELECT title FROM history", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "Kept"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM chats", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let insert = |id: &str, space: &str, title: &str, body: &str| {
+            conn.execute(
+                "INSERT INTO chats(id,space,title,updated_ms,body) VALUES(?1,?2,?3,1,?4)",
+                rusqlite::params![id, space, title, body],
+            )
+        };
+        let id = "a".repeat(MAX_CHAT_ID_BYTES);
+        let space = "s".repeat(MAX_CHAT_SPACE_BYTES);
+        let title = "t".repeat(MAX_CHAT_TITLE_BYTES);
+        let body = "b".repeat(MAX_CHAT_BODY_BYTES);
+        insert("Z-9", "", "", "").unwrap();
+        insert(&id, &space, &title, &body).unwrap();
+        for refused in [
+            insert("", "s", "t", "b"),
+            insert(&"a".repeat(MAX_CHAT_ID_BYTES + 1), "s", "t", "b"),
+            insert("has space", "s", "t", "b"),
+            insert("under_score", "s", "t", "b"),
+            insert("caf\u{e9}", "s", "t", "b"),
+            insert("Z-9", "s", "t", "b"),
+            insert("space", &"s".repeat(MAX_CHAT_SPACE_BYTES + 1), "t", "b"),
+            insert("title", "s", &"t".repeat(MAX_CHAT_TITLE_BYTES + 1), "b"),
+            insert("body", "s", "t", &"b".repeat(MAX_CHAT_BODY_BYTES + 1)),
+            insert(
+                "multibyte",
+                "s",
+                &"\u{e9}".repeat(MAX_CHAT_TITLE_BYTES / 2 + 1),
+                "b",
+            ),
+        ] {
+            assert!(refused.is_err());
+        }
+        assert!(conn
+            .execute(
+                "INSERT INTO chats(id,space,title,updated_ms,body) VALUES('blob','s','t',1,x'7b7d')",
                 []
             )
             .is_err());
@@ -3163,6 +3340,72 @@ mod tests {
             (0, 9),
             "later explicit opt-out survives reopening"
         );
+    }
+
+    #[test]
+    fn work_retention_upgrade_keeps_runs_and_only_lets_clean_history_go() {
+        fn run(key: u16, disposition: u8, debt: u8) -> ([u8; 32], [u8; 96]) {
+            let mut record = [0_u8; 96];
+            record[0] = 1;
+            record[1] = disposition;
+            record[2] = debt;
+            record[15] = 3;
+            record[16..32].fill(7);
+            record[46..48].copy_from_slice(&key.to_be_bytes());
+            record[62..64].copy_from_slice(&key.to_be_bytes());
+            (record[32..64].try_into().unwrap(), record)
+        }
+        fn insert(conn: &Connection, key: u16, disposition: u8, debt: u8) -> rusqlite::Result<()> {
+            let (run_key, record) = run(key, disposition, debt);
+            conn.execute(
+                "INSERT INTO agent_work_runs(run_key, record, terminal) VALUES (?1, ?2, ?3)",
+                rusqlite::params![run_key.as_slice(), record.as_slice(), disposition >= 6],
+            )
+            .map(|_| ())
+        }
+        let delete = |conn: &Connection, key: u16| {
+            conn.execute(
+                "DELETE FROM agent_work_runs WHERE run_key = ?1",
+                [run(key, 0, 0).0.as_slice()],
+            )
+        };
+        for (migrations, shipped) in [(META, 24), (WORK, 1)] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            apply(&mut conn, &migrations[..shipped]).unwrap();
+            insert(&conn, 1, 10, 0).unwrap();
+            insert(&conn, 2, 9, 63).unwrap();
+            insert(&conn, 3, 1, 63).unwrap();
+            assert!(delete(&conn, 1).is_err(), "shipped schema retains all");
+            apply(&mut conn, migrations).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                migrations.last().unwrap().version
+            );
+            for (key, disposition, debt) in [(1, 10, 0), (2, 9, 63), (3, 1, 63)] {
+                let (stored, settled): (Vec<u8>, Option<i64>) = conn
+                    .query_row(
+                        "SELECT record, settled FROM agent_work_runs WHERE run_key = ?1",
+                        [run(key, 0, 0).0.as_slice()],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(stored, run(key, disposition, debt).1);
+                assert_eq!(settled, None);
+            }
+            assert!(delete(&conn, 2).is_err(), "debt is recovery history");
+            assert!(delete(&conn, 3).is_err(), "live runs stay");
+            assert_eq!(delete(&conn, 1).unwrap(), 1);
+
+            // Clean history no longer counts against admission.
+            for key in 10..1500 {
+                insert(&conn, key, 6, 0).unwrap();
+            }
+            for key in 2000..2000 + 1022 {
+                insert(&conn, key, 1, 63).unwrap();
+            }
+            assert!(insert(&conn, 4000, 1, 63).is_err());
+        }
     }
 
     #[test]
@@ -4166,7 +4409,7 @@ mod tests {
                 .unwrap(),
             14
         );
-        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(35));
+        assert_eq!(PROFILE.last().map(|migration| migration.version), Some(36));
     }
 
     #[test]

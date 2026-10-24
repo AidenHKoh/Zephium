@@ -132,7 +132,7 @@ impl AgentModelAccountingMetrics {
             return Err(AgentMetricError::Invariant);
         }
         if attribution.is_some_and(|value| {
-            value.billing_class() != value.provider().billing_class()
+            value.billing_class().provider() != value.provider()
                 || value
                     .cached_input_tokens()
                     .checked_add(value.cache_write_input_tokens())
@@ -985,6 +985,7 @@ const fn billing_index(billing: AgentProviderBillingClass) -> u8 {
     match billing {
         AgentProviderBillingClass::OpenAiDefault => 0,
         AgentProviderBillingClass::AnthropicStandardGlobal => 1,
+        AgentProviderBillingClass::ModelReported => 2,
     }
 }
 

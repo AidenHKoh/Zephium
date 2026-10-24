@@ -28,6 +28,8 @@ enum AdmissionKind {
     HistoryBackGet,
 }
 struct State {
+    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+    form_audit: super::form_qualification::NavigationAudit,
     phase: Phase,
     bootstrap_available: bool,
     bootstrap_id: Option<wry::NavigationId>,
@@ -50,12 +52,31 @@ struct State {
     superseded: Option<wry::NavigationId>,
     /// The gate let an action's own load replace the ready document.
     handed_on: bool,
+    /// No action has run on the current document yet: a document the run
+    /// opened may still load itself again soon after it commits (a bot check
+    /// that clears itself), wherever it was opened from.
+    first_document: bool,
     /// That load still needs the page's semantic runtime prepared for it.
     hand_on_pending: bool,
+    /// Loads of the page's own the gate admitted that have not started yet.
+    page_loads_unstarted: u8,
     /// When the current load committed.
     committed_at: Option<Instant>,
+    /// The committed main document's address, before any route fragment.
+    document: Option<ContextNavigationTarget>,
+    /// A public first load's refused redirect, safe to admit as a new read.
+    redirect: Option<ContextNavigationTarget>,
+    /// The redirect's failure was already handed to the resource owner.
+    redirect_reported: bool,
     /// Open while an admitted action runs on a ready site-session page.
     follow: Option<Follow>,
+    /// Where a ready site-session page's own same-site loads are kept, with
+    /// no action of the model's in flight, for the controller to follow as
+    /// its own navigation; handed over with the run's first action.
+    page_loads: Option<zephium_agentic::SemanticActionFollow>,
+    /// A site-session page Back is loading exactly: once it is ready it is
+    /// a site-session page again, routes and actions' loads included.
+    back_policy: Option<zephium_agentic::WorkBrowserDocumentPolicy>,
     #[cfg(target_os = "windows")]
     write_dispatched: bool,
     #[cfg(target_os = "windows")]
@@ -148,7 +169,6 @@ pub(crate) struct WorkDocumentStamp {
 /// Visual projection of an admitted native document, including its loading
 /// paint. This stamp cannot authorize semantic observations or input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(any(test, target_os = "windows"))]
 pub(crate) struct WorkPreviewDocumentStamp {
     native_id: wry::NavigationId,
     epoch: u64,
@@ -182,6 +202,8 @@ impl WorkDocumentStamp {
 impl Default for WorkDocumentNavigation {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(State {
+            #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+            form_audit: super::form_qualification::NavigationAudit::default(),
             phase: Phase::Bootstrap,
             bootstrap_available: true,
             bootstrap_id: None,
@@ -201,9 +223,16 @@ impl Default for WorkDocumentNavigation {
             site_loads: 0,
             superseded: None,
             handed_on: false,
+            first_document: true,
             hand_on_pending: false,
+            page_loads_unstarted: 0,
             committed_at: None,
+            document: None,
+            redirect: None,
+            redirect_reported: false,
             follow: None,
+            page_loads: None,
+            back_policy: None,
             #[cfg(target_os = "windows")]
             write_dispatched: false,
             #[cfg(target_os = "windows")]
@@ -241,6 +270,32 @@ fn log_brand_move(requested: Option<&ContextNavigationTarget>, current: &str) {
     }
 }
 
+/// The same page again, its query aside: what a bot check reloads, or what
+/// a brand's page loads on its country domain (yelp.com to yelp.pl).
+fn reloads(effective: Option<&ContextNavigationTarget>, raw: &str) -> bool {
+    let Ok(target) = ContextNavigationTarget::parse(raw) else {
+        return false;
+    };
+    effective.is_some_and(|effective| {
+        let (a, b) = (effective.as_url(), target.as_url());
+        let same_host = a.host() == b.host()
+            || match (
+                zephium_agentic::registrable_site(effective),
+                zephium_agentic::registrable_site(&target),
+            ) {
+                (Some(from), Some(to)) => {
+                    zephium_agentic::brand_family(from.as_bytes(), to.as_bytes()).is_some()
+                }
+                _ => false,
+            };
+        a.scheme() == b.scheme() && same_host && a.path() == b.path()
+    })
+}
+
+/// How soon after its document committed a ready site-session page may load
+/// itself again and be followed.
+const SELF_LOAD_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Script redirects one site-session load may follow before it settles.
 const MAX_SITE_LOADS: u8 = 6;
 
@@ -264,16 +319,41 @@ impl State {
             self.write_navigation = None;
         }
     }
+    fn initial_public_reload(&self, raw: &str) -> bool {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        matches!(
+            self.policy,
+            P::PublicSameDocumentQuery | P::PublicResultsPage
+        ) && self.first_document
+            && self.follow.is_none()
+            && self.human.is_none()
+            && self.site_loads < MAX_SITE_LOADS
+            && self
+                .committed_at
+                .is_some_and(|at| at.elapsed() <= SELF_LOAD_WINDOW)
+            && self.target.as_ref().is_some_and(|target| {
+                self.effective
+                    .as_ref()
+                    .is_none_or(|effective| effective == target)
+                    && self.policy.admits_request(target)
+                    && ContextNavigationTarget::parse(raw).as_ref() == Ok(target)
+            })
+    }
+
     /// A site-session GET the gate follows: the tracked load's own server
-    /// redirect, or a script redirect before the document settles. After it
-    /// is ready, page-initiated loads are cancelled and the page stays.
+    /// redirect, a script redirect before the document settles, or a first
+    /// page that reloads itself moments after it settled (a bot check that
+    /// clears itself). Other page-initiated loads are cancelled and the page
+    /// stays.
     fn site_follows(&mut self, raw: &str) -> bool {
         let Some(requested) = self.target.as_ref() else {
             return false;
         };
-        if !ContextNavigationTarget::parse(raw)
-            .is_ok_and(|target| zephium_agentic::same_work_site(requested, &target))
-        {
+        let policy = self.policy;
+        if !ContextNavigationTarget::parse(raw).is_ok_and(|target| {
+            zephium_agentic::same_work_site(requested, &target)
+                && (!policy.is_public() || policy.admits_request(&target))
+        }) {
             return false;
         }
         match self.phase {
@@ -294,10 +374,157 @@ impl State {
                 self.location_revision = 0;
                 self.requested = true;
                 self.phase = Phase::Armed;
+                // The committed document's semantic runtime ends with it; the
+                // policy callback prepares the runtime for the new one.
+                self.hand_on_pending = true;
+                self.page_loads_unstarted = 1;
+                true
+            }
+            // The page asked for another load of its own before the one the
+            // gate followed started (a bot check that reloads its page more
+            // than once): WebKit drops the earlier request for the later one,
+            // so refusing the later one leaves the page loading nothing.
+            Phase::Armed
+                if self.page_loads_unstarted > 0
+                    && self.requested
+                    && self.operation.is_none()
+                    && self.follow.is_none()
+                    && self.human.is_none()
+                    && self.site_loads < MAX_SITE_LOADS =>
+            {
+                let (Some(loads), Some(unstarted)) = (
+                    self.site_loads.checked_add(1),
+                    self.page_loads_unstarted.checked_add(1),
+                ) else {
+                    return false;
+                };
+                self.site_loads = loads;
+                self.page_loads_unstarted = unstarted;
+                self.hand_on_pending = true;
+                true
+            }
+            Phase::Ready
+                if (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                    || self.initial_public_reload(raw))
+                    && self.site_loads < MAX_SITE_LOADS
+                    && self.first_document
+                    && reloads(self.effective.as_ref(), raw)
+                    && self.operation.is_none()
+                    && self.follow.is_none()
+                    && self.human.is_none()
+                    && self
+                        .committed_at
+                        .is_some_and(|at| at.elapsed() <= SELF_LOAD_WINDOW) =>
+            {
+                let (Some(generation), Some(loads)) = (
+                    self.finalization_generation.checked_add(1),
+                    self.site_loads.checked_add(1),
+                ) else {
+                    return false;
+                };
+                self.site_loads = loads;
+                self.superseded = self.native_id.take();
+                self.effective = None;
+                self.finalization_generation = generation;
+                self.clear_write_navigation();
+                self.location_revision = 0;
+                self.requested = true;
+                self.phase = Phase::Armed;
+                // Settled like an action's own load: reads wait for the new
+                // document, which the host finalizes as it does a hand-on.
+                self.handed_on = true;
+                self.hand_on_pending = true;
+                self.page_loads_unstarted = 1;
                 true
             }
             _ => false,
         }
+    }
+}
+
+impl State {
+    /// A move to a fragment of the committed document itself (a script's
+    /// `#inbox`, an app's hash route) loads nothing: it is admitted in place
+    /// and `location_changed` records the new address. The document an
+    /// armed load committed routes itself the same way before it settles.
+    fn route_move(&self, raw: &str) -> bool {
+        self.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && matches!(
+                self.phase,
+                Phase::Committed | Phase::Finalizing | Phase::Sampling | Phase::Ready
+            )
+            && self
+                .document
+                .as_ref()
+                .is_some_and(|document| human::same_document_move(document, raw))
+    }
+    /// A same-site GET a ready site-session page starts by itself (a bot
+    /// check that cleared, a timed refresh, a script redirect) while no
+    /// action of the model's runs: cancelled, and kept for the controller,
+    /// which loads it as its own navigation. Whether it was kept.
+    fn keep_page_load(&mut self, raw: &str) -> bool {
+        if self.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            || self.phase != Phase::Ready
+            || self.follow.is_some()
+            || self.operation.is_some()
+            || self.human.is_some()
+        {
+            return false;
+        }
+        let Some(slot) = self.page_loads.as_ref() else {
+            return false;
+        };
+        let Ok(target) = ContextNavigationTarget::parse(raw) else {
+            return false;
+        };
+        if !self
+            .target
+            .as_ref()
+            .is_some_and(|requested| zephium_agentic::same_work_site(requested, &target))
+            || !self.policy.admits_request(&target)
+        {
+            return false;
+        }
+        slot.record(target);
+        true
+    }
+
+    /// A public first load sent elsewhere before its document is ready: a
+    /// server redirect, or the page's own script replacing it. The load is
+    /// refused like any unsolicited one, and the document with it; the
+    /// destination is kept only when a new public read could be admitted
+    /// there. A refusal at any other time is not a redirect.
+    fn refuse_redirect(&mut self, raw: &str) -> bool {
+        let initial = self.policy.is_public()
+            && self.operation.is_none()
+            && self.human.is_none()
+            && self.admission_kind == Some(AdmissionKind::ProgrammaticGet)
+            && self.requested
+            && match self.phase {
+                Phase::Loading => self.native_id.is_some(),
+                Phase::Committed | Phase::Finalizing | Phase::Sampling => true,
+                _ => false,
+            };
+        if !initial {
+            return false;
+        }
+        let Some(destination) = ContextNavigationTarget::parse(raw)
+            .ok()
+            .filter(|destination| {
+                self.target.as_ref() != Some(destination)
+                    && self.policy.admits_request(destination)
+                    && zephium_agentic::AgentNavigationDiscovery::try_new_public_page(
+                        destination.clone(),
+                    )
+                    .is_ok()
+            })
+        else {
+            return false;
+        };
+        self.redirect = Some(destination);
+        self.clear_write_navigation();
+        self.phase = Phase::Refused;
+        true
     }
 }
 
@@ -394,10 +621,14 @@ impl WorkDocumentNavigation {
     ) {
         if let Ok(mut state) = self.0.lock() {
             state.handed_on = false;
+            state.first_document = false;
             state.clear_write_navigation();
             #[cfg(target_os = "windows")]
             {
                 state.write_dispatched = false;
+            }
+            if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
+                state.page_loads = Some(slot.clone());
             }
             state.follow = (state.policy
                 == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
@@ -424,13 +655,46 @@ impl WorkDocumentNavigation {
         }
         state.navigation_epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
         state.follow = None;
-        Ok(effective)
+        // The page the run resumes on is the document, not the route the app
+        // keeps in its fragment: the successor is admitted as a request.
+        ContextNavigationTarget::parse(human::without_any_fragment(&effective).as_str())
+            .map_err(|_| ())
     }
     /// The document is being replaced by a load the gate let an action's
     /// page start (a saved consent, a confirmed commit): reads and actions
     /// of the old document end without leaving the resource uncertain.
+    /// The settled document's own address, whatever is armed after it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn settled_target(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        state.effective.clone()
+    }
+    /// The settled site-session document a load would depart from, by its
+    /// address without the route an app keeps in its fragment.
+    pub(crate) fn departure(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        if state.phase != Phase::Ready
+            || state.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        {
+            return None;
+        }
+        ContextNavigationTarget::parse(
+            human::without_any_fragment(state.effective.as_ref()?).as_str(),
+        )
+        .ok()
+    }
     pub(crate) fn handed_on(&self) -> bool {
         self.0.lock().is_ok_and(|state| state.handed_on)
+    }
+    /// When a site-session document committed without reporting its load
+    /// finished: a page that keeps loading while it is already usable.
+    pub(crate) fn committed_unfinished_since(&self) -> Option<Instant> {
+        let state = self.0.lock().ok()?;
+        (state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && state.phase == Phase::Committed
+            && state.native_id.is_some())
+        .then_some(state.committed_at)
+        .flatten()
     }
     /// When the document an admitted hand-on load committed did so, while it
     /// has not reported its load finished.
@@ -486,7 +750,10 @@ impl WorkDocumentNavigation {
             })
     }
 
-    #[cfg(any(test, not(target_os = "windows")))]
+    #[cfg(any(
+        test,
+        all(target_os = "macos", feature = "native-agentic-semantic-probe")
+    ))]
     pub(crate) fn document_stamp(&self) -> Option<WorkDocumentStamp> {
         let state = self.0.lock().ok()?;
         if state.phase != Phase::Ready {
@@ -497,7 +764,6 @@ impl WorkDocumentNavigation {
             epoch: state.navigation_epoch,
         })
     }
-    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn preview_document_stamp(&self) -> Option<WorkPreviewDocumentStamp> {
         let state = self.0.lock().ok()?;
         if !matches!(
@@ -552,7 +818,10 @@ impl WorkDocumentNavigation {
             return Err(());
         }
         state.follow = None;
+        state.back_policy = None;
         state.operation = Some(request.operation());
+        state.first_document = true;
+        state.page_loads_unstarted = 0;
         state.target = Some(request.target().clone());
         state.effective = None;
         state.policy = request.document_policy();
@@ -570,11 +839,70 @@ impl WorkDocumentNavigation {
         Ok(())
     }
 
+    /// Arms a load of the document a failed site-session load departed
+    /// from, under that load's own operation, whatever phase the failure
+    /// left. The failed load's late events are its own, never this load's.
+    pub(crate) fn arm_departure(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        let mut state = self.0.lock().map_err(|_| ())?;
+        if matches!(
+            state.phase,
+            Phase::Bootstrap | Phase::Human | Phase::Retired | Phase::Ready
+        ) || state.operation.is_some_and(|armed| armed != operation)
+            || state.navigation_epoch != source.navigation_epoch().get()
+            || state.policy != zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            || !state.policy.admits_request(&target)
+        {
+            return Err(());
+        }
+        state.superseded = state.native_id.take();
+        state.follow = None;
+        state.back_policy = None;
+        state.operation = Some(operation);
+        state.first_document = true;
+        state.page_loads_unstarted = 0;
+        state.target = Some(target);
+        state.effective = None;
+        state.requested = false;
+        state.admission_kind = Some(AdmissionKind::ProgrammaticGet);
+        state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
+        state.clear_write_navigation();
+        state.location_revision = 0;
+        state.phase = Phase::Armed;
+        Ok(())
+    }
+
     pub(crate) fn arm_history_back(
         &self,
         source: ContextJoin,
         operation: ContextOperationJoin,
         target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        self.arm_back(source, operation, target, AdmissionKind::HistoryBackGet)
+    }
+
+    /// Back as a fresh load of the predecessor's address, for a page whose
+    /// own history no longer joins the run's ledger.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn arm_history_reload(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        self.arm_back(source, operation, target, AdmissionKind::ProgrammaticGet)
+    }
+
+    fn arm_back(
+        &self,
+        source: ContextJoin,
+        operation: ContextOperationJoin,
+        target: ContextNavigationTarget,
+        admission: AdmissionKind,
     ) -> Result<(), ()> {
         let mut state = self.0.lock().map_err(|_| ())?;
         let next = operation.context();
@@ -593,13 +921,18 @@ impl WorkDocumentNavigation {
             return Err(());
         }
         state.follow = None;
+        state.back_policy = (state.policy
+            == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession)
+            .then_some(state.policy);
         state.operation = Some(operation);
+        state.first_document = true;
+        state.page_loads_unstarted = 0;
         state.target = Some(target);
         state.effective = None;
         state.policy = zephium_agentic::WorkBrowserDocumentPolicy::Exact;
         state.native_id = None;
         state.requested = false;
-        state.admission_kind = Some(AdmissionKind::HistoryBackGet);
+        state.admission_kind = Some(admission);
         state.finalization_generation = state.finalization_generation.checked_add(1).ok_or(())?;
         state.clear_write_navigation();
         state.location_revision = 0;
@@ -704,18 +1037,30 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
-        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
-            #[cfg(target_os = "windows")]
-            if state.phase == Phase::Ready && state.follow.is_some() {
-                let confirmed = state
-                    .follow
-                    .as_ref()
-                    .is_some_and(|follow| follow.post || follow.consent);
-                return state.follow_from_action(target, !confirmed);
-            }
-            return state.site_follows(target);
+        if state.route_move(target) {
+            return true;
+        }
+        #[cfg(target_os = "windows")]
+        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+            && state.phase == Phase::Ready
+            && state.follow.is_some()
+        {
+            let confirmed = state
+                .follow
+                .as_ref()
+                .is_some_and(|follow| follow.post || follow.consent);
+            return state.follow_from_action(target, !confirmed);
+        }
+        if (state.policy.follows_site_loads() || state.initial_public_reload(target))
+            && state.site_follows(target)
+        {
+            return true;
         }
         // A refused unsolicited navigation grants no replacement document.
+        // WebView2 asks again for each server redirect of the main frame.
+        if !state.keep_page_load(target) {
+            state.refuse_redirect(target);
+        }
         false
     }
     #[cfg(target_os = "windows")]
@@ -826,6 +1171,9 @@ impl WorkDocumentNavigation {
         {
             return true;
         }
+        if action.target_is_main_frame == Some(true) && action.is_get && state.route_move(target) {
+            return true;
+        }
         if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             && state.phase == Phase::Ready
             && action.target_is_main_frame == Some(true)
@@ -833,7 +1181,15 @@ impl WorkDocumentNavigation {
         {
             return state.follow_from_action(target, action.is_get);
         }
-        if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        let site_load = state.policy.follows_site_loads()
+            && (state.phase != Phase::Ready
+                || state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        let public_reload = state.initial_public_reload(target)
+            && matches!(
+                action.navigation_type,
+                AppleNavigationType::Reload | AppleNavigationType::Other
+            );
+        if (site_load || public_reload)
             && action.target_is_main_frame == Some(true)
             && action.is_get
             && state.site_follows(target)
@@ -878,7 +1234,31 @@ impl WorkDocumentNavigation {
             state.requested = true;
             return true;
         }
+        if action.target_is_main_frame == Some(true)
+            && action.is_get
+            && !state.keep_page_load(target)
+        {
+            state.refuse_redirect(target);
+        }
         false
+    }
+    /// The refused redirect that failed this public document, if one did.
+    pub(crate) fn redirected(&self) -> Option<ContextNavigationTarget> {
+        let state = self.0.lock().ok()?;
+        (state.phase == Phase::Refused)
+            .then(|| state.redirect.clone())
+            .flatten()
+    }
+    /// The redirect failure, the first time it is asked for after the gate
+    /// refused the load; the policy callback reports it at once.
+    pub(crate) fn take_redirect_report(&self) -> Option<ContextNavigationTarget> {
+        let mut state = self.0.lock().ok()?;
+        if state.phase != Phase::Refused || state.redirect_reported {
+            return None;
+        }
+        let redirect = state.redirect.clone()?;
+        state.redirect_reported = true;
+        Some(redirect)
     }
     /// Returns (actual document committed, resource owner must reconcile).
     pub(crate) fn observe(&self, event: wry::NavigationEvent) -> Result<(bool, bool), ()> {
@@ -939,11 +1319,27 @@ impl WorkDocumentNavigation {
                 }
             };
         }
-        let site = state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession;
-        if site && state.superseded == Some(event.id) {
+        let site = state.policy.follows_site_loads();
+        let replaced = site
+            || (state.policy
+                == zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+                && state.site_loads > 0);
+        // Navigation IDs are WebKit object addresses, which a later load can
+        // reuse: a superseded load has already started, so a start while the
+        // gate waits for its armed load is that load, whatever its ID.
+        if replaced
+            && state.superseded == Some(event.id)
+            && state.phase == Phase::Armed
+            && state.requested
+            && state.native_id.is_none()
+            && event.phase == E::Started
+        {
+            state.superseded = None;
+        }
+        if replaced && state.superseded == Some(event.id) {
             return Ok((false, false));
         }
-        if site
+        if replaced
             && state.phase == Phase::Ready
             && state.native_id != Some(event.id)
             && matches!(event.phase, E::Failed | E::Cancelled)
@@ -965,6 +1361,7 @@ impl WorkDocumentNavigation {
             (Phase::Armed, E::Started) if exact && state.requested && state.native_id.is_none() => {
                 state.native_id = Some(event.id);
                 state.phase = Phase::Loading;
+                state.page_loads_unstarted = state.page_loads_unstarted.saturating_sub(1);
                 #[cfg(target_os = "windows")]
                 if state.handed_on
                     && state
@@ -979,8 +1376,20 @@ impl WorkDocumentNavigation {
                 }
                 Ok((false, false))
             }
+            // A later request of the page's own replaced the load the gate
+            // was following before it committed.
+            (Phase::Loading, E::Started)
+                if replaced
+                    && exact
+                    && state.page_loads_unstarted > 0
+                    && state.native_id.is_some_and(|id| id != event.id) =>
+            {
+                state.superseded = state.native_id.replace(event.id);
+                state.page_loads_unstarted = state.page_loads_unstarted.saturating_sub(1);
+                Ok((false, false))
+            }
             (Phase::Loading, E::Committed) if exact && state.native_id == Some(event.id) => {
-                if site {
+                if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession {
                     log_brand_move(state.target.as_ref(), &event.url);
                 }
                 #[cfg(feature = "native-agentic-work-resource-probe")]
@@ -989,15 +1398,27 @@ impl WorkDocumentNavigation {
                 }
                 state.phase = Phase::Committed;
                 state.committed_at = Some(Instant::now());
-                Ok((true, false))
+                state.document = ContextNavigationTarget::parse(&event.url).ok();
+                // The host schedules the wait for a load that never finishes.
+                Ok((
+                    true,
+                    state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession,
+                ))
             }
             (Phase::Committed, E::Finished) if exact && state.native_id == Some(event.id) => {
+                #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+                if super::form_qualification::selection().is_some() {
+                    state.form_audit.initial_finished = true;
+                }
                 #[cfg(feature = "native-agentic-work-resource-probe")]
                 {
                     state.evidence.finished = true;
                 }
                 state.phase = if state.policy == zephium_agentic::WorkBrowserDocumentPolicy::Exact {
                     state.effective = state.target.clone();
+                    if let Some(policy) = state.back_policy.take() {
+                        state.policy = policy;
+                    }
                     Phase::Ready
                 } else {
                     Phase::Finalizing
@@ -1048,9 +1469,13 @@ impl WorkDocumentNavigation {
             if matches!(
                 state.policy,
                 zephium_agentic::WorkBrowserDocumentPolicy::PublicSameDocumentQuery
+                    | zephium_agentic::WorkBrowserDocumentPolicy::PublicResultsPage
                     | zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
             ) && state.native_id.is_some()
-                && state.operation.is_none()
+                // A site page that arrived routes itself before the host has
+                // taken its arrival; the arrival is still that document.
+                && (state.operation.is_none()
+                    || state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession)
             {
                 let observed = current.and_then(|raw| {
                     ContextNavigationTarget::parse(raw)
@@ -1214,13 +1639,36 @@ impl WorkDocumentNavigation {
             state.phase = Phase::Refused;
         }
     }
+    /// The page is still on its document. An app may have moved to a
+    /// fragment of it (Gmail's `#inbox`); that loads nothing.
     pub(crate) fn ready(&self, current: Option<&str>) -> bool {
         self.0.lock().is_ok_and(|state| {
             state.phase == Phase::Ready
-                && state
-                    .effective
-                    .as_ref()
-                    .is_some_and(|target| Some(target.as_url().as_str()) == current)
+                && state.effective.as_ref().is_some_and(|target| {
+                    Some(target.as_url().as_str()) == current
+                        || current
+                            .and_then(|current| ContextNavigationTarget::parse(current).ok())
+                            .is_some_and(|current| {
+                                target.as_url().fragment().is_none()
+                                    && *target.as_url() == human::without_any_fragment(&current)
+                            })
+                })
+        })
+    }
+    /// A document load is under way or unsettled; the page is not ready to read.
+    pub(crate) fn loading(&self) -> bool {
+        self.0
+            .lock()
+            .map_or(true, |state| state.phase != Phase::Ready)
+    }
+    /// A refused load that an admitted site-session navigation still owns:
+    /// that navigation decides how the page goes on, not the event that
+    /// refused it.
+    pub(crate) fn owned_refusal(&self) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.phase == Phase::Refused
+                && state.operation.is_some()
+                && state.policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
         })
     }
     pub(crate) fn failed(&self) -> bool {
@@ -1315,6 +1763,16 @@ mod tests {
         }
         gate
     }
+    #[test]
+    fn hidden_approval_handback_keeps_native_document_but_changes_virtual_stamp() {
+        let gate = ready_gate();
+        let before = gate.document_stamp().unwrap();
+        assert_eq!(gate.hand_back(URL).unwrap().as_url().as_str(), URL);
+        let after = gate.document_stamp().unwrap();
+        assert_eq!(before.native_id, after.native_id);
+        assert_ne!(before.epoch, after.epoch);
+    }
+
     #[test]
     fn preview_stamp_requires_committed_identity_without_authorizing_semantics() {
         let gate = armed();
@@ -1418,6 +1876,97 @@ mod tests {
             assert!(!gate.allows_apple_action(target, apple_action(kind, is_get)));
         }
         assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
+
+        #[cfg(target_os = "macos")]
+        {
+            let gate = ready_gate();
+            gate.arm_history_reload(source, request.operation(), request.target().clone())
+                .unwrap();
+            assert!(!gate.allows_apple_action(target, apple_action(T::BackForward, true)));
+            assert!(gate.allows_apple_action(target, apple_action(T::Other, true)));
+            assert!(!gate.allows_apple_action(target, apple_action(T::Other, true)));
+        }
+    }
+    #[test]
+    fn a_site_page_back_reached_is_a_site_page_again_once_ready() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let (source, request) = next_request();
+        let back = request.target().as_url().as_str();
+        gate.arm_history_back(source, request.operation(), request.target().clone())
+            .unwrap();
+        assert!(gate.allows(back));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, back)).unwrap();
+        }
+        assert_eq!(
+            gate.location_changed(Some("https://example.test/next?sort=price")),
+            Ok(false)
+        );
+        assert!(gate.ready(Some("https://example.test/next?sort=price")));
+        assert!(!gate.failed());
+    }
+    #[test]
+    fn a_site_load_that_fails_goes_back_to_the_page_it_left() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let departure = gate.departure().unwrap();
+        assert_eq!(departure.as_url().as_str(), URL);
+        let (source, request) =
+            next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        gate.arm_successor(source, &request).unwrap();
+        assert!(gate.departure().is_none());
+        let next = request.target().as_url().as_str();
+        assert!(gate.allows(next));
+        gate.observe(event(2, E::Started, next)).unwrap();
+        // The site sends the address to another site, which the session refuses.
+        assert!(!gate.allows("https://accounts.other.test/login"));
+        gate.observe(event(2, E::Failed, next)).unwrap();
+        assert!(gate.failed());
+        gate.arm_departure(source, request.operation(), departure.clone())
+            .unwrap();
+        assert!(gate.allows(URL));
+        // The failed load's own late events are not the page going back.
+        gate.observe(event(2, E::Cancelled, next)).unwrap();
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(3, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        assert!(gate.ready(Some(URL)));
+        assert!(!gate.failed());
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome, Ok(departure));
+    }
+    #[test]
+    fn the_document_a_model_load_committed_may_route_itself_before_it_settles() {
+        let gate = armed_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, URL)).unwrap();
+        }
+        settle(&gate, URL);
+        let (source, request) =
+            next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::SiteSession);
+        gate.arm_successor(source, &request).unwrap();
+        let next = request.target().as_url().as_str();
+        let routed = "https://example.test/next#inbox";
+        assert!(gate.allows(next));
+        gate.observe(event(2, E::Started, next)).unwrap();
+        gate.observe(event(2, E::Committed, next)).unwrap();
+        assert!(gate.allows(routed));
+        assert_eq!(gate.location_changed(Some(routed)), Ok(false));
+        gate.observe(event(2, E::Finished, next)).unwrap();
+        settle(&gate, routed);
+        assert!(gate.ready(Some(routed)) && !gate.failed());
+        let (operation, outcome) = gate.take_successor_terminal().unwrap();
+        assert_eq!(operation, request.operation());
+        assert_eq!(outcome.unwrap().as_url().as_str(), routed);
     }
     fn site_gate(url: &str) -> WorkDocumentNavigation {
         let gate = WorkDocumentNavigation::default();
@@ -1462,6 +2011,376 @@ mod tests {
         settle(&gate, "https://app.slack.com/client/T1");
         assert!(gate.ready(Some("https://app.slack.com/client/T1")));
         assert!(!gate.failed());
+    }
+    #[test]
+    fn a_first_page_that_loads_itself_again_soon_after_it_settled_is_followed() {
+        let start = "https://www.example.com/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+        // A bot check that cleared itself reloads the page.
+        assert!(gate.allows("https://www.example.com/?checked=1"));
+        assert!(gate.handed_on());
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, "https://www.example.com/?checked=1"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.example.com/?checked=1");
+        assert!(gate.ready(Some("https://www.example.com/?checked=1")));
+        // Another site, or another page of it, is never followed.
+        assert!(!gate.allows("https://elsewhere.example.org/"));
+        assert!(!gate.allows("https://www.example.com/account"));
+    }
+
+    #[test]
+    fn a_page_the_run_opened_that_reloads_itself_behind_a_bot_check_is_followed() {
+        let start = "https://www.yelp.pl/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        // The run opened the search, which DataDome's device check covers
+        // and reloads once it passes.
+        let search = "https://www.yelp.pl/search?find_desc=pizza";
+        {
+            let mut state = gate.0.lock().unwrap();
+            state.first_document = true;
+            state.target = Some(ContextNavigationTarget::parse(search).unwrap());
+            state.effective = state.target.clone();
+            state.committed_at = Some(Instant::now());
+        }
+        assert!(gate.allows(search));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, search)).unwrap();
+        }
+        settle(&gate, search);
+        assert!(gate.ready(Some(search)));
+        // Once an action ran on the page, its own loads are the action's.
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
+        gate.close_follow();
+        assert!(!gate.allows(search));
+    }
+
+    #[test]
+    fn a_page_that_asks_for_its_load_again_before_it_starts_keeps_loading() {
+        let start = "https://allegro.pl/listing?string=gpu";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        // A bot check reloads its page three times in a row; WebKit starts
+        // only the last request.
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+
+        // When WebKit does start an earlier request, the later one replaces
+        // it before it commits.
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.allows(start));
+        assert!(gate.allows(start));
+        gate.observe(event(2, E::Started, start)).unwrap();
+        gate.observe(event(3, E::Started, start)).unwrap();
+        gate.observe(event(2, E::Cancelled, start)).unwrap();
+        for phase in [E::Committed, E::Finished] {
+            gate.observe(event(3, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.ready(Some(start)));
+        assert!(!gate.failed());
+        // Once the followed load started, the page's other loads are its own
+        // again: another page of the site is not followed.
+        assert!(!gate.allows("https://allegro.pl/konto"));
+    }
+
+    #[test]
+    fn a_first_page_its_script_moves_to_the_brand_s_country_domain_is_followed() {
+        let start = "https://www.yelp.com/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(gate.allows("https://www.yelp.pl/"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(2, phase, "https://www.yelp.pl/"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.yelp.pl/");
+        assert!(gate.ready(Some("https://www.yelp.pl/")));
+        assert!(!gate.allows("https://www.yelpish.pl/"));
+    }
+
+    #[test]
+    fn a_site_load_that_reuses_a_superseded_load_id_is_still_followed() {
+        let start = "https://www.example.com/";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.allows("https://www.example.com/?reloaded=1"));
+        // WebKit hands the next load the address the superseded one had.
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, "https://www.example.com/?reloaded=1"))
+                .unwrap();
+        }
+        settle(&gate, "https://www.example.com/?reloaded=1");
+        assert!(gate.ready(Some("https://www.example.com/?reloaded=1")));
+        assert!(!gate.failed());
+    }
+    fn public_gate(
+        url: &str,
+        policy: zephium_agentic::WorkBrowserDocumentPolicy,
+    ) -> WorkDocumentNavigation {
+        let gate = WorkDocumentNavigation::default();
+        assert!(gate.allows("about:blank"));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(9, phase, "about:blank")).unwrap();
+        }
+        gate.arm_with_policy(ContextNavigationTarget::parse(url).unwrap(), policy)
+            .unwrap();
+        assert!(gate.allows(url));
+        gate
+    }
+    #[test]
+    fn a_public_first_load_redirect_is_kept_and_refused_without_an_invariant() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://hetzner.com/cloud";
+        for (policy, to) in [
+            (P::PublicSameDocumentQuery, "https://www.hetzner.com/cloud"),
+            (P::PublicQueryFinalization, "https://www.hetzner.com/cloud"),
+            // A cross-site destination is kept too; its owner decides.
+            (
+                P::PublicSameDocumentQuery,
+                "https://www.other-site.com/cloud?x=1",
+            ),
+        ] {
+            let gate = public_gate(start, policy);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert_eq!(gate.redirected(), None);
+            // WebKit and WebView2 ask policy again for the server redirect.
+            assert!(!gate.allows(to));
+            assert!(gate.failed());
+            let to = ContextNavigationTarget::parse(to).unwrap();
+            assert_eq!(gate.take_redirect_report(), Some(to.clone()));
+            assert_eq!(gate.take_redirect_report(), None);
+            // The cancelled provisional load changes nothing after that.
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, false)));
+            assert_eq!(gate.redirected(), Some(to));
+            assert!(!gate.allows(start));
+        }
+    }
+    #[test]
+    fn a_public_first_document_can_finish_its_exact_address_self_reload() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        for ready in [false, true] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            if ready {
+                settle(&gate, start);
+            }
+            assert!(
+                gate.allows(start),
+                "a first-page verification reload must not strand readiness"
+            );
+            assert!(gate.take_hand_on());
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, false)));
+            assert!(!gate.failed());
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(2, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            assert!(gate.ready(Some(start)));
+        }
+    }
+
+    #[test]
+    fn public_self_reload_does_not_authorize_new_destinations_or_post_action_replays() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        let ready = || {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            gate
+        };
+        for target in [
+            "https://www.example.com/reference?changed=1",
+            "https://www.example.com/other",
+            "https://elsewhere.example/reference",
+            "https://www.example.com/reference#fragment",
+        ] {
+            let gate = ready();
+            assert!(!gate.allows(target));
+            assert!(gate.ready(Some(start)));
+        }
+        for limit in 0..3 {
+            let gate = ready();
+            {
+                let mut state = gate.0.lock().unwrap();
+                match limit {
+                    0 => state.first_document = false,
+                    1 => state.site_loads = MAX_SITE_LOADS,
+                    _ => {
+                        state.committed_at = Some(
+                            Instant::now() - SELF_LOAD_WINDOW - std::time::Duration::from_secs(1),
+                        )
+                    }
+                }
+            }
+            assert!(!gate.allows(start));
+            assert!(gate.ready(Some(start)));
+        }
+        let gate = ready();
+        gate.retire();
+        assert!(!gate.allows(start));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn apple_public_self_reload_requires_a_main_frame_get() {
+        use wry::AppleNavigationType as T;
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/reference";
+        for (kind, get, expected) in [
+            (T::Reload, true, true),
+            (T::Other, true, true),
+            (T::FormSubmitted, true, false),
+            (T::FormSubmitted, false, false),
+            (T::LinkActivated, true, false),
+            (T::BackForward, true, false),
+            (T::FormResubmitted, false, false),
+        ] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            for phase in [E::Started, E::Committed, E::Finished] {
+                gate.observe(event(1, phase, start)).unwrap();
+            }
+            settle(&gate, start);
+            assert_eq!(
+                gate.allows_apple_action(start, apple_action(kind, get)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_script_redirect_before_ready_is_kept_but_never_after() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/plans";
+        let to = "https://www.example.com/plans/";
+        let gate = public_gate(start, P::PublicSameDocumentQuery);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(!gate.allows(to));
+        assert_eq!(gate.redirected(), ContextNavigationTarget::parse(to).ok());
+        // Once ready, a page-initiated load is refused and the page stays.
+        let gate = public_gate(start, P::PublicSameDocumentQuery);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        assert!(!gate.allows(to));
+        assert!(!gate.failed() && gate.ready(Some(start)));
+        assert_eq!(gate.redirected(), None);
+        assert_eq!(gate.take_redirect_report(), None);
+    }
+    #[test]
+    fn an_unsafe_or_non_public_refusal_keeps_today_s_failure() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.example.com/plans";
+        for to in [
+            "http://www.example.com/plans",
+            "https://127.0.0.1/plans",
+            "https://intranet.local/plans",
+            "https://www.example.com/plans?access_token=private-value",
+            "https://www.example.com/plans#section",
+            start,
+        ] {
+            let gate = public_gate(start, P::PublicSameDocumentQuery);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert!(!gate.allows(to), "{to}");
+            assert!(!gate.failed(), "{to}");
+            assert_eq!(gate.observe(event(1, E::Failed, start)), Ok((false, true)));
+            assert!(gate.failed() && gate.redirected().is_none(), "{to}");
+        }
+        // Exact and site-session documents never keep a redirect.
+        for policy in [P::Exact, P::SiteSession] {
+            let gate = public_gate(start, policy);
+            gate.observe(event(1, E::Started, start)).unwrap();
+            assert!(!gate.allows("https://www.other-site.com/"));
+            assert_eq!(gate.redirected(), None);
+        }
+    }
+    #[test]
+    fn a_results_page_settles_on_same_site_redirects_up_to_its_bound() {
+        use zephium_agentic::WorkBrowserDocumentPolicy as P;
+        let start = "https://www.google.com/search?q=rust";
+        let gate = public_gate(start, P::PublicResultsPage);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(gate.allows("https://google.com/search?q=rust"));
+        gate.observe(event(1, E::Redirected, start)).unwrap();
+        gate.observe(event(1, E::Committed, "https://google.com/search?q=rust"))
+            .unwrap();
+        let mut id = 1;
+        for hop in 0..MAX_SITE_LOADS {
+            let next = format!("https://www.google.com/search?q=rust&sei={hop}");
+            assert!(gate.allows(&next), "{hop}");
+            id += 1;
+            gate.observe(event(id, E::Started, &next)).unwrap();
+            gate.observe(event(id, E::Committed, &next)).unwrap();
+        }
+        let last = format!(
+            "https://www.google.com/search?q=rust&sei={}",
+            MAX_SITE_LOADS - 1
+        );
+        // Past the bound, a load is a redirect the gate refuses and keeps.
+        assert!(!gate.allows("https://www.google.com/search?q=rust&sei=again"));
+        assert!(gate.failed());
+        assert!(gate.redirected().is_some());
+        let gate = public_gate(start, P::PublicResultsPage);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        for unsafe_load in [
+            "https://www.bing.com/search?q=rust",
+            "https://www.google.com/search?q=rust#x",
+            "http://www.google.com/search?q=rust",
+        ] {
+            assert!(!gate.allows(unsafe_load), "{unsafe_load}");
+        }
+        let gate = public_gate(start, P::PublicResultsPage);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.allows(&last));
+        gate.observe(event(1, E::Finished, start)).unwrap();
+        gate.observe(event(2, E::Started, &last)).unwrap();
+        gate.observe(event(2, E::Committed, &last)).unwrap();
+        gate.observe(event(2, E::Finished, &last)).unwrap();
+        settle(&gate, &last);
+        assert!(gate.ready(Some(&last)) && !gate.failed());
+        // A ready results page keeps its document.
+        assert!(!gate.allows(start));
+        assert!(gate.ready(Some(&last)));
     }
     #[test]
     fn site_session_routes_in_place_and_cancels_page_loads_without_losing_the_page() {
@@ -1536,7 +2455,15 @@ mod tests {
         );
         assert_eq!(slot.take(), None);
         gate.close_follow();
+        // With no action in flight, the page's own same-site load is still
+        // cancelled, and kept for the controller to follow; another site's
+        // is not.
         assert!(!gate.allows_apple_action(search, apple_action(T::Other, true)));
+        assert_eq!(
+            slot.take().map(|t| t.as_url().to_string()),
+            Some(search.to_owned())
+        );
+        assert!(!gate.allows_apple_action("https://evil.test/", apple_action(T::Other, true)));
         assert_eq!(slot.take(), None);
 
         let gate = ready();
@@ -1570,6 +2497,42 @@ mod tests {
         assert!(!gate.accept_committed_load());
         settle(&gate, start);
         assert!(gate.ready(Some(start)) && !gate.failed());
+    }
+    #[test]
+    fn a_route_of_the_committed_document_is_no_new_load_and_a_load_that_never_ends_still_settles() {
+        let start = "https://mail.example.test/mail/u/0/";
+        let routed = "https://mail.example.test/mail/u/0/#inbox";
+        let gate = site_gate(start);
+        gate.observe(event(1, E::Started, start)).unwrap();
+        assert!(gate.committed_unfinished_since().is_none());
+        gate.observe(event(1, E::Committed, start)).unwrap();
+        assert!(gate.committed_unfinished_since().is_some());
+        assert!(gate.allows(routed));
+        assert!(!gate.failed());
+        assert_eq!(gate.location_changed(Some(routed)), Ok(false));
+        assert!(gate.accept_committed_load());
+        settle(&gate, routed);
+        assert!(gate.ready(Some(routed)) && !gate.failed());
+        assert!(gate.allows("https://mail.example.test/mail/u/0/#sent"));
+        assert!(!gate.allows("https://mail.example.test/mail/u/1/"));
+    }
+    #[test]
+    fn a_route_that_holds_state_is_still_no_new_load() {
+        let start = "https://mail.example.test/mail/u/0/";
+        let gate = site_gate(start);
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(1, phase, start)).unwrap();
+        }
+        settle(&gate, start);
+        let compose = "https://mail.example.test/mail/u/0/#inbox?compose=new";
+        assert!(gate.allows(compose));
+        assert_eq!(gate.location_changed(Some(compose)), Ok(false));
+        assert!(gate.ready(Some(compose)) && !gate.failed());
+        assert!(gate.allows("https://mail.example.test/mail/u/0/#inbox"));
+        assert!(!gate.allows("https://mail.example.test/mail/u/1/#inbox?compose=new"));
+        // Handed back after a person's decision, the page resumes as a
+        // document: the app's state in the fragment is not a request.
+        assert_eq!(gate.hand_back(compose).unwrap().as_url().as_str(), start);
     }
     #[cfg(target_os = "windows")]
     #[test]
@@ -2283,6 +3246,11 @@ mod tests {
             gate
         }
         let gate = ready();
+        gate.open_follow(
+            false,
+            false,
+            zephium_agentic::SemanticActionFollow::default(),
+        );
         for current in [
             "https://example.test/frozen?entry=adult",
             "https://example.test/frozen?sort=price",
@@ -2603,5 +3571,25 @@ mod tests {
         assert!(gate.retire());
         assert!(!gate.allows(URL));
         assert!(gate.failed());
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+impl WorkDocumentNavigation {
+    pub(crate) fn record_form_probe_navigation(
+        &self,
+        action: wry::AppleNavigationAction,
+        allowed: bool,
+    ) {
+        if super::form_qualification::selection().is_none() {
+            return;
+        }
+        if let Ok(mut state) = self.0.lock() {
+            let consent = state.follow.as_ref().is_some_and(|follow| follow.consent);
+            state.form_audit.navigation(action, allowed, consent);
+        }
+    }
+    pub(crate) fn form_probe_evidence(&self) -> Option<super::form_qualification::NavigationAudit> {
+        Some(self.0.lock().ok()?.form_audit)
     }
 }

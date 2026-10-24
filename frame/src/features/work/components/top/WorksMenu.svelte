@@ -512,8 +512,10 @@
     box-shadow: 0 0 0 2px var(--color-ring);
   }
 
+  /* Its count ends where the rows' dates and the check do, not at the menu's edge. */
   .folder {
     margin-block-start: 4px;
+    padding-inline-end: 34px;
     color: var(--color-muted);
   }
 

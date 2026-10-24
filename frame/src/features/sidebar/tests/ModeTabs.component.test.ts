@@ -1,19 +1,28 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { surface } from "$domain/surface";
+import { preferences } from "$domain/preferences";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import ModeTabs from "../components/ModeTabs.svelte";
 
 const native = vi.hoisted(() => ({
   run: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  settings: {} as Record<string, string>,
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ runCommand: native.run });
+  return mockBindings({
+    runCommand: native.run,
+    settingGet: async (key: string) => native.settings[key] ?? null,
+  });
 });
 
-afterEach(() => surface.dispose());
+afterEach(() => {
+  surface.dispose();
+  preferences.dispose();
+  native.settings = {};
+});
 
 test("the lit half follows native confirmation rather than command admission", async () => {
   await surface.init();
@@ -58,4 +67,19 @@ test("the rail's switch marks where you are and goes to the other in one click",
   await expect.element(work).toHaveAttribute("aria-pressed", "false");
   emitNativeEvent("uiCommand", "browser.work");
   await expect.element(work).toHaveAttribute("aria-pressed", "true");
+});
+
+test("with Work off the column has no switch at either width, and it comes back on", async () => {
+  native.settings["work.enabled"] = "false";
+  await preferences.init();
+  await surface.init();
+  const wide = await render(ModeTabs);
+  const rail = await render(ModeTabs, { compact: true, standalone: true });
+  await expect.element(wide.getByRole("radio", { name: "Work" })).not.toBeInTheDocument();
+  await expect.element(rail.getByRole("button", { name: "Work" })).not.toBeInTheDocument();
+  expect(wide.container.textContent?.trim()).toBe("");
+
+  emitNativeEvent("uiCommand", "preference.work.enabled=true");
+  await expect.element(wide.getByRole("radio", { name: "Work", exact: true })).toBeVisible();
+  await expect.element(rail.getByRole("button", { name: "Work", exact: true })).toBeVisible();
 });

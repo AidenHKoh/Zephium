@@ -5,6 +5,60 @@ use super::*;
 /// A sign-in with a second factor takes minutes; the wait never spends the run.
 pub const MAX_WORK_HUMAN_WAIT_MILLIS: u64 = 540_000;
 
+/// Active-time deadline with one bounded human-wait allowance across every
+/// handoff of the original owner. Generic stalls never call `set_held`.
+#[derive(Clone, Debug)]
+pub struct WorkBrowserHumanTime {
+    original: std::time::Instant,
+    credited: std::time::Duration,
+    since: Option<std::time::Instant>,
+}
+impl WorkBrowserHumanTime {
+    /// Starts with the original admitted active deadline and no pause credit.
+    pub fn new(deadline: std::time::Instant) -> Self {
+        Self {
+            original: deadline,
+            credited: std::time::Duration::ZERO,
+            since: None,
+        }
+    }
+    fn limit() -> std::time::Duration {
+        std::time::Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS)
+    }
+    fn pending(&self, now: std::time::Instant) -> std::time::Duration {
+        self.since
+            .map_or(std::time::Duration::ZERO, |since| {
+                now.saturating_duration_since(since)
+            })
+            .min(Self::limit().saturating_sub(self.credited))
+    }
+    /// Current active deadline. Total extension cannot exceed the human cap.
+    pub fn deadline(&self, now: std::time::Instant) -> std::time::Instant {
+        self.original + self.credited + self.pending(now)
+    }
+    /// Enters/leaves a genuine human handoff. Expired active time cannot revive.
+    pub fn set_held(&mut self, held: bool, now: std::time::Instant) -> bool {
+        if held {
+            if self.since.is_some() {
+                return now < self.deadline(now) && now < self.handoff_deadline(now);
+            }
+            if now >= self.deadline(now) || self.credited >= Self::limit() {
+                return false;
+            }
+            self.since = Some(now);
+        } else if self.since.is_some() {
+            self.credited += self.pending(now);
+            self.since = None;
+        }
+        true
+    }
+    /// Absolute end of the remaining human allowance, never a fresh cap for a
+    /// later generation. Waiting without progress ends at this boundary.
+    pub fn handoff_deadline(&self, now: std::time::Instant) -> std::time::Instant {
+        self.since.unwrap_or(now) + Self::limit().saturating_sub(self.credited)
+    }
+}
+
 /// Human navigation stays on the original scheme, port and registrable site.
 /// Private suffixes keep unrelated hosted tenants separate; IPs stay exact.
 pub fn same_work_human_site(
@@ -53,11 +107,13 @@ fn shared_sign_in(host: &str, domain: &[u8]) -> bool {
 /// skyscanner.net and skyscanner.pl, amazon.com and amazon.de. A closed
 /// list, matched on the whole label before an ICANN suffix, never a
 /// substring.
-const BRAND_FAMILIES: [&str; 23] = [
+const BRAND_FAMILIES: [&str; 28] = [
     "airbnb",
+    "aliexpress",
     "amazon",
     "agoda",
     "booking",
+    "decathlon",
     "ebay",
     "expedia",
     "google",
@@ -65,6 +121,7 @@ const BRAND_FAMILIES: [&str; 23] = [
     "ikea",
     "kayak",
     "lego",
+    "mediamarkt",
     "momondo",
     "notion",
     "opodo",
@@ -76,7 +133,9 @@ const BRAND_FAMILIES: [&str; 23] = [
     "vrbo",
     "wizzair",
     "ryanair",
+    "yelp",
     "zalando",
+    "zara",
 ];
 
 /// The brand two registrable domains share when both are that brand's own
@@ -146,35 +205,199 @@ pub(super) struct HumanWindow {
 
 /// Content-free native document revision; observational, never execution authority.
 #[derive(Clone, Debug, Default)]
-pub struct WorkBrowserHumanProgress(
-    Arc<std::sync::atomic::AtomicU64>,
-    Arc<std::sync::atomic::AtomicBool>,
-    Arc<std::sync::atomic::AtomicBool>,
-);
+pub struct WorkBrowserHumanProgress(Arc<HumanProgress>);
+#[derive(Debug, Default)]
+struct HumanProgress {
+    revision: std::sync::atomic::AtomicU64,
+    ready: std::sync::atomic::AtomicBool,
+    wall_proof: std::sync::Mutex<Option<std::time::Instant>>,
+    probe_pending: std::sync::atomic::AtomicBool,
+    continuation_revision: std::sync::Mutex<Option<u64>>,
+    check: std::sync::Mutex<Option<WorkBrowserHumanCheck>>,
+    check_wake: std::sync::Mutex<Option<WallCheckWake>>,
+}
+#[derive(Clone)]
+struct WallCheckWake(Arc<dyn Fn() + Send + Sync>);
+impl std::fmt::Debug for WallCheckWake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WallCheckWake")
+    }
+}
+/// One coalesced request for a fresh native survey. It grants no continuation.
+#[derive(Clone, Debug)]
+pub struct WorkBrowserHumanCheck(Arc<HumanCheck>);
+#[derive(Debug)]
+struct HumanCheck {
+    requested: std::time::Instant,
+    revision: u64,
+    result: std::sync::Mutex<Option<Option<bool>>>,
+}
+/// The native answer to an explicit recheck, never a user attestation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkBrowserHumanCheckState {
+    /// Waiting for a survey started after the request.
+    Pending,
+    /// A fresh native sample still sees the wall.
+    Waiting,
+    /// The existing stamped native proof verifies clearance.
+    Clear,
+    /// The page changed, disappeared, or did not answer within the bound.
+    Unavailable,
+}
+impl WorkBrowserHumanCheck {
+    /// Current bounded result, joined to the still-current document revision.
+    pub fn state(&self, revision: u64) -> WorkBrowserHumanCheckState {
+        if revision != self.0.revision
+            || self.0.requested.elapsed() >= std::time::Duration::from_secs(2)
+        {
+            return WorkBrowserHumanCheckState::Unavailable;
+        }
+        match self.0.result.lock().ok().and_then(|result| *result) {
+            Some(Some(true)) => WorkBrowserHumanCheckState::Clear,
+            Some(Some(false)) => WorkBrowserHumanCheckState::Waiting,
+            Some(None) => WorkBrowserHumanCheckState::Unavailable,
+            None if self.0.requested.elapsed() < std::time::Duration::from_secs(2) => {
+                WorkBrowserHumanCheckState::Pending
+            }
+            None => WorkBrowserHumanCheckState::Unavailable,
+        }
+    }
+    /// Native callback settles once; no result can revive an expired request.
+    pub fn finish(&self, result: Option<bool>) {
+        if let Ok(mut value) = self.0.result.lock() {
+            if value.is_none() {
+                *value = Some(
+                    if self.0.requested.elapsed() < std::time::Duration::from_secs(2) {
+                        result
+                    } else {
+                        None
+                    },
+                );
+            }
+        }
+    }
+}
 impl WorkBrowserHumanProgress {
+    /// Coalesce pending clicks and bound new surveys to at most two per second.
+    pub fn request_wall_check(&self) -> Option<WorkBrowserHumanCheck> {
+        let mut slot = self.0.check.lock().ok()?;
+        if let Some(check) = slot.as_ref() {
+            if check.state(self.revision()) == WorkBrowserHumanCheckState::Pending {
+                return Some(check.clone());
+            }
+            if check.0.requested.elapsed() < std::time::Duration::from_millis(500) {
+                return None;
+            }
+        }
+        let check = WorkBrowserHumanCheck(Arc::new(HumanCheck {
+            requested: std::time::Instant::now(),
+            revision: self.revision(),
+            result: std::sync::Mutex::new(None),
+        }));
+        *slot = Some(check.clone());
+        drop(slot);
+        let wake = self.0.check_wake.lock().ok().and_then(|wake| wake.clone());
+        if let Some(wake) = wake {
+            (wake.0)();
+        }
+        Some(check)
+    }
+    /// Native host installs the same-page dispatch wake. One newly admitted
+    /// request schedules verification immediately; repeated clicks coalesce.
+    pub fn bind_wall_check_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.0.check_wake.lock() {
+            *slot = Some(WallCheckWake(wake));
+        }
+    }
+    /// Navigation or retirement invalidates even an already answered request.
+    /// Late callbacks cannot overwrite this refusal.
+    pub fn invalidate_wall_check(&self) {
+        if let Ok(slot) = self.0.check.lock() {
+            if let Some(check) = slot.as_ref() {
+                if let Ok(mut result) = check.0.result.lock() {
+                    *result = Some(None);
+                }
+            }
+        }
+    }
+    /// Captured only when a new native survey begins; an older in-flight
+    /// callback cannot answer a request made after that survey started.
+    pub fn pending_wall_check(&self) -> Option<WorkBrowserHumanCheck> {
+        self.0
+            .check
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|check| check.state(self.revision()) == WorkBrowserHumanCheckState::Pending)
+            .cloned()
+    }
+
     /// Native readiness is advisory; continuation rechecks the live document.
     pub fn ready(&self) -> bool {
-        self.1.load(std::sync::atomic::Ordering::Acquire)
+        self.0.ready.load(std::sync::atomic::Ordering::Acquire)
     }
     /// Native owner reports completion of the current main-document navigation.
     pub fn record_ready(&self, ready: bool) {
-        self.1.store(ready, std::sync::atomic::Ordering::Release);
+        self.0
+            .ready
+            .store(ready, std::sync::atomic::Ordering::Release);
     }
     /// Monotonic revision for frontend document-change events.
     pub fn revision(&self) -> u64 {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
+        self.0.revision.load(std::sync::atomic::Ordering::Acquire)
     }
-    /// The settled page is back on its own site and off any sign-in path.
-    pub fn clear_of_sign_in(&self) -> bool {
-        self.2.load(std::sync::atomic::Ordering::Acquire)
+    /// Fresh native document and DOM observations found the handed-over wall
+    /// absent. This is an observation, never a grant to perform an effect.
+    pub fn verified_wall_clear(&self) -> bool {
+        self.0
+            .wall_proof
+            .lock()
+            .is_ok_and(|at| at.is_some_and(|at| at.elapsed() <= std::time::Duration::from_secs(2)))
     }
-    /// Native owner reports where the person's navigation settled.
-    pub fn record_clear_of_sign_in(&self, clear: bool) {
-        self.2.store(clear, std::sync::atomic::Ordering::Release);
+    /// Only the native owner can join wall observations to its live document.
+    pub fn record_verified_wall_clear(&self, clear: bool) {
+        if let Ok(mut at) = self.0.wall_proof.lock() {
+            *at = clear.then(std::time::Instant::now);
+        }
+    }
+    /// Captures fresh wall evidence at the exact admitted human continuation.
+    /// Native handback must still check this revision against its live document.
+    pub fn capture_wall_continuation(&self) -> bool {
+        if !self.ready() || !self.verified_wall_clear() {
+            return false;
+        }
+        let Ok(mut captured) = self.0.continuation_revision.lock() else {
+            return false;
+        };
+        *captured = Some(self.revision());
+        true
+    }
+    /// Document revision captured by the owner of the human continuation.
+    pub fn wall_continuation_revision(&self) -> Option<u64> {
+        *self.0.continuation_revision.lock().ok()?
+    }
+    /// At most one bounded wall survey runs for this human presentation.
+    pub fn begin_wall_probe(&self) -> bool {
+        self.0
+            .probe_pending
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    /// Releases the one survey slot after its native callback settles.
+    pub fn finish_wall_probe(&self) {
+        self.0
+            .probe_pending
+            .store(false, std::sync::atomic::Ordering::Release);
     }
     /// Native owner publishes only increasing revisions of its retained page.
     pub fn record_revision(&self, revision: u64) {
         self.0
+            .revision
             .fetch_max(revision, std::sync::atomic::Ordering::Release);
     }
 }
@@ -270,6 +493,11 @@ impl WorkBrowserResources {
         {
             return Err(WorkBrowserResourceError::Phase);
         }
+        // Any human interaction can change account state, including a check
+        // or an approval. Original anonymous intent never revives on return.
+        if let Some(proof) = &row.anonymous_read_authority {
+            proof.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff);
+        }
         row.human = Some(Box::new(HumanWindow {
             progress: WorkBrowserHumanProgress::default(),
             region,
@@ -331,7 +559,8 @@ fn request(
     row.pending = Some(operation.clone());
     WorkBrowserResourceRequest {
         construction: None,
-        operation,
+        media: None,
+        operation: Box::new(operation),
         storage: row.storage,
         isolated_public: row.isolated_public,
         document: row.document.clone(),
@@ -400,6 +629,143 @@ pub(super) fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_wall_check_requires_a_fresh_native_answer_and_coalesces() {
+        use WorkBrowserHumanCheckState as Check;
+        let progress = WorkBrowserHumanProgress::default();
+        let wakes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let observed = wakes.clone();
+        progress.bind_wall_check_wake(Arc::new(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
+        assert!(
+            progress.pending_wall_check().is_none(),
+            "an earlier survey captures no later request"
+        );
+        let requested = progress.request_wall_check().unwrap();
+        let repeated = progress.request_wall_check().unwrap();
+        assert!(Arc::ptr_eq(&requested.0, &repeated.0));
+        assert_eq!(wakes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        progress.record_verified_wall_clear(true);
+        assert_eq!(
+            requested.state(0),
+            Check::Pending,
+            "cached automatic proof cannot answer the request"
+        );
+        progress.pending_wall_check().unwrap().finish(Some(false));
+        assert_eq!(requested.state(0), Check::Waiting);
+        assert!(
+            progress.request_wall_check().is_none(),
+            "completed requests are rate bounded, never cached as fresh"
+        );
+        assert_eq!(
+            requested.state(1),
+            Check::Unavailable,
+            "navigation invalidates a previously answered check"
+        );
+        progress.invalidate_wall_check();
+        requested.finish(Some(false));
+        assert_eq!(
+            requested.state(0),
+            Check::Unavailable,
+            "native navigation invalidates before a revision is published"
+        );
+    }
+
+    #[test]
+    fn explicit_wall_check_timeout_and_stale_callback_never_report_a_wall_result() {
+        use WorkBrowserHumanCheckState as Check;
+        let expired = WorkBrowserHumanCheck(Arc::new(HumanCheck {
+            requested: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            revision: 7,
+            result: std::sync::Mutex::new(None),
+        }));
+        expired.finish(Some(false));
+        assert_eq!(expired.state(7), Check::Unavailable);
+        let progress = WorkBrowserHumanProgress::default();
+        let requested = progress.request_wall_check().unwrap();
+        requested.finish(None);
+        requested.finish(Some(true));
+        assert_eq!(
+            requested.state(0),
+            Check::Unavailable,
+            "native refusal settles once"
+        );
+    }
+
+    #[test]
+    fn human_time_restores_active_budget_once_and_caps_all_handoffs() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let original = start + Duration::from_secs(30);
+        let mut time = WorkBrowserHumanTime::new(original);
+        assert!(time.set_held(true, start + Duration::from_secs(5)));
+        let returned = start + Duration::from_secs(90);
+        assert_eq!(
+            time.deadline(returned),
+            returned + Duration::from_secs(25),
+            "a real human wait can exceed the original active deadline"
+        );
+        assert!(time.set_held(false, returned));
+        assert_eq!(
+            time.deadline(start + Duration::from_secs(100)),
+            returned + Duration::from_secs(25)
+        );
+        assert!(time.set_held(true, start + Duration::from_secs(100)));
+        assert_eq!(
+            time.handoff_deadline(start + Duration::from_secs(110)),
+            start + Duration::from_secs(555),
+            "later generations share the remaining allowance"
+        );
+        let exhausted = start + Duration::from_secs(1000);
+        assert_eq!(
+            time.deadline(exhausted),
+            original + Duration::from_millis(MAX_WORK_HUMAN_WAIT_MILLIS)
+        );
+        assert!(!time.set_held(true, exhausted));
+        time.set_held(false, exhausted);
+        assert!(!time.set_held(true, exhausted));
+        let mut stalled = WorkBrowserHumanTime::new(original);
+        assert_eq!(
+            stalled.deadline(returned),
+            original,
+            "generic no-progress waits earn nothing"
+        );
+        assert!(
+            !stalled.set_held(true, returned),
+            "expired active work cannot be revived as a new human wait"
+        );
+    }
+
+    #[test]
+    fn verified_wall_proof_expires_but_admitted_continuation_keeps_its_revision() {
+        let progress = WorkBrowserHumanProgress::default();
+        progress.record_ready(true);
+        progress.record_revision(7);
+        assert!(!progress.capture_wall_continuation());
+        progress.record_verified_wall_clear(true);
+        assert!(progress.capture_wall_continuation());
+        *progress.0.wall_proof.lock().unwrap() =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(3));
+        assert!(!progress.verified_wall_clear());
+        assert!(
+            !progress.capture_wall_continuation(),
+            "timer passage cannot replace fresh native DOM evidence"
+        );
+        assert_eq!(
+            progress.wall_continuation_revision(),
+            Some(7),
+            "native handback uses the exact admitted revision"
+        );
+        progress.record_verified_wall_clear(false);
+        assert!(!progress.verified_wall_clear());
+        assert!(progress.begin_wall_probe());
+        assert!(!progress.begin_wall_probe(), "one native survey at a time");
+        progress.finish_wall_probe();
+        assert!(progress.begin_wall_probe());
+    }
+
     #[test]
     fn human_site_uses_private_suffixes_and_never_changes_scheme_port_or_ip() {
         for (source, target, allowed) in [
@@ -503,6 +869,85 @@ mod tests {
         time: u64,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         rows.acquire(resource, ContextRunId::generate(), now(time), now(1000))
+    }
+
+    #[test]
+    fn hidden_approval_handoff_preserves_resource_but_changes_execution_join() {
+        let (mut rows, resource) = fixture();
+        let request = acquire(&mut rows, &resource, 2).unwrap();
+        let original = request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                now(3),
+            )
+            .unwrap();
+        let before = rows
+            .read_binding(&original, now(4))
+            .unwrap()
+            .frame()
+            .clone();
+        let revoke = rows.revoke(&original).unwrap();
+        let _ = rows
+            .settle_at(
+                revoke.complete(WorkBrowserResourceNativeOutcome::Revoked {
+                    debt: WorkBrowserLeaseNativeDebt::default(),
+                    resource_retained: true,
+                }),
+                now(5),
+            )
+            .unwrap();
+        let handoff = rows
+            .hand_over_unpresented(&resource, now(6), now(900))
+            .unwrap();
+        assert!(handoff.human_region().is_none());
+        let _ = rows
+            .settle_at(
+                handoff.complete(WorkBrowserResourceNativeOutcome::HumanPresented),
+                now(7),
+            )
+            .unwrap();
+        let resume = rows.continue_after_human(&resource, now(8)).unwrap();
+        let document = resume.document().unwrap().clone();
+        let _ = rows
+            .settle_at(resume.complete_human_document(document), now(9))
+            .unwrap();
+        let request = acquire(&mut rows, &resource, 10).unwrap();
+        let successor = request.lease().unwrap().clone();
+        let _ = rows
+            .settle_at(
+                request.complete(WorkBrowserResourceNativeOutcome::Acquired),
+                now(11),
+            )
+            .unwrap();
+        let after = rows
+            .read_binding(&successor, now(12))
+            .unwrap()
+            .frame()
+            .clone();
+        assert_eq!(original.resource(), successor.resource());
+        assert_eq!(
+            before.context().identity().id(),
+            after.context().identity().id()
+        );
+        assert_eq!(
+            before.context().identity().profile(),
+            after.context().identity().profile()
+        );
+        assert_eq!(before.origin(), after.origin());
+        assert_ne!(
+            before.context().identity().owner(),
+            after.context().identity().owner()
+        );
+        assert_ne!(
+            before.context().context_generation(),
+            after.context().context_generation()
+        );
+        assert_ne!(
+            before.context().navigation_epoch(),
+            after.context().navigation_epoch()
+        );
+        assert_ne!(before.frame_generation(), after.frame_generation());
     }
 
     #[test]

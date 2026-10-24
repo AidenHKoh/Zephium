@@ -22,7 +22,7 @@ use crate::{
     Command, ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
     SharedStore, ShellTerminalFailureCallback, ShutdownOutcome,
 };
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId};
 use zephium_ipc::BlockerStatusView;
 
 const FAILED_SPAWN_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -702,6 +702,19 @@ impl Handle {
         self.submit_work_document(intent.into_request()?, None)
     }
 
+    /// Privileged chrome may read only this exact profile-bound immutable image.
+    /// The reference grants no fetch, execution, or additional profile access.
+    pub fn read_work_record_media(
+        &self,
+        media: zephium_core::work::media::WorkRecordMediaRefV1,
+    ) -> Result<crate::WorkDocumentRequest, zephium_core::work::WorkError> {
+        let profile = media.profile;
+        media.validate()?;
+        self.submit_work_document(
+            zephium_core::work::port::WorkRequest::ReadRecordMedia { media },
+            Some(profile),
+        )
+    }
     pub(crate) fn submit_work_document(
         &self,
         request: zephium_core::work::port::WorkRequest,
@@ -861,6 +874,36 @@ impl Handle {
     /// This is intentionally an in-process API. The desktop does not expose
     /// it to raw page content, and callers must use the request's bounded
     /// receive method instead of blocking a native UI thread indefinitely.
+    /// The persistent profiles and the one the window shows.
+    pub fn profiles(&self) -> Receiver<Option<zephium_ipc::ProfilesView>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self.queue.try_push(Command::Profiles { reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
+    /// A profile's stored photo, for serving to chrome under its revision.
+    pub fn profile_avatar_photo(&self, profile: ProfileId) -> Receiver<Option<Vec<u8>>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::ProfileAvatarPhoto { profile, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
+
     pub fn content_policy_status(&self, profile: ProfileId) -> ContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::ContentPolicyStatus { profile, reply };
@@ -991,6 +1034,43 @@ impl Handle {
             finish_unprocessed_command(command, ShutdownOutcome::Unclean);
         }
         receiver
+    }
+
+    /// Opens `url` in a new tab of `profile`'s `space` without focusing it:
+    /// right after `after` when that tab is in the space's Today, else at its
+    /// end. `None` when the profile is private or not the one in front, the
+    /// space is not the profile's, the address is not an ordinary web page,
+    /// or the tab limit refuses.
+    pub async fn open_background_tab(
+        &self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: String,
+    ) -> Option<ItemId> {
+        self.open_tab(profile, space, after, url, false).await
+    }
+
+    /// As [`Self::open_background_tab`], shown at once when `focus`.
+    pub async fn open_tab(
+        &self,
+        profile: ProfileId,
+        space: SpaceId,
+        after: Option<ItemId>,
+        url: String,
+        focus: bool,
+    ) -> Option<ItemId> {
+        let (replier, reply) = crate::reply::channel();
+        // A refused command drops its completion, which resolves the reply.
+        let _ = self.queue.try_push(Command::OpenBackgroundTab {
+            profile,
+            space,
+            after,
+            url,
+            focus,
+            done: crate::TabCompletion::new(move |tab| replier.send(tab)),
+        });
+        reply.await.flatten()
     }
 
     /// Admits desktop-read bytes as a Media resource of the focused profile.
@@ -1157,6 +1237,10 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
 }
 
 fn tracked_operation_command(command: &Command) -> bool {
+    #[cfg(feature = "work-planning")]
+    if matches!(command, Command::SetWorkScreenshots(_)) {
+        return true;
+    }
     matches!(
         command,
         Command::Open
@@ -1166,6 +1250,10 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::SetTabEssential { .. }
             | Command::KeepSite(_)
             | Command::RenameFocusedProfile(_)
+            | Command::CreateProfile { .. }
+            | Command::SwitchProfile(_)
+            | Command::RenameProfile { .. }
+            | Command::SetProfileAvatar { .. }
             | Command::Activate(_)
             | Command::Close(_)
             | Command::Navigate { .. }
@@ -1177,6 +1265,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::Unsplit
             | Command::LeaveSplit(_)
             | Command::TabAction { .. }
+            | Command::Space(_)
             | Command::DropTab { .. }
             | Command::DividerRelease { .. }
             | Command::Run(_)

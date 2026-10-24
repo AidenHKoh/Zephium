@@ -147,10 +147,10 @@
   .add input {
     flex: 1;
     min-width: 0;
-    height: 28px;
-    padding-inline: 10px;
+    height: var(--field-height);
+    padding-inline: var(--control-inset);
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-field);
     background: var(--color-page);
     font: inherit;
     font-size: var(--text-label);

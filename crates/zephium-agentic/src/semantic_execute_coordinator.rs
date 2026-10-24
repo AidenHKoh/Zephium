@@ -795,6 +795,7 @@ impl SemanticActionQualificationError {
                     "binding_task_effect_mismatch"
                 }
                 crate::SemanticActionBindingError::TargetIncomplete => "binding_target_incomplete",
+                crate::SemanticActionBindingError::ValueUnobserved => "binding_value_unobserved",
                 crate::SemanticActionBindingError::TextLimit => "binding_text_limit",
                 crate::SemanticActionBindingError::SettleLimit => "binding_settle_limit",
                 crate::SemanticActionBindingError::MixedEffectBoundary => {
@@ -809,6 +810,8 @@ impl SemanticActionQualificationError {
                 crate::SemanticActionBindingError::DispatchRejected => "binding_dispatch_rejected",
                 crate::SemanticActionBindingError::Unverified => "binding_unverified",
                 crate::SemanticActionBindingError::TargetCovered => "binding_target_covered",
+                crate::SemanticActionBindingError::OutcomeUnknown => "binding_outcome_unknown",
+                crate::SemanticActionBindingError::WrongRecipient => "binding_wrong_recipient",
             },
             Self::Checkpoint(error) => match error {
                 crate::SemanticActionPreparationError::IncompleteSnapshot => {

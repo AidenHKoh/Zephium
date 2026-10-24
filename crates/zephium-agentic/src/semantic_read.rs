@@ -24,9 +24,9 @@ mod retained;
 pub use retained::SemanticRetainedReadEvidence;
 
 /// Process-wide maximum readable fields retained in one result.
-pub const MAX_SEMANTIC_READ_ITEMS: u16 = 256;
+pub const MAX_SEMANTIC_READ_ITEMS: u16 = 768;
 /// Process-wide maximum page-derived UTF-8 bytes retained by one read result.
-pub const MAX_SEMANTIC_READ_BYTES: u32 = 64 * 1024;
+pub const MAX_SEMANTIC_READ_BYTES: u32 = 128 * 1024;
 
 /// Trusted selection of source roles, separate from sensitivity and scope.
 /// It only removes readable fields from an already-authorized observation.
@@ -148,6 +148,21 @@ impl SemanticReadBudget {
     pub const STANDARD: Self = Self {
         max_items: 128,
         max_bytes: 32 * 1024,
+    };
+
+    /// A terminal mapping read: a listing page's visible records with their
+    /// links and pictures, after control labels are shed.
+    pub const EXTRACTION: Self = Self {
+        max_items: 256,
+        max_bytes: 48 * 1024,
+    };
+
+    /// A terminal mapping read of a multi-record listing: one marketplace card
+    /// carries dozens of fragments (title, picture, link, rating, spec pairs,
+    /// price), so a page of offers needs several times a single record's room.
+    pub const LISTING: Self = Self {
+        max_items: MAX_SEMANTIC_READ_ITEMS,
+        max_bytes: MAX_SEMANTIC_READ_BYTES,
     };
 
     /// Validates nonzero ceilings under process-wide hard limits.
@@ -312,7 +327,14 @@ pub enum SemanticReadField {
     /// The read's own document address as the one-document gate admitted it,
     /// attributed to the main frame's document node; never text from the page.
     DocumentAddress,
+    /// The viewport screenshot the host attached to this mapping, attributed
+    /// to the main frame's document node. Only a text value may cite it, and
+    /// a value that does was read by the model from pixels, never from text.
+    ViewportImage,
 }
+
+/// What a viewport-image fragment says in place of page text.
+pub const SEMANTIC_VIEWPORT_IMAGE_TEXT: &str = "the viewport screenshot attached to this request; cite this ref for a value read only from its pixels";
 
 /// Non-actionable model-facing identity for one read fragment.
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -534,13 +556,24 @@ pub struct SemanticReadFragment<'a> {
     field: SemanticReadField,
     role: SemanticRole,
     content: SemanticReadContent<'a>,
+    states: crate::SemanticStates,
     provenance: SemanticReadProvenance<'a>,
+    /// Where on the page it sits, for shedding: 0 the main content, 1 beside
+    /// it, 2 the page's chrome (header, navigation, footer, search).
+    region: u8,
+    /// How useful it is within its region, for shedding: lower is kept.
+    rank: u8,
+    record_root: Option<crate::semantic::SemanticNodeKey>,
 }
 
 impl<'a> SemanticReadFragment<'a> {
     /// Non-actionable result-local provenance identity.
     pub const fn id(self) -> SemanticReadFragmentId {
         self.id
+    }
+
+    pub(crate) const fn record_root(self) -> Option<crate::semantic::SemanticNodeKey> {
+        self.record_root
     }
 
     /// Semantic field class.
@@ -551,6 +584,11 @@ impl<'a> SemanticReadFragment<'a> {
     /// Closed source-node role.
     pub const fn role(self) -> SemanticRole {
         self.role
+    }
+
+    /// Observed source-control states, never inferred from an option's label.
+    pub const fn states(self) -> crate::SemanticStates {
+        self.states
     }
 
     /// Borrowed safe primitive.
@@ -580,6 +618,12 @@ impl<'a> SemanticReadFragment<'a> {
     /// Exact source provenance.
     pub const fn provenance(self) -> SemanticReadProvenance<'a> {
         self.provenance
+    }
+
+    /// Where on the page it sits: 0 the main content, 1 beside it, 2 the
+    /// page's chrome (header, navigation, footer, search).
+    pub const fn region(self) -> u8 {
+        self.region
     }
 }
 
@@ -658,8 +702,31 @@ impl SemanticReadStats {
     }
 }
 
+#[derive(Clone)]
+struct ReadMediaAssociation {
+    invocation: SemanticInvocationId,
+    key: u64,
+    observation: SemanticObservationId,
+    generation: SemanticObservationGeneration,
+    frame: std::sync::Arc<SemanticFrameJoin>,
+    snapshot: SemanticSnapshotGeneration,
+    media: crate::SemanticMediaEvidence,
+    area: u64,
+}
+impl ReadMediaAssociation {
+    fn same_capture(&self, source: SemanticReadProvenance<'_>) -> bool {
+        self.observation == source.observation()
+            && self.generation == source.observation_generation()
+            && self.frame.as_ref() == source.frame()
+            && self.snapshot == source.snapshot()
+    }
+}
+
 /// Bounded borrowed readable projection of one exact semantic observation.
 pub struct SemanticReadResult<'a> {
+    observed_images: usize,
+    eligible_image_geometry: usize,
+    media: Vec<ReadMediaAssociation>,
     page_title: Option<String>,
     focused: bool,
     url_sources: u8,
@@ -669,10 +736,12 @@ pub struct SemanticReadResult<'a> {
     context: ContextJoin,
     observation_fingerprint: SemanticObservationFingerprint,
     subtree: Option<SemanticReadSubtreeProof>,
+    selected_target: Option<SemanticReferenceId>,
     captured_at: SemanticCaptureInstant,
     fragments: Vec<SemanticReadFragment<'a>>,
     omissions: SemanticReadOmissions,
     stats: SemanticReadStats,
+    budget: SemanticReadBudget,
     guard: [u8; 32],
     // Historical read-only sources, never observation/action acknowledgements
     // for the active document. Only the bounded evidence owner constructs this.
@@ -700,6 +769,216 @@ impl<'a> SemanticReadResult<'a> {
     }
     pub(crate) const fn includes_image_sources(&self) -> bool {
         self.url_sources & 2 != 0
+    }
+
+    pub(crate) fn media_diagnostics(&self) -> crate::SemanticRecordMediaDiagnostics {
+        crate::SemanticRecordMediaDiagnostics {
+            observed_images: self.observed_images,
+            eligible_image_geometry: self.eligible_image_geometry,
+            structural_candidates: self.media.len(),
+            saturated_candidates: self
+                .media
+                .iter()
+                .filter(|candidate| {
+                    candidate.media.related().len() == crate::MAX_SEMANTIC_MEDIA_RELATIONS
+                })
+                .count(),
+            ..Default::default()
+        }
+    }
+    #[cfg(feature = "probe-harness")]
+    pub(crate) fn media_probe_source(
+        &self,
+        record: u16,
+        id: SemanticReadFragmentId,
+    ) -> Option<crate::SemanticMediaNameProbe> {
+        let provenance = self.fragment(id)?.provenance();
+        if provenance.sensitivity() != SemanticSensitivity::Public {
+            return None;
+        }
+        Some(crate::SemanticMediaNameProbe {
+            record,
+            frame: provenance.frame().clone(),
+            invocation: provenance.invocation().get(),
+            snapshot: provenance.snapshot().get(),
+            node: provenance.node_key.get(),
+        })
+    }
+
+    pub(crate) fn record_identity_sources(
+        &self,
+        original: &[SemanticReadFragmentId],
+    ) -> Vec<SemanticReadFragmentId> {
+        let mut identities = original.to_vec();
+        for candidate in self.fragments() {
+            if candidate.role() == SemanticRole::Image
+                || !matches!(
+                    candidate.field(),
+                    SemanticReadField::AccessibleName
+                        | SemanticReadField::VisibleText
+                        | SemanticReadField::LinkDestination
+                )
+            {
+                continue;
+            }
+            let Some(root) = candidate.record_root() else {
+                continue;
+            };
+            let same_card = original
+                .iter()
+                .filter_map(|id| self.fragment(*id))
+                .any(|source| {
+                    source.record_root() == Some(root)
+                        && source.provenance().frame() == candidate.provenance().frame()
+                        && source.provenance().observation() == candidate.provenance().observation()
+                        && source.provenance().snapshot() == candidate.provenance().snapshot()
+                });
+            if same_card && !identities.contains(&candidate.id()) {
+                identities.push(candidate.id());
+            }
+        }
+        identities
+    }
+
+    pub(crate) fn count_media_relations(
+        &self,
+        identity: &[SemanticReadFragmentId],
+        counts: &mut crate::SemanticRecordMediaDiagnostics,
+    ) {
+        counts.records += 1;
+        counts.identity_sources += identity.len();
+        for source in identity.iter().filter_map(|id| self.fragment(*id)) {
+            counts.identity_roles[match source.role() {
+                SemanticRole::Heading => 0,
+                SemanticRole::Link => 1,
+                SemanticRole::Paragraph => 2,
+                SemanticRole::Document => 3,
+                SemanticRole::ListItem => 4,
+                SemanticRole::Image => 5,
+                _ => 6,
+            }] += 1;
+            counts.identity_fields[match source.field() {
+                SemanticReadField::AccessibleName => 0,
+                SemanticReadField::VisibleText => 1,
+                SemanticReadField::ImageSource => 2,
+                _ => 3,
+            }] += 1;
+        }
+        for association in &self.media {
+            for source in identity.iter().filter_map(|id| self.fragment(*id)) {
+                if association.same_capture(source.provenance()) {
+                    counts.same_capture_pairs += 1;
+                    counts.self_image_pairs += usize::from(
+                        source.role() == SemanticRole::Image
+                            && association.media.reference() == source.provenance().reference(),
+                    );
+                    if association
+                        .media
+                        .related()
+                        .contains(&source.provenance().reference())
+                    {
+                        counts.related_pairs += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn media_for_record(
+        &self,
+        record: u16,
+        identity: &[SemanticReadFragmentId],
+        guard: [u8; 32],
+    ) -> Option<crate::SemanticRecordMediaPlan> {
+        let (association, name) = self
+            .media
+            .iter()
+            .filter(|association| association.frame.frame() == crate::FrameId::MAIN)
+            .filter_map(|association| {
+                identity
+                    .iter()
+                    .filter_map(|id| self.fragment(*id))
+                    .find(|source| {
+                        association.same_capture(source.provenance())
+                            && association
+                                .media
+                                .related()
+                                .contains(&source.provenance().reference())
+                    })
+                    .map(|source| (association, source))
+            })
+            .max_by_key(|(association, _)| {
+                let priority =
+                    if association.media.kind() == crate::SemanticMediaKind::RecordContainer {
+                        1
+                    } else if association.media.loaded() {
+                        2
+                    } else {
+                        0
+                    };
+                (priority, association.area)
+            })?;
+        let mut hash = Sha256::new();
+        hash.update(b"zephium-record-media-v1");
+        hash.update(guard);
+        hash.update(record.to_be_bytes());
+        hash.update(association.invocation.get().to_be_bytes());
+        hash.update(association.snapshot.get().to_be_bytes());
+        hash.update(association.key.to_be_bytes());
+        hash.update(name.provenance().node_key.get().to_be_bytes());
+        Some(crate::SemanticRecordMediaPlan {
+            outcome: Default::default(),
+            fetch_stage: Default::default(),
+            crop: None,
+            record,
+            source: hash.finalize().into(),
+            frame: association.frame.as_ref().clone(),
+            invocation: association.invocation,
+            snapshot: association.snapshot,
+            key: association.key,
+            name_key: name.provenance().node_key.get(),
+        })
+    }
+
+    /// Native card ownership of pictures, joined by exact source coordinates.
+    /// Names, alt text, and model-proposed URLs never establish this relation.
+    pub(crate) fn images_for_record(
+        &self,
+        identity: &[SemanticReadFragmentId],
+    ) -> Vec<SemanticReadFragment<'a>> {
+        let mut candidates: Vec<_> = self
+            .media
+            .iter()
+            .filter(|association| {
+                association.media.loaded()
+                    && identity
+                        .iter()
+                        .filter_map(|id| self.fragment(*id))
+                        .any(|source| {
+                            association.same_capture(source.provenance())
+                                && association
+                                    .media
+                                    .related()
+                                    .contains(&source.provenance().reference())
+                        })
+            })
+            .collect();
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.area));
+        candidates
+            .into_iter()
+            .flat_map(|association| {
+                self.fragments.iter().copied().filter(move |fragment| {
+                    fragment.field() == SemanticReadField::ImageSource
+                        && association.same_capture(fragment.provenance())
+                        && fragment.provenance().reference() == association.media.reference()
+                })
+            })
+            .collect()
+    }
+
+    /// The ceilings this read was projected under.
+    pub const fn budget(&self) -> SemanticReadBudget {
+        self.budget
     }
 
     /// Immutable trusted role selection for this read.
@@ -778,6 +1057,10 @@ impl<'a> SemanticReadResult<'a> {
 
     pub(crate) fn has_retained_evidence(&self) -> bool {
         !self.historical.is_empty()
+    }
+
+    pub(crate) fn selected_target(&self) -> Option<SemanticReferenceId> {
+        self.selected_target
     }
 
     pub(crate) fn matches_subtree(
@@ -863,7 +1146,62 @@ pub fn read_selected_semantic_observation<'a>(
         0,
         None,
         None,
+        false,
     )
+}
+
+/// Reads one already-observed element and its same-frame descendants, including
+/// captured link/image attributes. No DOM capture, model call or new authority
+/// is performed; the target and selected result are bound into the read receipt.
+pub fn read_semantic_target<'a>(
+    observation: &'a SemanticObservation,
+    acknowledgement: &SemanticObservationAcknowledgement,
+    target: SemanticReferenceId,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    let (snapshot, root) = observation
+        .frames()
+        .iter()
+        .find_map(|frame| {
+            frame
+                .nodes()
+                .iter()
+                .position(|node| node.reference() == target)
+                .map(|root| (frame, root))
+        })
+        .ok_or(SemanticReadError::AuthorityMismatch)?;
+    let mut indices = std::collections::BTreeSet::from([root]);
+    let mut references = std::collections::BTreeSet::from([target]);
+    for (index, node) in snapshot.nodes().iter().enumerate().skip(root + 1) {
+        if node
+            .parent()
+            .is_some_and(|parent| indices.contains(&usize::from(parent)))
+        {
+            indices.insert(index);
+            references.insert(node.reference());
+        }
+    }
+    let mut read = read_projection(
+        observation,
+        SemanticReadAuthority::Acknowledged(acknowledgement),
+        captured_at,
+        sensitivity,
+        budget,
+        SemanticReadRoleSelection::ALL,
+        3,
+        Some(&references),
+        None,
+        false,
+    )?;
+    read.selected_target = Some(target);
+    let mut guard = Sha256::new();
+    guard.update(b"ZEPHIUM-SEMANTIC-TARGET-READ-1\0");
+    guard.update(read.guard);
+    guard.update(target.get().to_be_bytes());
+    read.guard = guard.finalize().into();
+    Ok(read)
 }
 
 /// Uses the trusted schema to include URL evidence only when needed.
@@ -885,6 +1223,7 @@ pub fn read_semantic_observation_for_schema<'a>(
         schema.url_sources(),
         None,
         None,
+        schema.is_whole_page_findings(),
     )
 }
 
@@ -923,11 +1262,12 @@ pub(crate) fn read_located_semantic_observation_at<'a>(
         SemanticReadAuthority::Acknowledged(acknowledgement),
         captured_at,
         SemanticReadSensitivityLimit::PublicOnly,
-        SemanticReadBudget::STANDARD,
+        schema.extraction_read_budget(),
         schema.source_roles(),
         schema.url_sources(),
         Some(references),
         document,
+        schema.is_whole_page_findings(),
     )
 }
 
@@ -942,10 +1282,41 @@ fn read_projection<'a>(
     url_sources: u8,
     references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
     document: Option<&'a crate::ContextNavigationTarget>,
+    facts_priority: bool,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection_with(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        roles,
+        url_sources,
+        references,
+        document,
+        facts_priority,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_projection_with<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    roles: SemanticReadRoleSelection,
+    url_sources: u8,
+    references: Option<&std::collections::BTreeSet<SemanticReferenceId>>,
+    document: Option<&'a crate::ContextNavigationTarget>,
+    facts_priority: bool,
+    viewport_image: bool,
 ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
     let subtree = validate_authority(observation, authority)?;
     let mut builder = SemanticReadBuilder::new(observation, captured_at, budget, roles);
     builder.url_sources = url_sources;
+    builder.facts_priority = facts_priority;
     for snapshot in observation.frames() {
         let omitted_child = observation.frame_boundaries().iter().any(|boundary| {
             boundary.parent_frame() == snapshot.frame().frame()
@@ -972,10 +1343,72 @@ fn read_projection<'a>(
     if let Some(document) = document {
         builder.admit_document_address(document);
     }
+    if viewport_image {
+        builder.admit_viewport_image();
+    }
     let mut read = builder.finish(subtree);
     read.focused |= references.is_some();
     Ok(read)
 }
+
+/// A read of the newest observation that also carries one viewport-image
+/// fragment, for a mapping the host attaches the viewport screenshot to. The
+/// fragment requires a look without known sensitive or secret nodes. That
+/// negative check does not establish public pixels: provider policy must still
+/// admit the screenshot as sensitive input under the original run scope.
+pub fn read_semantic_observation_for_schema_with_viewport_image<'a>(
+    observation: &'a SemanticObservation,
+    authority: SemanticReadAuthority<'_>,
+    captured_at: SemanticCaptureInstant,
+    sensitivity: SemanticReadSensitivityLimit,
+    budget: SemanticReadBudget,
+    schema: &crate::SemanticExtractionSchema,
+) -> Result<SemanticReadResult<'a>, SemanticReadError> {
+    read_projection_with(
+        observation,
+        authority,
+        captured_at,
+        sensitivity,
+        budget,
+        schema.source_roles(),
+        schema.url_sources(),
+        None,
+        None,
+        schema.is_whole_page_findings(),
+        true,
+    )
+}
+
+/// The look shows too little text to read its records from: an app drawn on
+/// a canvas, a gallery of pictures, prices rendered as images. Only such a
+/// page is worth a viewport image for its mapping.
+pub fn semantic_observation_reads_sparse(observation: &SemanticObservation) -> bool {
+    let (mut text, mut images) = (0_usize, 0_usize);
+    for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+        if node.role() == SemanticRole::Image {
+            images += 1;
+        }
+        text += node.text().map_or(0, |text| text.as_str().len());
+    }
+    text < SPARSE_TEXT_BYTES || (images >= SPARSE_IMAGES && text / images < SPARSE_TEXT_PER_IMAGE)
+}
+
+/// Short text alone does not justify pixels. Automatic visual fallback also
+/// needs observed visual content; an explicit screenshot request stays separate.
+pub fn semantic_observation_needs_visual_mapping(observation: &SemanticObservation) -> bool {
+    semantic_observation_reads_sparse(observation)
+        && observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| node.role() == SemanticRole::Image)
+}
+
+/// Below this much visible text a look reads as sparse.
+const SPARSE_TEXT_BYTES: usize = 1_200;
+/// A gallery: this many pictures, each with this little text beside it.
+const SPARSE_IMAGES: usize = 6;
+const SPARSE_TEXT_PER_IMAGE: usize = 80;
 
 fn validate_authority(
     observation: &SemanticObservation,
@@ -1060,6 +1493,8 @@ fn validate_authority(
 }
 
 struct SemanticReadBuilder<'a> {
+    record_roots: std::collections::BTreeMap<(u64, u64), crate::semantic::SemanticNodeKey>,
+    facts_priority: bool,
     url_sources: u8,
     roles: SemanticReadRoleSelection,
     observation: &'a SemanticObservation,
@@ -1077,7 +1512,21 @@ impl<'a> SemanticReadBuilder<'a> {
         budget: SemanticReadBudget,
         roles: SemanticReadRoleSelection,
     ) -> Self {
+        let mut record_roots = std::collections::BTreeMap::new();
+        for frame in observation.frames() {
+            for (node, root) in frame
+                .nodes()
+                .iter()
+                .zip(crate::semantic_record::roots(frame))
+            {
+                if let Some(root) = root {
+                    record_roots.insert((frame.frame().frame().get(), node.key().get()), root);
+                }
+            }
+        }
         Self {
+            record_roots,
+            facts_priority: false,
             url_sources: 0,
             roles,
             observation,
@@ -1279,6 +1728,36 @@ impl<'a> SemanticReadBuilder<'a> {
         );
     }
 
+    /// One viewport-image fragment on the main frame's public document
+    /// node, when nothing in the look is sensitive or secret.
+    fn admit_viewport_image(&mut self) {
+        let Some(snapshot) = self.observation.frames().first() else {
+            return;
+        };
+        let Some(node) = snapshot.nodes().first() else {
+            return;
+        };
+        let private = self
+            .observation
+            .frames()
+            .iter()
+            .flat_map(|frame| frame.nodes())
+            .any(|node| node.sensitivity() != SemanticSensitivity::Public);
+        if node.role() != SemanticRole::Document || private {
+            return;
+        }
+        self.admit(
+            snapshot,
+            node,
+            SemanticReadField::ViewportImage,
+            SemanticReadContent::ValuePreview(SemanticValuePreview::retained(
+                SEMANTIC_VIEWPORT_IMAGE_TEXT,
+                SEMANTIC_VIEWPORT_IMAGE_TEXT.len(),
+                false,
+            )),
+        );
+    }
+
     fn admit(
         &mut self,
         snapshot: &'a crate::SemanticSnapshot,
@@ -1292,7 +1771,9 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
         }
-        if self.stats.items >= self.budget.max_items() {
+        // Collect past the budget, up to a fixed bound, so `shed` can keep a
+        // listing's facts over the page chrome that precedes them.
+        if self.stats.items >= COLLECTED_READ_ITEMS {
             self.omissions.insert(SemanticReadOmission::ItemLimit);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
@@ -1303,7 +1784,7 @@ impl<'a> SemanticReadBuilder<'a> {
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
         };
-        if next_bytes > self.budget.max_bytes() {
+        if next_bytes > COLLECTED_READ_BYTES {
             self.omissions.insert(SemanticReadOmission::ByteLimit);
             self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
             return;
@@ -1337,8 +1818,29 @@ impl<'a> SemanticReadBuilder<'a> {
             id,
             field,
             role: node.role(),
+            record_root: self
+                .record_roots
+                .get(&(snapshot.frame().frame().get(), node.key().get()))
+                .copied(),
             content,
+            states: node.states(),
             provenance,
+            region: if search_state_fragment(field, node, snapshot) {
+                0
+            } else {
+                page_region(node, snapshot)
+            },
+            // Requested addresses and pictures are record values too. Keeping
+            // every prose fragment first erased all images on long product pages.
+            rank: if search_state_fragment(field, node, snapshot)
+                || (!self.facts_priority
+                    && ((field == SemanticReadField::LinkDestination && self.url_sources & 1 != 0)
+                        || (field == SemanticReadField::ImageSource && self.url_sources & 2 != 0)))
+            {
+                0
+            } else {
+                shed_rank(field, node.role(), content)
+            },
         });
         self.stats.items = self.stats.items.saturating_add(1);
         self.stats.content_bytes = next_bytes;
@@ -1349,7 +1851,56 @@ impl<'a> SemanticReadBuilder<'a> {
         }
     }
 
-    fn finish(self, subtree: Option<SemanticReadSubtreeProof>) -> SemanticReadResult<'a> {
+    /// Brings the collected read within its budget: the least useful
+    /// fragment goes first (control labels, then addresses, then facts), the
+    /// latest of equals first, and every kept fragment keeps source order.
+    fn shed(&mut self) {
+        while self.stats.items > self.budget.max_items()
+            || self.stats.content_bytes > self.budget.max_bytes()
+        {
+            self.omissions
+                .insert(if self.stats.items > self.budget.max_items() {
+                    SemanticReadOmission::ItemLimit
+                } else {
+                    SemanticReadOmission::ByteLimit
+                });
+            let Some(index) = self
+                .fragments
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, fragment)| {
+                    // A fact read keeps actual prose and sidebar metadata over
+                    // a preceding directory of links. Catalogs keep their URLs.
+                    if self.facts_priority {
+                        (fragment.rank, fragment.region, *index)
+                    } else {
+                        (fragment.region, fragment.rank, *index)
+                    }
+                })
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            let removed = self.fragments.remove(index);
+            self.stats.items -= 1;
+            self.stats.content_bytes -= removed.content.retained_bytes();
+            if removed.provenance.sensitivity == SemanticSensitivity::Public {
+                self.stats.public_items -= 1;
+            } else {
+                self.stats.sensitive_items -= 1;
+            }
+            self.stats.omitted_items = self.stats.omitted_items.saturating_add(1);
+        }
+        for (index, fragment) in self.fragments.iter_mut().enumerate() {
+            fragment.id = u16::try_from(index + 1)
+                .ok()
+                .and_then(SemanticReadFragmentId::new)
+                .expect("bounded nonzero fragment");
+        }
+    }
+
+    fn finish(mut self, subtree: Option<SemanticReadSubtreeProof>) -> SemanticReadResult<'a> {
+        self.shed();
         let fingerprint = SemanticObservationFingerprint::from_observation(self.observation);
         let mut guard = read_guard(
             &fingerprint,
@@ -1368,7 +1919,61 @@ impl<'a> SemanticReadBuilder<'a> {
             hasher.update(proof.target.get().to_be_bytes());
             guard = hasher.finalize().into();
         }
+        let media_observation = self.observation.request().id();
+        let media_generation = self.observation.request().generation();
+        let media = self
+            .observation
+            .frames()
+            .iter()
+            .flat_map(|snapshot| {
+                let frame = std::sync::Arc::new(snapshot.frame().clone());
+                snapshot.media().iter().filter_map(move |media| {
+                    Some(ReadMediaAssociation {
+                        invocation: snapshot.invocation(),
+                        key: snapshot
+                            .nodes()
+                            .iter()
+                            .find(|node| node.reference() == media.reference())?
+                            .key()
+                            .get(),
+                        observation: media_observation,
+                        generation: media_generation,
+                        frame: frame.clone(),
+                        snapshot: snapshot.generation(),
+                        media: media.clone(),
+                        area: snapshot
+                            .nodes()
+                            .iter()
+                            .find(|node| node.reference() == media.reference())
+                            .and_then(SemanticNode::geometry)
+                            .map_or(0, |rect| u64::from(rect.width()) * u64::from(rect.height())),
+                    })
+                })
+            })
+            .take(crate::MAX_SEMANTIC_MEDIA)
+            .collect();
         SemanticReadResult {
+            budget: self.budget,
+            eligible_image_geometry: self
+                .observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .filter(|node| {
+                    node.role() == SemanticRole::Image
+                        && node
+                            .geometry()
+                            .is_some_and(|rect| rect.width() >= 64 && rect.height() >= 48)
+                })
+                .count(),
+            observed_images: self
+                .observation
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.nodes())
+                .filter(|node| node.role() == SemanticRole::Image)
+                .count(),
+            media,
             page_title: self.observation.frames().first().and_then(|frame| {
                 frame
                     .nodes()
@@ -1407,6 +2012,7 @@ impl<'a> SemanticReadBuilder<'a> {
             context: self.observation.request().context(),
             observation_fingerprint: fingerprint,
             subtree,
+            selected_target: None,
             captured_at: self.captured_at,
             fragments: self.fragments,
             omissions: self.omissions,
@@ -1414,6 +2020,200 @@ impl<'a> SemanticReadBuilder<'a> {
             guard,
             historical: Vec::new(),
         }
+    }
+}
+
+/// Fragments a read collects before shedding to its budget.
+const COLLECTED_READ_ITEMS: u16 = 4 * MAX_SEMANTIC_READ_ITEMS;
+const COLLECTED_READ_BYTES: u32 = 4 * MAX_SEMANTIC_READ_BYTES;
+
+/// How readily a fragment is shed from an over-budget read, lowest kept
+/// longest: stated facts and form values, then addresses and picture text,
+/// then the names of controls and list options.
+/// A listing's records sit in the main content, after the header, the
+/// navigation and the filters that precede them: those are shed first, so
+/// a terminal read keeps the records rather than the page around them.
+fn page_region(node: &SemanticNode, snapshot: &crate::SemanticSnapshot) -> u8 {
+    let nodes = snapshot.nodes();
+    let mut parent = node.parent();
+    let kinds = std::iter::once(node.landmark_kind()).chain(std::iter::from_fn(|| {
+        let ancestor = nodes.get(usize::from(parent?))?;
+        parent = ancestor.parent();
+        Some(ancestor.landmark_kind())
+    }));
+    let mut in_main = false;
+    for kind in kinds.flatten() {
+        match kind {
+            crate::SemanticLandmarkKind::Banner
+            | crate::SemanticLandmarkKind::Navigation
+            | crate::SemanticLandmarkKind::Contentinfo
+            | crate::SemanticLandmarkKind::Search => return 2,
+            crate::SemanticLandmarkKind::Main => in_main = true,
+            _ => {}
+        }
+    }
+    let has_main = nodes
+        .iter()
+        .any(|node| node.landmark_kind() == Some(crate::SemanticLandmarkKind::Main));
+    // The page's own facts and title sit at its top level beside the main
+    // content; they stay with it.
+    let top_level = node
+        .parent()
+        .and_then(|index| nodes.get(usize::from(index)))
+        .is_none_or(|parent| parent.parent().is_none());
+    u8::from(has_main && !in_main && !top_level)
+}
+
+// Search controls carry the observed query and settings even when the form
+// lives in the page banner. Menu links and unselected option lists do not.
+fn search_state_fragment(
+    field: SemanticReadField,
+    node: &SemanticNode,
+    snapshot: &crate::SemanticSnapshot,
+) -> bool {
+    if !matches!(
+        field,
+        SemanticReadField::AccessibleName
+            | SemanticReadField::VisibleText
+            | SemanticReadField::TextValue
+    ) || !matches!(
+        node.role(),
+        SemanticRole::Button
+            | SemanticRole::Textbox
+            | SemanticRole::Combobox
+            | SemanticRole::Spinbutton
+    ) {
+        return false;
+    }
+    let mut parent = node.parent();
+    while let Some(ancestor) = parent.and_then(|at| snapshot.nodes().get(usize::from(at))) {
+        match ancestor.landmark_kind() {
+            Some(crate::SemanticLandmarkKind::Search) => return true,
+            Some(
+                crate::SemanticLandmarkKind::Navigation | crate::SemanticLandmarkKind::Contentinfo,
+            ) => return false,
+            _ => {}
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+
+/// A fragment's usefulness under pressure: its field's and role's, except
+/// that a filter checkbox's state and a bare facet count ("( 858 )") are
+/// shed with the control labels, so a listing keeps its records over them.
+fn shed_rank(field: SemanticReadField, role: SemanticRole, content: SemanticReadContent<'_>) -> u8 {
+    let facet = match content {
+        SemanticReadContent::Boolean(_) => {
+            matches!(role, SemanticRole::Checkbox | SemanticRole::Radio)
+        }
+        SemanticReadContent::Text(text) => text
+            .as_str()
+            .trim()
+            .strip_prefix('(')
+            .and_then(|rest| rest.strip_suffix(')'))
+            .is_some_and(|inner| {
+                !inner.trim().is_empty()
+                    && inner
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || matches!(ch, ' ' | ',' | '.' | '\u{a0}'))
+            }),
+        _ => false,
+    };
+    if facet {
+        2
+    } else if control_value_label(field, role, content) {
+        0
+    } else {
+        read_priority(field, role)
+    }
+}
+
+// A price/date/time can be the name of a control that opens its details.
+// Retention only: this neither parses a value nor verifies a selected filter.
+fn control_value_label(
+    field: SemanticReadField,
+    role: SemanticRole,
+    content: SemanticReadContent<'_>,
+) -> bool {
+    if !matches!(
+        field,
+        SemanticReadField::AccessibleName | SemanticReadField::VisibleText
+    ) || !matches!(
+        role,
+        SemanticRole::Button | SemanticRole::Combobox | SemanticRole::Spinbutton
+    ) {
+        return false;
+    }
+    let SemanticReadContent::Text(text) = content else {
+        return false;
+    };
+    let text = text.as_str().trim();
+    if !text.chars().any(|ch| ch.is_numeric()) {
+        return false;
+    }
+    let prefix = text
+        .split_once(char::is_numeric)
+        .map(|(prefix, _)| prefix.trim())
+        .unwrap_or(text);
+    if prefix.chars().count() <= 3
+        && prefix.chars().all(|ch| {
+            ch.is_alphabetic()
+                || matches!(
+                    ch,
+                    '$' | '€' | '£' | '¥' | '₹' | '₩' | '₽' | '₺' | '₴' | '₪' | '₫' | '฿'
+                )
+        })
+    {
+        return true;
+    }
+    let mut previous_number = false;
+    let mut separator = false;
+    for ch in text.chars().filter(|ch| !ch.is_whitespace()) {
+        if previous_number && separator && ch.is_numeric() {
+            return true;
+        }
+        if previous_number && matches!(ch, ':' | '/' | '–' | '—' | '-') {
+            separator = true;
+        } else {
+            previous_number = ch.is_numeric();
+            separator = false;
+        }
+    }
+    false
+}
+
+pub(crate) fn read_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
+    match field {
+        SemanticReadField::TextValue
+        | SemanticReadField::BooleanValue
+        | SemanticReadField::ViewportImage => 0,
+        SemanticReadField::OrdinalValue if role != SemanticRole::Option => 0,
+        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
+            if matches!(
+                role,
+                SemanticRole::Heading
+                    | SemanticRole::Paragraph
+                    | SemanticRole::Document
+                    | SemanticRole::Cell
+                    | SemanticRole::CellHeader
+                    | SemanticRole::Status
+                    | SemanticRole::ListItem
+                    | SemanticRole::Link
+                    | SemanticRole::Row
+            ) =>
+        {
+            0
+        }
+        SemanticReadField::LinkDestination
+        | SemanticReadField::ImageSource
+        | SemanticReadField::DocumentAddress => 1,
+        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
+            if role == SemanticRole::Image =>
+        {
+            1
+        }
+        _ => 2,
     }
 }
 
@@ -1464,7 +2264,17 @@ fn read_guard(
     for fragment in fragments {
         hasher.update(fragment.id.get().to_be_bytes());
         hasher.update([read_field_code(fragment.field), role_code(fragment.role)]);
+        hasher.update([
+            u8::from(fragment.states.contains(crate::SemanticState::Selected)),
+            u8::from(fragment.states.contains(crate::SemanticState::Checked)),
+        ]);
         let provenance = fragment.provenance;
+        hasher.update(
+            fragment
+                .record_root
+                .map_or(0, |root| root.get())
+                .to_be_bytes(),
+        );
         if !provenance.fields_complete {
             hasher.update(b"FIELDS-UNPROVEN-1\0");
         }
@@ -1516,6 +2326,7 @@ const fn read_field_code(field: SemanticReadField) -> u8 {
         SemanticReadField::LinkDestination => 6,
         SemanticReadField::ImageSource => 7,
         SemanticReadField::DocumentAddress => 8,
+        SemanticReadField::ViewportImage => 9,
     }
 }
 
@@ -1703,13 +2514,41 @@ mod tests {
             crate::SemanticObservationRequest::initial(
                 SemanticObservationId::new(id).unwrap(),
                 context,
-                SemanticObservationBudget::INITIAL_FILTERED,
+                SemanticObservationBudget::try_new(512, 64 * 1024, 4).unwrap(),
             ),
             snapshot(frame, id, id, "complete", nodes),
         )
         .unwrap()
         .finish()
         .unwrap()
+    }
+
+    #[test]
+    fn short_text_results_do_not_require_pixels_but_visual_surfaces_can() {
+        let plain = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"paragraph","t":"Train Q17 departs 09:30, takes 75 minutes, no changes, fare EUR 25."}
+            ]),
+        );
+        assert!(semantic_observation_reads_sparse(&plain));
+        assert!(!semantic_observation_needs_visual_mapping(&plain));
+        let visual = retained_observation(
+            2,
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Chart"}
+            ]),
+        );
+        assert!(semantic_observation_needs_visual_mapping(&visual));
+        let dense = retained_observation(
+            3,
+            json!([
+                {"k":1,"r":"document"}, {"k":2,"p":0,"r":"image","n":"Illustration"},
+                {"k":3,"p":0,"r":"paragraph","t":"Readable reference text. ".repeat(60)}
+            ]),
+        );
+        assert!(!semantic_observation_needs_visual_mapping(&dense));
     }
 
     #[test]
@@ -2007,12 +2846,76 @@ mod tests {
     }
 
     #[test]
+    fn over_budget_reads_keep_listing_facts_over_the_controls_before_them() {
+        // Shaped like the recorded x-kom.pl listing: filter controls and sort
+        // options fill the page before the products.
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=201 {
+            nodes.push(json!({"k":key,"p":0,"r":"option","n":format!("Filter {key}"),"o":1}));
+        }
+        for key in 202..=261 {
+            nodes.push(
+                json!({"k":key,"p":0,"r":"link","n":format!("Laptop {key} 32 GB"),
+                "u":format!("https://shop.example.test/laptop-{key}")}),
+            );
+            nodes.push(json!({"k":key + 100,"p":0,"r":"paragraph","t":format!("{key} zł")}));
+        }
+        let observation = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&observation);
+        let roles = SemanticReadRoleSelection::ALL;
+        let read = read_projection(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            roles,
+            1,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            read.stats().items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
+        assert!(read.omissions().contains(SemanticReadOmission::ItemLimit));
+        let texts: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter_map(|fragment| fragment.content().text().map(|text| text.as_str()))
+            .collect();
+        for key in [202, 230, 261] {
+            assert!(
+                texts.contains(&format!("Laptop {key} 32 GB").as_str()),
+                "{key}"
+            );
+            assert!(texts.contains(&format!("{key} zł").as_str()), "{key}");
+        }
+        let links = read
+            .fragments()
+            .iter()
+            .filter(|fragment| fragment.field() == SemanticReadField::LinkDestination)
+            .count();
+        assert_eq!(links, 60);
+        // Sheds keep source order and contiguous result-local identities.
+        for (index, fragment) in read.fragments().iter().enumerate() {
+            assert_eq!(usize::from(fragment.id().get()), index + 1);
+        }
+        assert!(
+            texts.iter().position(|text| *text == "Laptop 202 32 GB")
+                < texts.iter().position(|text| *text == "Laptop 261 32 GB")
+        );
+    }
+
+    #[test]
     fn broad_duplicate_capture_cannot_erase_the_focused_source_it_replaces() {
         let mut evidence = SemanticRetainedReadEvidence::default();
         for (id, keys) in [
             (1, vec![2, 3]),
-            (2, vec![129, 130]),
-            (3, (2..=128).collect()),
+            (2, vec![257, 258]),
+            (3, (2..=256).collect()),
         ] {
             let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
             for key in keys {
@@ -2025,12 +2928,17 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(&ack),
                 SemanticCaptureInstant::from_millis(id),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap();
             evidence.retain(&read, &ack).unwrap();
         }
-        assert_eq!(evidence.retained_items(), 4);
+        // The broad capture sheds fragments down to the budget; the focused
+        // sources it duplicated stay with their first capture.
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let empty = retained_observation(4, json!([{"k":1,"r":"document","o":16}]));
         let ack = acknowledgement(&empty);
         let read = read_semantic_observation(
@@ -2056,6 +2964,605 @@ mod tests {
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
     }
 
+    // A scrolling list shows the same cards again with their inner nodes
+    // renumbered, under the same header; `shift` moves the inner keys.
+    fn listing_page(id: u64, cards: &[u64], shift: u64) -> SemanticObservation {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+            json!({"k":3,"p":0,"r":"landmark","lm":"banner"}),
+            json!({"k":4+shift,"p":2,"r":"link","n":"Home","u":"https://read-private.example.test/"}),
+        ];
+        for card in cards {
+            let group = nodes.len();
+            let root = 100 + card;
+            let inner = 1000 * shift + 10 * card;
+            nodes.push(json!({"k":root,"p":1,"r":"group"}));
+            nodes.push(json!({"k":inner+1,"p":group,"r":"image","n":format!("Photo {card}"),"m":format!("https://read-private.example.test/photo/{card}.webp")}));
+            nodes.push(
+                json!({"k":inner+2,"p":group,"r":"heading","l":3,"n":format!("Offer {card}")}),
+            );
+            nodes.push(json!({"k":inner+3,"p":group,"r":"link","n":format!("Offer {card}"),"u":format!("https://read-private.example.test/offer/{card}")}));
+            nodes.push(json!({"k":inner+4,"p":group,"r":"paragraph","t":format!("{card}99 zł")}));
+        }
+        retained_observation(id, json!(nodes))
+    }
+
+    fn retain_listing(
+        evidence: &mut SemanticRetainedReadEvidence,
+        observation: &SemanticObservation,
+    ) {
+        let ack = acknowledgement(observation);
+        let read = read_projection(
+            observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::LISTING,
+            SemanticReadRoleSelection::ALL,
+            3,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        evidence.retain(&read, &ack).unwrap();
+    }
+
+    #[test]
+    fn retained_listing_keeps_each_card_and_the_header_once_across_captures() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        retain_listing(&mut evidence, &listing_page(1, &[1, 2, 3], 0));
+        retain_listing(&mut evidence, &listing_page(2, &[2, 3, 4], 1));
+        retain_listing(&mut evidence, &listing_page(3, &[3, 4, 5], 2));
+        let current = listing_page(4, &[5, 6], 3);
+        let ack = acknowledgement(&current);
+        let read = read_projection(
+            &current,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(4),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::LISTING,
+            SemanticReadRoleSelection::ALL,
+            3,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        let count = |wanted: &str| {
+            merged
+                .fragments()
+                .iter()
+                .filter(|fragment| {
+                    fragment
+                        .content()
+                        .text()
+                        .is_some_and(|text| text.as_str() == wanted)
+                        || fragment
+                            .content()
+                            .value_preview()
+                            .is_some_and(|value| value.text().ends_with(wanted))
+                })
+                .count()
+        };
+        assert_eq!(count("Home"), 1);
+        for card in 1..=6 {
+            // One heading name, one link name, one price, and the photo and
+            // link addresses each appear once per card.
+            assert_eq!(count(&format!("Offer {card}")), 2, "card {card}");
+            assert_eq!(count(&format!("{card}99 zł")), 1, "card {card}");
+            assert_eq!(count(&format!("photo/{card}.webp")), 1, "card {card}");
+            assert_eq!(count(&format!("offer/{card}")), 1, "card {card}");
+        }
+        assert_eq!(merged.fragments().len(), 1 + 6 * 6 + 1);
+    }
+
+    #[test]
+    fn identical_content_of_another_document_is_never_the_same_source() {
+        let first = listing_page(1, &[1], 0);
+        let other_context = context_with_id(222);
+        let other_frame = SemanticFrameJoin::try_new(
+            other_context,
+            FrameId::MAIN,
+            other_context.frame_generation(),
+            SemanticOrigin::parse("https://read-private.example.test/path").unwrap(),
+            SemanticFrameTrust::SameOrigin,
+        )
+        .unwrap();
+        let other = SemanticObservationAssembler::new(
+            crate::SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).unwrap(),
+                other_context,
+                SemanticObservationBudget::try_new(512, 64 * 1024, 4).unwrap(),
+            ),
+            snapshot(
+                other_frame,
+                2,
+                2,
+                "complete",
+                json!([
+                    {"k":1,"r":"document","o":16},
+                    {"k":2,"p":0,"r":"landmark","lm":"main"},
+                    {"k":3,"p":0,"r":"landmark","lm":"banner"},
+                    {"k":4,"p":2,"r":"link","n":"Home","u":"https://read-private.example.test/"},
+                    {"k":101,"p":1,"r":"group"},
+                    {"k":11,"p":4,"r":"image","n":"Photo 1","m":"https://read-private.example.test/photo/1.webp"},
+                    {"k":12,"p":4,"r":"heading","l":3,"n":"Offer 1"},
+                    {"k":13,"p":4,"r":"link","n":"Offer 1","u":"https://read-private.example.test/offer/1"},
+                    {"k":14,"p":4,"r":"paragraph","t":"199 zł"}
+                ]),
+            ),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        fn read(observation: &SemanticObservation) -> SemanticReadResult<'_> {
+            let ack = acknowledgement(observation);
+            read_projection(
+                observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(1),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::LISTING,
+                SemanticReadRoleSelection::ALL,
+                3,
+                None,
+                None,
+                false,
+            )
+            .unwrap()
+        }
+        let (here, there) = (read(&first), read(&other));
+        assert!(!here.fragments().is_empty());
+        assert_eq!(here.fragments().len(), there.fragments().len());
+        for (left, right) in here.fragments().iter().zip(there.fragments()) {
+            assert!(left.signature().same_source(left.signature()));
+            assert!(!left.signature().same_source(right.signature()));
+        }
+    }
+
+    #[test]
+    fn bare_facet_counts_are_shed_before_the_records_after_them() {
+        let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+        for key in 2..=151 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("( {key} )")}));
+        }
+        for key in 152..=301 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Laptop {key} 32 GB")}));
+        }
+        let page = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&page);
+        let read = read_semantic_observation(
+            &page,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(160, 48 * 1024).unwrap(),
+        )
+        .unwrap();
+        let laptops = read
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Laptop"))
+            })
+            .count();
+        assert_eq!(laptops, 150);
+    }
+
+    #[test]
+    fn extraction_read_distinguishes_available_options_from_observed_selection() {
+        let observation = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"combobox","n":"Sort"},
+                {"k":3,"p":1,"r":"option","n":"Newest first"},
+                {"k":4,"p":1,"r":"option","n":"Oldest first","s":2},
+                {"k":5,"p":0,"r":"checkbox","n":"Available today","s":1},
+                {"k":6,"p":0,"r":"checkbox","n":"Secret filter","s":1,"q":"secret"}
+            ]),
+        );
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let encoded = crate::encode_semantic_read(
+            &read,
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+        )
+        .unwrap();
+        let encoded = encoded
+            .admit_conservative_utf8(
+                &crate::SemanticTokenizerRevision::try_new("selection-test".into()).unwrap(),
+            )
+            .unwrap();
+        let line = |label: &str| {
+            encoded
+                .as_str()
+                .lines()
+                .find(|line| line.contains(label))
+                .unwrap()
+        };
+        assert!(!line("Newest first").contains("selected=true"));
+        assert!(line("Oldest first").contains("selected=true"));
+        assert!(line("Available today").contains("checked=true"));
+        assert!(!encoded.as_str().contains("Secret filter"));
+    }
+
+    #[test]
+    fn target_read_keeps_only_captured_subtree_and_public_attributes() {
+        let observation = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"group","n":"Chosen item"},
+                {"k":3,"p":1,"r":"link","n":"Exact title","u":"https://example.test/item?variant=2"},
+                {"k":4,"p":1,"r":"textbox","q":"secret","v":{"k":"redacted"}},
+                {"k":5,"p":0,"r":"paragraph","t":"Unrelated sibling"}
+            ]),
+        );
+        let ack = acknowledgement(&observation);
+        let target = SemanticReferenceId::new(2).unwrap();
+        let read = read_semantic_target(
+            &observation,
+            &ack,
+            target,
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        assert_eq!(read.selected_target(), Some(target));
+        assert!(read.matches_acknowledgement(&ack));
+        let content: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter_map(|f| {
+                f.content()
+                    .text()
+                    .map(SemanticText::as_str)
+                    .or_else(|| f.content().value_preview().map(|v| v.text()))
+            })
+            .collect();
+        assert!(content.contains(&"Chosen item"));
+        assert!(content.contains(&"Exact title"));
+        assert!(content.contains(&"https://example.test/item?variant=2"));
+        assert!(!content.contains(&"Unrelated sibling"));
+        assert!(read
+            .fragments()
+            .iter()
+            .all(|f| f.provenance().sensitivity() == SemanticSensitivity::Public));
+        assert!(SemanticRetainedReadEvidence::default()
+            .merge_for_extraction(read)
+            .is_err());
+        assert!(read_semantic_target(
+            &observation,
+            &ack,
+            SemanticReferenceId::new(99).unwrap(),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_listing_read_keeps_its_cards_where_a_single_record_read_keeps_the_old_cap() {
+        const CARDS_PER_LOOK: u16 = 10;
+        const FRAGMENTS_PER_CARD: u16 = 35;
+        // One look holds at most MAX_SEMANTIC_NODES, so a listing's cards
+        // accumulate over several looks.
+        let look = |id: u64, first_card: u16| {
+            let mut nodes = vec![
+                json!({"k":1,"r":"document"}),
+                json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+            ];
+            let mut key = 3;
+            for card in first_card..first_card + CARDS_PER_LOOK {
+                for fact in 0..FRAGMENTS_PER_CARD {
+                    nodes.push(json!({"k":key,"p":1,"r":"paragraph","t":format!("Card {card} fact {fact}")}));
+                    key += 1;
+                }
+            }
+            retained_observation(id, Value::Array(nodes))
+        };
+        let rows = |max_items| {
+            crate::SemanticExtractionSchema::try_new(
+                crate::SemanticExtractionSchemaId::new(1).unwrap(),
+                vec![crate::SemanticExtractionFieldSchema::try_rows(
+                    "records".into(),
+                    true,
+                    vec![
+                        crate::SemanticExtractionFieldSchema::try_text("name".into(), true, 128)
+                            .unwrap(),
+                    ],
+                    max_items,
+                )
+                .unwrap()],
+            )
+            .unwrap()
+        };
+        let listing = rows(8);
+        let single = rows(1);
+        let total = 2 * CARDS_PER_LOOK * FRAGMENTS_PER_CARD;
+        assert!(total > SemanticReadBudget::EXTRACTION.max_items());
+        assert!(total <= SemanticReadBudget::LISTING.max_items());
+
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        {
+            let (id, first_card) = (1, 0);
+            let observation = look(id, first_card);
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation_for_schema(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                listing.extraction_read_budget(),
+                &listing,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        let current = look(2, CARDS_PER_LOOK);
+        let ack = acknowledgement(&current);
+        let read = read_semantic_observation_for_schema(
+            &current,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(2),
+            SemanticReadSensitivityLimit::PublicOnly,
+            listing.extraction_read_budget(),
+            &listing,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(read).unwrap();
+        assert_eq!(merged.budget(), SemanticReadBudget::LISTING);
+        for card in 0..2 * CARDS_PER_LOOK {
+            let label = format!("Card {card} fact {}", FRAGMENTS_PER_CARD - 1);
+            assert!(
+                merged.fragments().iter().any(|fragment| fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str() == label)),
+                "{label}"
+            );
+        }
+
+        let observation = look(3, 0);
+        let ack = acknowledgement(&observation);
+        let capped = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            single.extraction_read_budget(),
+            &single,
+        )
+        .unwrap();
+        assert_eq!(capped.budget(), SemanticReadBudget::EXTRACTION);
+        assert_eq!(
+            capped.fragments().len(),
+            usize::from(SemanticReadBudget::EXTRACTION.max_items())
+        );
+    }
+
+    #[test]
+    fn requested_record_images_survive_text_pressure_without_disclosing_secret_images() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document"}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for i in 0..3 {
+            nodes.push(json!({"k":3+i,"p":1,"r":"image","n":format!("Product photo {i}"),"m":format!("https://example.test/photo/{i}.webp")}));
+        }
+        nodes.push(
+            json!({"k":6,"p":1,"r":"image","m":"https://example.test/private.webp","q":"secret"}),
+        );
+        for i in 7..307 {
+            nodes.push(json!({"k":i,"p":1,"r":"paragraph","t":format!("Other observed product detail {i}")}));
+        }
+        let observation = retained_observation(1, Value::Array(nodes));
+        let schema = crate::SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![crate::SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    crate::SemanticExtractionFieldSchema::try_text("name".into(), true, 128)
+                        .unwrap(),
+                    crate::SemanticExtractionFieldSchema::try_image_url(
+                        "image".into(),
+                        false,
+                        2048,
+                    )
+                    .unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let images: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter(|f| f.field() == SemanticReadField::ImageSource)
+            .map(|f| f.content().value_preview().unwrap().text())
+            .collect();
+        assert_eq!(images.len(), 3);
+        assert!(images.iter().all(|url| !url.contains("private")));
+        assert!(read.stats().omitted_items() > 0);
+        assert!(read.stats().items() <= SemanticReadBudget::EXTRACTION.max_items());
+    }
+
+    #[test]
+    fn fact_read_preserves_late_prose_and_sidebar_facts_over_a_large_link_inventory() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document"}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for key in 3..183 {
+            nodes.push(json!({"k":key,"p":1,"r":"link","n":format!("File {key}"),"u":format!("https://example.test/file/{key}")}));
+        }
+        nodes.push(
+            json!({"k":183,"p":1,"r":"paragraph","t":"The current project supports Python 3.10+."}),
+        );
+        nodes.push(json!({"k":184,"p":0,"r":"landmark","lm":"complementary"}));
+        nodes.push(json!({"k":185,"p":183,"r":"paragraph","t":"License: Apache-2.0"}));
+        let observation = retained_observation(1, Value::Array(nodes));
+        let schema = crate::SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![crate::SemanticExtractionFieldSchema::try_text_list(
+                "facts".into(),
+                true,
+                8,
+                1024,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        for required in [
+            "The current project supports Python 3.10+.",
+            "License: Apache-2.0",
+        ] {
+            assert!(
+                read.fragments().iter().any(|fragment| fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str() == required)),
+                "{required}"
+            );
+        }
+        assert!(read.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items()));
+        assert!(read.stats().omitted_items() > 0);
+    }
+
+    #[test]
+    fn retained_pressure_trims_the_largest_look_instead_of_dropping_it() {
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        for (id, label, count) in [(1, "Listing", 200), (2, "Other", 100)] {
+            let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
+            for key in 2..2 + count {
+                nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("{label} {key}")}));
+            }
+            let observation = retained_observation(id, json!(nodes));
+            let ack = acknowledgement(&observation);
+            let read = read_semantic_observation(
+                &observation,
+                SemanticReadAuthority::Acknowledged(&ack),
+                SemanticCaptureInstant::from_millis(id),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+            )
+            .unwrap();
+            evidence.retain(&read, &ack).unwrap();
+        }
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
+        let empty = retained_observation(3, json!([{"k":1,"r":"document","o":16}]));
+        let ack = acknowledgement(&empty);
+        let current = read_semantic_observation(
+            &empty,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(3),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+        )
+        .unwrap();
+        let merged = evidence.merge_for_extraction(current).unwrap();
+        let listings = merged
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment
+                    .content()
+                    .text()
+                    .is_some_and(|text| text.as_str().starts_with("Listing"))
+            })
+            .count();
+        assert!(listings >= 150, "{listings}");
+    }
+
+    #[test]
+    fn a_terminal_read_sheds_the_page_chrome_and_filters_before_the_main_records() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"paragraph","n":"Page title","t":"Results"}),
+            json!({"k":3,"p":0,"r":"landmark","lm":"banner"}),
+        ];
+        for key in 4..=103 {
+            nodes.push(json!({"k":key,"p":2,"r":"link","n":format!("Menu {key}")}));
+        }
+        nodes.push(json!({"k":104,"p":0,"r":"group"}));
+        for key in 105..=204 {
+            nodes.push(json!({"k":key,"p":103,"r":"list_item","t":format!("Filter {key}")}));
+        }
+        nodes.push(json!({"k":205,"p":0,"r":"landmark","lm":"main"}));
+        for key in 206..=305 {
+            nodes.push(json!({"k":key,"p":204,"r":"list_item","t":format!("Listing {key}")}));
+        }
+        let page = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&page);
+        let read = read_semantic_observation(
+            &page,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(160, 48 * 1024).unwrap(),
+        )
+        .unwrap();
+        let texts = read
+            .fragments()
+            .iter()
+            .filter_map(|fragment| match fragment.content() {
+                SemanticReadContent::Text(text) => Some(text.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(texts.iter().any(|text| text == "Listing 305"));
+        assert!(texts.iter().any(|text| text == "Results"));
+        assert!(!texts.iter().any(|text| text.starts_with("Menu")));
+        assert!(
+            texts
+                .iter()
+                .filter(|text| text.starts_with("Filter"))
+                .count()
+                < 100
+        );
+    }
+
     #[test]
     fn focused_current_capture_does_not_reserve_half_for_old_viewport_chrome() {
         let chrome = retained_observation(
@@ -2063,11 +3570,11 @@ mod tests {
             json!([
                 {"k":1,"r":"document","o":16},
                 {"k":2,"p":0,"r":"paragraph","t":"Navigation banner"},
-            {"k":131,"p":0,"r":"paragraph","t":"Navigation footer"}
+            {"k":259,"p":0,"r":"paragraph","t":"Navigation footer"}
             ]),
         );
         let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 3..=129 {
+        for key in 3..=257 {
             nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Product fact {key}")}));
         }
         let detail = retained_observation(2, json!(nodes));
@@ -2077,7 +3584,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(1),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2091,33 +3598,148 @@ mod tests {
         detail_read.focused = true;
         evidence.retain(&detail_read, &detail_ack).unwrap();
         let merged = evidence.merge_for_extraction(detail_read).unwrap();
-        assert_eq!(merged.fragments().len(), 127);
-        assert!(!merged.has_retained_evidence());
-        assert!(merged.fragments().iter().all(|fragment| fragment
-            .provenance()
-            .observation()
-            .get()
-            == 2));
+        // Every current fact is kept; old chrome only fills what is left.
+        assert_eq!(
+            merged
+                .fragments()
+                .iter()
+                .filter(|fragment| fragment.provenance().observation().get() == 2)
+                .count(),
+            255
+        );
+        assert!(
+            merged.fragments().len() <= usize::from(SemanticReadBudget::EXTRACTION.max_items())
+        );
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
+    }
+
+    #[test]
+    fn extraction_keeps_prices_and_selected_dates_in_control_labels_under_pressure() {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"Check in / Check out Nov 18 – 21","o":1}),
+            json!({"k":3,"p":0,"r":"button","n":"$236 total $236 total, originally $279","o":1}),
+            json!({"k":4,"p":0,"r":"button","n":"zł 218 total zł 218 total, originally zł 249","o":1}),
+            json!({"k":5,"p":0,"r":"button","n":"Depart 09:30","o":1}),
+        ];
+        nodes.push(json!({"k":446,"p":0,"r":"landmark","lm":"banner"}));
+        nodes.push(json!({"k":447,"p":5,"r":"landmark","lm":"search"}));
+        nodes.push(json!({"k":448,"p":6,"r":"button","n":"Location Homes in Lisbon","o":1}));
+        nodes.push(json!({"k":449,"p":6,"r":"button","n":"Guests 2 guests","o":1}));
+        nodes.push(json!({"k":450,"p":6,"r":"button","n":"Selected Nov 18 – 21","o":1}));
+        for key in 6..=165 {
+            nodes.push(
+                json!({"k":key,"p":0,"r":"button","n":format!("Gallery thumbnail {key}"),"o":1}),
+            );
+        }
+        for key in 166..=445 {
+            nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Catalog detail {key}")}));
+        }
+        let observation = retained_observation(1, json!(nodes));
+        let ack = acknowledgement(&observation);
+        let read = read_semantic_observation(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&ack),
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+        )
+        .unwrap();
+        assert!(read.omissions().contains(SemanticReadOmission::ItemLimit));
+        for (reference, exact) in [
+            (2, "Check in / Check out Nov 18 – 21"),
+            (3, "$236 total $236 total, originally $279"),
+            (4, "zł 218 total zł 218 total, originally zł 249"),
+            (5, "Depart 09:30"),
+            (448, "Location Homes in Lisbon"),
+            (449, "Guests 2 guests"),
+            (450, "Selected Nov 18 – 21"),
+        ] {
+            let fragment = read
+                .fragments()
+                .iter()
+                .find(|fragment| fragment.provenance().node_key.get() == reference)
+                .expect("observed value in a button must remain extractable");
+            assert_eq!(fragment.content().text().unwrap().as_str(), exact);
+            assert_eq!(fragment.field(), SemanticReadField::AccessibleName);
+        }
+        assert!(!read.fragments().iter().any(|fragment| fragment
+            .content()
+            .text()
+            .is_some_and(|text| text.as_str().starts_with("Gallery thumbnail"))));
+    }
+
+    #[test]
+    fn changed_listing_view_discards_old_values_and_cannot_retain_its_departure_again() {
+        let old = retained_observation(
+            1,
+            json!([
+                {"k":1,"r":"document","o":16}, {"k":2,"p":0,"r":"paragraph","t":"Before sorting: expensive first"}
+            ]),
+        );
+        let new = retained_observation(
+            2,
+            json!([
+                {"k":1,"r":"document","o":16}, {"k":2,"p":0,"r":"paragraph","t":"After sorting: cheapest first"}
+            ]),
+        );
+        let old_ack = acknowledgement(&old);
+        let new_ack = acknowledgement(&new);
+        let read = |look, ack| {
+            read_semantic_observation(
+                look,
+                SemanticReadAuthority::Acknowledged(ack),
+                SemanticCaptureInstant::from_millis(100),
+                SemanticReadSensitivityLimit::PublicOnly,
+                SemanticReadBudget::EXTRACTION,
+            )
+            .unwrap()
+        };
+        let old_read = read(&old, &old_ack);
+        let mut evidence = SemanticRetainedReadEvidence::default();
+        evidence.retain(&old_read, &old_ack).unwrap();
+        assert!(evidence.retained_items() > 0);
+        evidence.discard_view_before_action(&old_ack).unwrap();
+        evidence.retain(&old_read, &old_ack).unwrap();
+        assert_eq!(
+            evidence.retained_items(),
+            0,
+            "the followed navigation must not re-add its old source"
+        );
+        let current = evidence.merge_for_extraction(read(&new, &new_ack)).unwrap();
+        assert_eq!(current.fragments().len(), 1);
+        assert_eq!(
+            current.fragments()[0].content().text().unwrap().as_str(),
+            "After sorting: cheapest first"
+        );
+        let mut foreign = read(&new, &new_ack);
+        foreign.context = context_with_id(999);
+        assert!(
+            matches!(
+                evidence.merge_for_extraction(foreign),
+                Err(SemanticReadError::AuthorityMismatch)
+            ),
+            "discarding a view must retain its original context guard"
+        );
     }
 
     #[test]
     fn extraction_pressure_keeps_late_facts_ahead_of_gallery_controls() {
         let mut history_nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=65 {
+        for key in 2..=129 {
             history_nodes
                 .push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Earlier detail {key}")}));
         }
         let history = retained_observation(1, json!(history_nodes));
         let mut current_nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=81 {
+        for key in 2..=161 {
             current_nodes.push(
                 json!({"k":key,"p":0,"r":"button","n":format!("Gallery thumbnail {key}"),"o":1}),
             );
         }
-        current_nodes.push(json!({"k":82,"p":0,"r":"heading","l":1,"n":"Example product"}));
-        current_nodes.push(json!({"k":83,"p":0,"r":"paragraph","t":"$349.99"}));
-        current_nodes.push(json!({"k":84,"p":0,"r":"paragraph","t":"Width 89 cm"}));
+        current_nodes.push(json!({"k":162,"p":0,"r":"heading","l":1,"n":"Example product"}));
+        current_nodes.push(json!({"k":163,"p":0,"r":"paragraph","t":"$349.99"}));
+        current_nodes.push(json!({"k":164,"p":0,"r":"paragraph","t":"Width 89 cm"}));
         let current = retained_observation(2, json!(current_nodes));
         let history_ack = acknowledgement(&history);
         let current_ack = acknowledgement(&current);
@@ -2127,7 +3749,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(100),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2151,7 +3773,7 @@ mod tests {
                 .unwrap();
             assert_eq!(fragment.provenance().observation(), current.request().id());
         }
-        assert_eq!(merged.fragments().len(), 128);
+        assert_eq!(merged.fragments().len(), 256);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
         for (index, fragment) in merged.fragments().iter().enumerate() {
             assert_eq!(usize::from(fragment.id().get()), index + 1);
@@ -2174,7 +3796,7 @@ mod tests {
             ]),
         );
         let mut nodes = vec![json!({"k":1,"r":"document","o":16})];
-        for key in 2..=128 {
+        for key in 2..=256 {
             nodes.push(json!({"k":key,"p":0,"r":"paragraph","t":format!("Catalog entry {key}")}));
         }
         let broad = retained_observation(2, json!(nodes));
@@ -2186,7 +3808,7 @@ mod tests {
                 SemanticReadAuthority::Acknowledged(ack),
                 SemanticCaptureInstant::from_millis(100),
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                SemanticReadBudget::EXTRACTION,
             )
             .unwrap()
         };
@@ -2196,10 +3818,13 @@ mod tests {
         let mut evidence = SemanticRetainedReadEvidence::default();
         evidence.retain(&detail_read, &detail_ack).unwrap();
         evidence.retain(&broad_read, &broad_ack).unwrap();
-        assert_eq!(evidence.retained_items(), 2);
+        assert_eq!(
+            evidence.retained_items(),
+            SemanticReadBudget::EXTRACTION.max_items()
+        );
         let merged = evidence.merge_for_extraction(broad_read).unwrap();
         assert!(merged.matches_acknowledgement(&broad_ack));
-        assert_eq!(merged.fragments().len(), 128);
+        assert_eq!(merged.fragments().len(), 256);
         assert!(merged.omissions().contains(SemanticReadOmission::ItemLimit));
         let price = merged
             .fragments()

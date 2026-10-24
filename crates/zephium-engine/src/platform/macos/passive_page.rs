@@ -1,7 +1,9 @@
-//! Keeps hosted agent pages out of the human window's responder chain. WebKit
-//! asks the window to make a page first responder whenever page content
-//! requests focus; for registered pages that request is refused, so keyboard
-//! input never leaves the chrome. No page class is changed.
+//! Keeps hosted agent pages out of the human window's responder chain and
+//! away from its mouse. WebKit asks the window to make a page first responder
+//! whenever page content requests focus; for registered pages that request is
+//! refused, so keyboard input never leaves the chrome. A registered page also
+//! takes no pointer input: its tracking areas, which AppKit delivers to even
+//! beneath another view, would otherwise set the cursor against the chrome's.
 #![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 use objc2::rc::Retained;
@@ -29,12 +31,20 @@ pub(crate) fn register(page: &NSView) -> bool {
     if !passive.contains(&address) {
         passive.push(address);
     }
+    set_pointer_inert(page, true);
     true
 }
 
 pub(crate) fn unregister(page: &NSView) {
     if let Ok(mut passive) = PASSIVE.lock() {
         passive.retain(|entry| *entry != address(page));
+    }
+    set_pointer_inert(page, false);
+}
+
+fn set_pointer_inert(page: &NSView, inert: bool) {
+    if let Some(page) = page.downcast_ref::<wry::WryWebView>() {
+        page.set_pointer_inert(inert);
     }
 }
 

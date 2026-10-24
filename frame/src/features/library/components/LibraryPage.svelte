@@ -14,7 +14,7 @@
     <IconButton
       icon={ArrowLeft02Icon}
       label={m.settings_back()}
-      onclick={() => void browser.open(null)}
+      onclick={() => void browser.close()}
     /><span>{m.browser_downloads_title()}</span>
   </header>
   <div class="library-content">

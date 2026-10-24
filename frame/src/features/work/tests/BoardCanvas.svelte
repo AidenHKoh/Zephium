@@ -3,7 +3,7 @@
   import { provideLeadLook } from "$shared/ui/presence";
   import WorkCanvas from "../components/WorkCanvas.svelte";
   import {
-    clearOfBands,
+    ownPlaces,
     environmentStages,
     fetchedPictures,
     measurer,
@@ -109,7 +109,7 @@
   authoritative={new Set()}
   initialView={{
     positions: {
-      ...clearOfBands(
+      ...ownPlaces(
         own.positions,
         {
           ...Object.fromEntries(

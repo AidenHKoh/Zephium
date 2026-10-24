@@ -27,8 +27,15 @@ type Deps = {
   session: () => WorkEnvironmentSession;
   /** Something else is in flight: nothing new is placed meanwhile. */
   busy: () => boolean;
-  /** The middle of the visible canvas, in canvas coordinates. */
-  centre: () => CanvasPosition | null;
+  /**
+   * Where the new element `id`, of `size`, stands, by its centre: where it
+   * was dropped unless that is on a run, else free room in the middle of the view.
+   */
+  spot: (
+    at: CanvasPosition | null,
+    size: { width: number; height: number },
+    id: string,
+  ) => CanvasPosition | null;
   /** Where a window point lands on the canvas. */
   at: (x: number, y: number) => CanvasPosition | null;
   /** A dropped file: its path joins the request, so the run asks for its folder in place. */
@@ -50,11 +57,13 @@ export class CanvasPlacing {
     this.#deps = deps;
   }
 
-  /** Adds an element and stands it where the person put it, or in the middle. */
+  /** Adds an element and stands it where the person put it, or in free room in the middle. */
   async place(
     reference: WorkEnvironmentReference,
     type: CanvasItem["type"],
     at: CanvasPosition | null,
+    /** Its own size when it knows it; else its kind's. */
+    sized?: { width: number; height: number },
   ): Promise<boolean> {
     const session = this.#deps.session();
     if (session.snapshot && elementFor(session.snapshot, reference)) return true;
@@ -62,9 +71,11 @@ export class CanvasPlacing {
     if (!(await session.edit({ kind: "add", reference, area: null }))) return false;
     const current = session.snapshot;
     const element = current ? elementFor(current, reference) : undefined;
-    const point = at ?? this.#deps.centre();
-    if (!current || !element || !point) return true;
-    const size = defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
+    if (!current || !element) return true;
+    const size =
+      sized ?? defaultSize({ id: element.id, title: "", kind: "", detail: "", status: "", type });
+    const point = this.#deps.spot(at, size, element.id);
+    if (!point) return true;
     session.checkpoint({
       ...current.view,
       placements: [

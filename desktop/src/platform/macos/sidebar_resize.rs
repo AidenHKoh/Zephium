@@ -34,6 +34,9 @@ fn revision_current(revision: u64) -> bool {
 // gap before the content, so the tab list's edge and overlay scrollbar stay
 // reachable underneath it.
 const HOT_WIDTH: f64 = 8.0;
+/// The chrome draws the window's gutter before the column, so the column's
+/// edge is this far in from the chrome's own.
+const GUTTER: f64 = 8.0;
 const HOT_INSET: f64 = 2.0;
 const SNAP: f64 = 140.0;
 const MIN_EXPANDED: f64 = 180.0;
@@ -234,9 +237,9 @@ impl Control {
         };
         let frame = chrome.frame();
         let width = self.ivars().width.get();
-        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < width;
+        let hidden = !self.ivars().enabled.get() || frame.size.width + 0.5 < GUTTER + width;
         let target = NSRect::new(
-            NSPoint::new(frame.origin.x + width - HOT_INSET, frame.origin.y),
+            NSPoint::new(frame.origin.x + GUTTER + width - HOT_INSET, frame.origin.y),
             NSSize::new(HOT_WIDTH, frame.size.height),
         );
         let current = self.frame();
@@ -281,7 +284,7 @@ impl Control {
         };
         let target = NSRect::new(
             NSPoint::new(
-                frame.origin.x + width - 2.0,
+                frame.origin.x + GUTTER + width - 2.0,
                 frame.origin.y + (frame.size.height - height) / 2.0,
             ),
             NSSize::new(2.0, height),
@@ -502,6 +505,13 @@ pub(super) fn configure(
     let Some(mtm) = MainThreadMarker::new() else {
         return false;
     };
+    // Switching the guide off is always safe, so it is never refused as
+    // stale: every width the column publishes advances the revision, and a
+    // refused "off" left the guide live at an edge the column had left.
+    if !enabled {
+        disable();
+        return false;
+    }
     if !revision_current(revision) {
         return false;
     }
@@ -578,6 +588,32 @@ pub(super) fn configure(
         control.setHidden(true);
     }
     installed
+}
+fn disable() {
+    let control = CONTROL.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(_, control)| control.clone()))
+    });
+    if let Some(control) = control {
+        control.ivars().enabled.set(false);
+        control.cancel(false);
+        control.place();
+    }
+}
+/// The column's width as native has applied it. The guide belongs to the
+/// column's edge, so wherever the column now ends somewhere else (a tool
+/// panel beside the rail, the rail itself) it is switched off until the
+/// frame configures it again at the new edge.
+pub(super) fn column_width(width: f64) {
+    let control = CONTROL.with(|slot| {
+        slot.try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(_, control)| control.clone()))
+    });
+    if control.is_some_and(|control| (control.ivars().width.get() - width).abs() > 0.5) {
+        disable();
+    }
 }
 pub(super) fn refresh() {
     let control = CONTROL.with(|slot| {

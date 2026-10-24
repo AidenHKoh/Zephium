@@ -22,6 +22,8 @@ mod reads;
 /// it in the session the run decided for its site.
 #[derive(Clone)]
 pub struct WorkAgentBrowseRequest {
+    /// Removal-only entry refusal. It never grants screenshot permission.
+    pub image_entry_blocked: bool,
     pub construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     pub id: WorkStepId,
     pub step: WorkStepKindV1,
@@ -43,6 +45,14 @@ pub struct WorkAgentBrowseRequest {
     pub entry: bool,
     /// A page task that only reads what a daily app's view lists.
     pub view: bool,
+    /// A search step's results page: Rust reads its results, no model.
+    pub results: Option<WorkResultsPage>,
+    /// A new read of where an earlier public read's first load was redirected:
+    /// the address that redirected here. Cross-site successors use empty storage.
+    pub redirected_from: Option<String>,
+    /// A private run: pages without the person's session keep the run's own
+    /// empty storage instead of Work's memory.
+    pub private_run: bool,
 }
 
 /// A step a page task holds for the person, as the site policy read it
@@ -180,14 +190,30 @@ pub struct WorkBrowserOutcome {
     pub helped: bool,
     /// The page agent was stopped before a step that would commit something.
     pub held_back: bool,
+    /// What this page task committed, one plain line each ("Saved on the page: Add task").
+    pub committed: Vec<String>,
     /// The page ended so that its task can start over once: the person
     /// finished a sign-in in a tab while it waited, or saving a cookie
     /// refusal replaced the page. The site counts as allowed for the rerun.
     pub rerun: bool,
+    /// What a search step's results page showed, as Rust read it.
+    pub search: Option<WorkSearchPage>,
+    /// Where a public read's first load was redirected: the read failed,
+    /// and only a new read of this address may follow it.
+    pub redirect: Option<String>,
 }
 pub struct WorkAgentProviders<'a> {
     pub turn: &'a dyn WorkAgentTurnProvider,
     pub search: &'a dyn WorkPublicSearchProvider,
+}
+
+fn local_step_is_disclosable(kind: &WorkStepKindV1) -> bool {
+    if !kind.files() && !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
+        return true;
+    }
+    serde_json::to_string(kind)
+        .ok()
+        .is_some_and(|wire| !zephium_agentic::contains_recognized_secret(&wire))
 }
 
 /// Tokens a turn must still be able to spend before the loop stops itself.
@@ -197,7 +223,6 @@ const TURN_TOKEN_FLOOR: u32 = 12_000;
 const MAX_UNREADABLE_POLLS: u8 = 12;
 const MAX_FAILED_TURNS: u8 = 3;
 const STEPS_EXHAUSTED: &str = "The step budget is used up: no more searches or reads will run. Publish the result from the sources already collected and finish.";
-const ASK_POLL: Duration = Duration::from_millis(500);
 const MAX_PREVIEWS: usize = 96;
 const INHERITED_PREVIEWS: usize = 64;
 const INHERITED_ARTIFACTS: usize = 32;
@@ -379,6 +404,8 @@ impl WorkAgentService {
             None => (command.into_request()?, Vec::new(), Vec::new(), Vec::new()),
         };
         request.validate()?;
+        let starting =
+            crate::work_runtime::WorkStartingAgent::acquire(&self.handle, profile, work)?;
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             self.handle.submit_work_document(request, Some(profile))?,
@@ -400,7 +427,10 @@ impl WorkAgentService {
             return Err(WorkError::Invalid);
         }
         if replayed {
-            return Ok(*projection);
+            drop(starting);
+            let mut projection = *projection;
+            crate::work_runtime::project_driver_liveness(profile, &mut projection);
+            return Ok(projection);
         }
         let execution = projection
             .executions
@@ -427,6 +457,7 @@ impl WorkAgentService {
                 node,
             )
             .await?;
+        drop(starting);
         observe(attempt.observer());
         let original = attempt.attempt();
         let mut driver = Driver {
@@ -470,6 +501,7 @@ impl WorkAgentService {
             views: Vec::new(),
             typing_held: Vec::new(),
             typing_allowed: Vec::new(),
+            redirects: Vec::new(),
         };
         if !driver.tabs.is_empty() {
             driver.report(WorkAgentDiagnostic::TabsListed {
@@ -572,6 +604,9 @@ struct Driver {
     typing_held: Vec<String>,
     /// Sites the person allowed typing on for the run, for the run to learn.
     typing_allowed: Vec<String>,
+    /// Page reads whose first load was redirected: the step, where it was
+    /// sent, and the step that read it there when the driver followed it.
+    redirects: Vec<(WorkStepId, String, Option<WorkStepId>)>,
 }
 
 enum Fetched {
@@ -592,6 +627,39 @@ struct WorkSearchOutcomeOwned {
 }
 
 impl Driver {
+    async fn wait_for_step_capacity(&mut self, races: &mut u8) -> Result<bool, WorkError> {
+        loop {
+            if self.cancelled().await {
+                return Ok(false);
+            }
+            let state = self.probe.runtime_projection().await?;
+            let execution = state
+                .executions
+                .iter()
+                .find(|run| run.id == self.probe.execution())
+                .ok_or(WorkError::NotFound)?;
+            if execution
+                .steps
+                .iter()
+                .filter(|step| step.occupies_worker())
+                .count()
+                >= usize::from(execution.spec.limits.max_workers)
+            {
+                *races = 0;
+                self.probe.changes().next(Duration::from_millis(100)).await;
+                continue;
+            } else {
+                // A worker can finish between the refusal and this read. Allow
+                // one such race, but never spin on storage/payload exhaustion.
+                *races = races.saturating_add(1);
+                if *races > 1 {
+                    return Err(WorkError::Capacity);
+                }
+            }
+            self.probe.changes().next(Duration::from_millis(50)).await;
+            return Ok(true);
+        }
+    }
     fn remaining(&self) -> WorkExecutionLimits {
         WorkExecutionLimits {
             model_tokens: self
@@ -647,6 +715,7 @@ impl Driver {
     }
     fn step(&self, kind: WorkStepKindV1, status: WorkStepStatus) -> WorkStepFact {
         WorkStepFact {
+            model_fault: None,
             part: self.part,
             id: WorkStepId::generate(),
             turn: self.turn.max(1),
@@ -669,6 +738,10 @@ impl Driver {
     ) -> Result<WorkStepId, WorkError> {
         let id = step.id;
         let kind = step_kind_label(&step.kind);
+        if !local_step_is_disclosable(&step.kind) {
+            crate::work_trace::record(format_args!("work: phase=step stage=admission kind={kind} reason=recognized_secret; content=redacted"));
+            return Err(WorkError::Invalid);
+        }
         if let Err(error) = self
             .probe
             .commit_step(WorkRuntimeUpdate::BeginStep {
@@ -682,6 +755,9 @@ impl Driver {
             .await
         {
             self.report(WorkAgentDiagnostic::CommitRefused { kind, error });
+            crate::work_trace::record(format_args!(
+                "work: phase=step stage=begin kind={kind} error={error:?} content=redacted"
+            ));
             return Err(error);
         }
         self.steps += 1;
@@ -796,12 +872,7 @@ impl Driver {
         let swept = !running.is_empty();
         for step in running {
             // A fetch cut off mid-flight may have been charged: its outcome is unknown.
-            let settled = match step.kind {
-                WorkStepKindV1::Search { .. }
-                | WorkStepKindV1::Read { .. }
-                | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
-                _ => WorkStepStatus::Cancelled,
-            };
+            let settled = step.interruption_status();
             if self
                 .settle(
                     step.id,
@@ -1157,7 +1228,8 @@ impl Driver {
                     .artifacts
                     .into_iter()
                     .take(headroom)
-                    .filter_map(|artifact| {
+                    .filter_map(|mut artifact| {
+                        artifact.data.clear_record_media();
                         attempt
                             .mint_marked_artifact(
                                 WorkArtifactDraft {
@@ -1264,6 +1336,7 @@ impl Driver {
             .into_iter()
             .partition(|kind| matches!(kind, WorkStepKindV1::Search { .. }));
         let mut offset = 0;
+        let mut capacity_races = 0;
         while offset < searches.len() {
             let steps = usize::from(self.grant.max_steps).saturating_sub(self.steps as usize + 1);
             if steps == 0 {
@@ -1311,12 +1384,19 @@ impl Driver {
             };
             let batch = &searches[offset..offset + count];
             let mut running = Vec::new();
+            let mut admission_failure = None;
             for (kind, limits) in batch.iter().zip(shares) {
                 let WorkStepKindV1::Search { query } = kind else {
                     continue;
                 };
                 let step = self.step(kind.clone(), WorkStepStatus::Running);
-                let id = self.begin(step, vec![], None).await?;
+                let id = match self.begin(step, vec![], None).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        admission_failure = Some(error);
+                        break;
+                    }
+                };
                 running.push((
                     id,
                     WorkPublicSearchScope {
@@ -1327,18 +1407,44 @@ impl Driver {
                     limits,
                 ));
             }
+            let admitted = running.len();
+            if admitted == 0 && admission_failure == Some(WorkError::Capacity) {
+                if !self.wait_for_step_capacity(&mut capacity_races).await? {
+                    return Ok(Some(WorkAttemptStatus::Cancelled));
+                }
+                continue;
+            }
+            if admitted > 0 {
+                capacity_races = 0;
+            }
+            let mut pages = self.open_results_pages(search, browser, &running).await;
             let futures: Vec<Pin<Box<dyn Future<Output = Fetched> + Send + '_>>> = running
                 .into_iter()
-                .map(|(id, scope, limits)| {
+                .zip(pages.drain(..))
+                .map(|((id, scope, limits), opened)| {
                     let probe = self.probe.clone();
                     Box::pin(async move {
-                        let outcome = probe.run_search(search, &scope, &[], limits).await;
+                        let (outcome, page_usage) = match opened {
+                            Some((page, usage)) => (
+                                probe.run_search_on_page(search, &scope, page, limits).await,
+                                usage,
+                            ),
+                            None => (
+                                probe.run_search(search, &scope, &[], limits).await,
+                                WorkUsage::default(),
+                            ),
+                        };
                         Fetched::Search(
                             id,
                             match outcome {
                                 Ok(outcome) => WorkSearchOutcomeOwned {
                                     status: outcome.status,
-                                    usage: outcome.usage,
+                                    // The page itself is charged with its
+                                    // search; it calls no model.
+                                    usage: outcome.usage.map(|usage| WorkUsage {
+                                        operations: usage.operations,
+                                        ..crate::work_search::add(usage, page_usage)
+                                    }),
                                     note: outcome.note,
                                     record: outcome.record,
                                     error: None,
@@ -1362,13 +1468,24 @@ impl Driver {
                 })
                 .collect();
             let mut terminal = None;
+            let mut settlement_failure = None;
             for fetched in join_all(futures).await {
-                terminal = terminal.or(self.settle_fetched(attempt, fetched).await?);
+                match self.settle_fetched(attempt, fetched).await {
+                    Ok(status) => terminal = terminal.or(status),
+                    Err(error) => {
+                        settlement_failure.get_or_insert(error);
+                    }
+                }
+            }
+            if let Some(error) = settlement_failure
+                .or(admission_failure.filter(|error| *error != WorkError::Capacity))
+            {
+                return Err(error);
             }
             if terminal.is_some() {
                 return Ok(terminal);
             }
-            offset += count;
+            offset += admitted;
         }
         let (file_steps, browses): (Vec<_>, Vec<_>) = browses
             .into_iter()
@@ -1381,12 +1498,88 @@ impl Driver {
         self.fetch_browses(attempt, browser, browses).await
     }
 
+    /// Opens each browser search's results page together, in the run's own
+    /// storage, before its search reads it; what Rust read there and what
+    /// the page cost. Searches a provider runs itself get `None`.
+    async fn open_results_pages<B, Fut>(
+        &self,
+        search: &dyn WorkPublicSearchProvider,
+        browser: &mut B,
+        running: &[(WorkStepId, WorkPublicSearchScope, WorkExecutionLimits)],
+    ) -> Vec<Option<(Option<WorkSearchPage>, WorkUsage)>>
+    where
+        B: FnMut(WorkAttemptProbe, WorkAgentBrowseRequest) -> Fut,
+        Fut: Future<Output = Result<WorkBrowserOutcome, WorkError>>,
+    {
+        let mut opened: Vec<Option<(Option<WorkSearchPage>, WorkUsage)>> =
+            running.iter().map(|_| None).collect();
+        let mut at = Vec::new();
+        let mut reads = Vec::new();
+        for (index, (id, scope, limits)) in running.iter().enumerate() {
+            let Some(page) = search.results_page(scope) else {
+                continue;
+            };
+            at.push(index);
+            reads.push(Box::pin(browser(
+                self.probe.clone(),
+                WorkAgentBrowseRequest {
+                    image_entry_blocked: false,
+                    construction_attempt: Default::default(),
+                    id: *id,
+                    step: WorkStepKindV1::Search {
+                        query: scope.query.clone(),
+                    },
+                    hops: 1,
+                    objective: self.objective.clone(),
+                    output: self.output.clone(),
+                    limits: *limits,
+                    session: crate::work_sites::SiteSession::Private,
+                    confirm: None,
+                    allow_edits: false,
+                    hold_typing: false,
+                    entry: false,
+                    view: false,
+                    results: Some(page),
+                    redirected_from: None,
+                    private_run: self.grant.private,
+                },
+            )));
+        }
+        if reads.is_empty() {
+            return opened;
+        }
+        self.probe.record_activity(WorkActivityV1::Searching);
+        for (index, outcome) in at.into_iter().zip(join_all(reads).await) {
+            let (page, usage) = match outcome {
+                Ok(outcome) => (outcome.search, outcome.usage.unwrap_or_default()),
+                Err(_) => (None, WorkUsage::default()),
+            };
+            crate::work_trace::record(format_args!(
+                "work: phase=search page={}",
+                match &page {
+                    Some(WorkSearchPage::Results(_)) => "results",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Challenge)) => "challenge",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Consent)) => "consent",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::NoResults)) => "no_results",
+                    Some(WorkSearchPage::Wall(WorkSearchWall::Unreadable)) => "unreadable",
+                    None => "unopened",
+                }
+            ));
+            opened[index] = Some((page, usage));
+        }
+        opened
+    }
+
     /// One step on the person's files. Reads settle at once with a record
     /// the agent can cite; a proposed change waits for the person's decision.
     async fn file_step(
         &mut self,
         kind: WorkStepKindV1,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        if !local_step_is_disclosable(&kind) {
+            self.notice("The local step was withheld because its arguments contain a recognized credential or private key");
+            return Ok(None);
+        }
         let Some(files) = self.files.clone() else {
             self.notice("No folder is granted in this run. Ask the person to add a folder to the canvas before reading or changing files.");
             return Ok(None);
@@ -1426,6 +1619,13 @@ impl Driver {
         };
         if let Some(Ok(change)) = &prepared {
             step.local = Some(Box::new(change.fact()));
+        }
+        if let Some(Err(error)) = &prepared {
+            step.status = WorkStepStatus::Failed;
+            step.note = Some(error.note().into());
+            self.begin(step, vec![], None).await?;
+            self.notice(error.note());
+            return Ok(None);
         }
         let id = self.begin(step, vec![], None).await?;
         let outcome = match (&kind, prepared) {
@@ -1510,8 +1710,9 @@ impl Driver {
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
         self.probe.record_activity(WorkActivityV1::WaitingForHuman);
         let since = self.wait();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(ASK_POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let state = self.probe.runtime_projection().await?;
             let execution = state
                 .executions
@@ -1714,7 +1915,12 @@ impl Driver {
                         if let Some(usage) = outcome.usage {
                             self.charge(usage);
                         }
-                        let signed_in = self.session_steps.contains(&id);
+                        let signed_in = self.session_steps.contains(&id)
+                            || measurements_private_page(outcome.measurements);
+                        if signed_in && !self.session_steps.contains(&id) {
+                            // Privacy provenance only; do not mint an account grant/badge.
+                            self.session_steps.push(id);
+                        }
                         if outcome.held_back {
                             self.report(WorkAgentDiagnostic::HeldBack);
                             self.notice(HELD_BACK);
@@ -1762,10 +1968,17 @@ impl Driver {
                                 })
                                 .to_owned(),
                         };
-                        if status == WorkStepStatus::Failed {
-                            self.notice(&format!(
-                                "A page read failed: {}. Use another listed source or finish with what the canvas has; do not reopen that page.",
-                                outcome.note.as_deref().unwrap_or("the page gave nothing")
+                        let note = if outcome.committed.is_empty() {
+                            note
+                        } else {
+                            format!("{note}\n{}", outcome.committed.join("\n"))
+                        };
+                        if let Some(destination) = outcome.redirect.clone() {
+                            self.redirects.push((id, destination, None));
+                        } else if status == WorkStepStatus::Failed {
+                            self.notice(&page_failure_notice(
+                                outcome.note.as_deref().unwrap_or("the page gave nothing"),
+                                measurements.and_then(|m| m.outcome),
                             ));
                         }
                         // Facts from the person's own pages never ride a search query.
@@ -1832,9 +2045,14 @@ impl Driver {
                             error,
                         });
                         let note = browse_error_note(error);
-                        self.notice(&format!(
-                            "A page read failed: {note}. Use another listed source or finish with what the canvas has."
-                        ));
+                        let stage = match error {
+                            WorkError::Invalid | WorkError::Capacity => {
+                                WorkPageFailureStageV1::Admission
+                            }
+                            _ => WorkPageFailureStageV1::Runtime,
+                        };
+                        let outcome = WorkPageOutcomeV1::Refused { stage };
+                        self.notice(&page_failure_notice(note, Some(outcome)));
                         self.settle(
                             id,
                             WorkStepStatus::Failed,
@@ -1842,7 +2060,10 @@ impl Driver {
                             vec![],
                             None,
                             Some(note.into()),
-                            None,
+                            Some(WorkStepMeasurementsV1 {
+                                outcome: Some(outcome),
+                                ..Default::default()
+                            }),
                         )
                         .await?;
                     }
@@ -1896,8 +2117,9 @@ impl Driver {
         );
         let id = self.begin(step, vec![], None).await?;
         let since = self.wait();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(ASK_POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let state = self.probe.runtime_projection().await?;
             let execution = state
                 .executions
@@ -2057,7 +2279,10 @@ impl Driver {
     ) -> crate::work_sites::SiteSession {
         use crate::work_sites::*;
         match entry {
-            Entry::Session(session) => session,
+            Entry::Session(session) => {
+                self.probe.screenshot_choices().grant_site(site);
+                session
+            }
             Entry::Private(PrivateBecause::Public) => SiteSession::Private,
             Entry::Private(because) => {
                 self.report(WorkAgentDiagnostic::PrivatePage { because });
@@ -2083,6 +2308,7 @@ impl Driver {
     /// whole from the last few runs, plus older ones the request names; a
     /// question the last run stopped on is answered by this request.
     async fn inherit(&mut self, projection: &WorkRuntimeProjection, current: WorkExecutionId) {
+        self.inherit_private(projection);
         let earlier: Vec<&WorkExecutionFact> = projection
             .executions
             .iter()
@@ -2150,6 +2376,16 @@ impl Driver {
             thread.pop();
         }
         self.thread = thread.into_iter().rev().take(16).rev().collect();
+    }
+    fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
+        for text in projection_private_artifact_texts(projection) {
+            if !self.private.contains(&text) {
+                self.private.push(text.clone());
+                // Derived objects may combine accounts: no destination receives
+                // implicit permission to reuse their private text.
+                self.private_sites.push((String::new(), text));
+            }
+        }
     }
     fn remember(&mut self, record: &WorkProviderSearchRecordV1) {
         let preferred = record
@@ -2271,7 +2507,20 @@ impl WorkPartDriver {
             views: Vec::new(),
             typing_held: Vec::new(),
             typing_allowed: Vec::new(),
+            redirects: Vec::new(),
         })
+    }
+    pub(crate) fn inherit_private(&mut self, projection: &WorkRuntimeProjection) {
+        self.0.inherit_private(projection);
+    }
+    /// Private block reads join the same destination/query boundary as private pages.
+    pub(crate) fn inherit_private_texts(&mut self, texts: &[String]) {
+        for text in texts {
+            if !self.0.private.contains(text) {
+                self.0.private.push(text.clone());
+                self.0.private_sites.push((String::new(), text.clone()));
+            }
+        }
     }
     /// Runs searches, page reads and tasks, and file and command steps. A
     /// terminal status means the run cannot go on (stopped, lost outcome).
@@ -2333,6 +2582,14 @@ impl WorkPartDriver {
     pub(crate) fn view_pages(&mut self, pages: Vec<String>) {
         self.0.views = pages;
     }
+    /// The person's request covers saving on this site: no question first.
+    pub(crate) fn allow_saves(&mut self, site: &str) {
+        self.0.sites.allow_edits(site);
+    }
+    /// Whether the person let this run work on the site as them.
+    pub(crate) fn works_as_person(&self, site: &str) -> bool {
+        self.0.sites.works_as_person(site)
+    }
     pub(crate) fn hold_typing(&mut self, sites: Vec<String>) {
         self.0.typing_held = sites;
     }
@@ -2343,6 +2600,11 @@ impl WorkPartDriver {
     /// Records the run's entry answer for one of this driver's sites.
     pub(crate) async fn enter(&mut self, site: &str, answer: crate::work_sites::EntryAnswer) {
         self.0.answer_entry(site, answer).await;
+    }
+    /// Page reads redirected since this was last asked: each step, where
+    /// its first load was sent, and the step that read it there, if any.
+    pub(crate) fn take_redirects(&mut self) -> Vec<(WorkStepId, String, Option<WorkStepId>)> {
+        std::mem::take(&mut self.0.redirects)
     }
     /// What the driver refused or learned since it was last asked, in
     /// closed words.
@@ -2559,11 +2821,13 @@ fn reuses_completed_read(request: &WorkStepKindV1, step: &WorkStepFact) -> bool 
                 url,
                 collection,
                 goal: None,
+                ..
             },
             WorkStepKindV1::Read {
                 url: previous_url,
                 collection: previous,
                 goal: None,
+                ..
             },
         ) if url == previous_url => match (collection, previous) {
             (None, None) => true,
@@ -2611,6 +2875,7 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
         WorkStepKindV1::Ask { .. } => "ask",
         WorkStepKindV1::Confirm { confirm: _ } => "confirm",
         WorkStepKindV1::Call { .. } => "call",
+        WorkStepKindV1::EditBlock { .. } => "edit_block",
         WorkStepKindV1::Steer { .. } => "person",
         WorkStepKindV1::List { .. } => "list",
         WorkStepKindV1::ReadFile { .. } => "read_file",
@@ -2627,11 +2892,23 @@ fn step_kind_label(kind: &WorkStepKindV1) -> &'static str {
 /// Why a page could not be opened at all, in the person's words.
 fn browse_error_note(error: WorkError) -> &'static str {
     match error {
-        WorkError::Capacity => "Too many pages were already open",
+        WorkError::Capacity => "The page task exceeded an input or resource limit",
+        WorkError::Invalid => "Work could not validate the page request",
         WorkError::Unavailable | WorkError::Shutdown => "The browser was not available",
         WorkError::ProfileUnavailable => "The browsing profile was not available",
         _ => "The page could not be opened",
     }
+}
+
+fn page_failure_notice(note: &str, outcome: Option<WorkPageOutcomeV1>) -> String {
+    let recovery = match outcome {
+        Some(WorkPageOutcomeV1::NeedsSignIn) => "The person needs to sign in on the requested site. Keep the sign-in need visible and wait for that handoff; do not retry blindly.",
+        Some(WorkPageOutcomeV1::NeedsCheck) => "The person needs to pass the check on the requested site. Keep that need visible and wait for the handoff; do not try other URLs on the site.",
+        Some(WorkPageOutcomeV1::NeedsInteraction) => "The page task needs manual interaction. State what could not be completed automatically; this outcome does not establish a sign-in or human-check wall.",
+        Some(WorkPageOutcomeV1::Refused { .. }) => "Work could not execute this page step. Report the recorded failure accurately; do not blame the site or claim the task completed.",
+        _ => "Keep the unfinished assignment explicit. Continue independent work where possible, without claiming this task completed.",
+    };
+    format!("{recovery} Never substitute help-center or documentation pages for the person's account content. Page result: {note}")
 }
 
 fn step_status(status: WorkAttemptStatus) -> WorkStepStatus {
@@ -2721,6 +2998,28 @@ fn sources_note(count: usize) -> String {
         n => format!("Found {n} sources"),
     }
 }
+/// A page step's note without the lines that say what the page task
+/// committed ("Saved on the page: Add task"), and those lines.
+pub(crate) fn split_ledger(note: &str) -> (&str, Vec<&str>) {
+    let is_ledger = |line: &str| {
+        ["Saved", "Sent", "Deleted", "Purchased"]
+            .iter()
+            .any(|verb| {
+                line.strip_prefix(verb)
+                    .is_some_and(|rest| rest.starts_with(" on the page"))
+            })
+    };
+    let (mut head, mut lines) = (note, Vec::new());
+    while let Some((rest, last)) = head.rsplit_once('\n') {
+        if !is_ledger(last) {
+            break;
+        }
+        lines.push(last);
+        head = rest;
+    }
+    lines.reverse();
+    (head, lines)
+}
 fn read_note(artifacts: &[WorkArtifactV1]) -> String {
     if let [artifact] = artifacts {
         match &artifact.data {
@@ -2748,6 +3047,123 @@ fn publish_note(artifacts: &[WorkArtifactV1]) -> String {
     )
 }
 
+pub(crate) fn measurements_resolved_sign_in(measurements: Option<WorkStepMeasurementsV1>) -> bool {
+    measurements
+        .and_then(|m| m.resolved_handoff)
+        .is_some_and(|kind| kind.includes(WorkPageHandoffKindV1::SignIn))
+}
+
+pub(crate) fn measurements_private_page(measurements: Option<WorkStepMeasurementsV1>) -> bool {
+    measurements_resolved_sign_in(measurements)
+        || measurements
+            .is_some_and(|m| m.image_disclosure == Some(WorkPageImageDisclosureV1::SiteConsent))
+}
+
+pub(crate) fn private_page_step(step: &WorkStepFact) -> bool {
+    matches!(step.kind, WorkStepKindV1::Read { .. })
+        && (step.account.is_some() || measurements_private_page(step.measurements))
+}
+
+/// Retained summaries may include personal source facts too. Conservatively
+/// protect the execution's objects once any page acquired personal provenance.
+pub(crate) fn private_artifact_texts<'a>(
+    executions: impl IntoIterator<Item = (&'a [WorkStepFact], &'a [WorkArtifactV1])>,
+) -> Vec<String> {
+    let executions: Vec<_> = executions.into_iter().collect();
+    if !executions
+        .iter()
+        .any(|(steps, _)| steps.iter().any(private_page_step))
+    {
+        return Vec::new();
+    }
+    // A follow-up can summarize an earlier private read without opening a page.
+    executions
+        .iter()
+        .flat_map(|(_, artifacts)| artifacts.iter())
+        .map(|artifact| artifact.data.plain_text())
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+pub(crate) fn has_private_blocks(projection: &WorkRuntimeProjection) -> bool {
+    use zephium_core::work::context::{WorkContextItemKind, WorkContextVisibility};
+    projection.executions.iter().any(|execution| {
+        execution.spec.context.as_ref().is_some_and(|context| {
+            context.blocks
+                || context.items.iter().any(|item| {
+                    item.kind == WorkContextItemKind::Object
+                        && item.visibility == WorkContextVisibility::Private
+                })
+        })
+    })
+}
+
+pub(crate) fn projection_private_artifact_texts(projection: &WorkRuntimeProjection) -> Vec<String> {
+    if has_private_blocks(projection) {
+        projection
+            .executions
+            .iter()
+            .flat_map(|e| &e.artifacts)
+            .map(|a| a.data.plain_text())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        private_artifact_texts(
+            projection
+                .executions
+                .iter()
+                .map(|e| (e.steps.as_slice(), e.artifacts.as_slice())),
+        )
+    }
+}
+
+/// Unknown legacy/unfinished rows cannot establish order within an execution.
+pub(crate) fn read_settlement_order(step: &WorkStepFact) -> (u8, u64) {
+    match step.measurements.and_then(|m| m.settled_revision) {
+        Some(revision) => (1, revision.get()),
+        // Unsequenced cleanup/waits may be newer than every settled page.
+        None if matches!(
+            step.status,
+            WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown | WorkStepStatus::Cancelled
+        ) =>
+        {
+            (2, 0)
+        }
+        None => (0, 0),
+    }
+}
+
+pub(crate) fn read_handoff_resolves(
+    prior: &WorkStepFact,
+    next: &WorkStepFact,
+    kind: WorkPageHandoffKindV1,
+) -> bool {
+    let (WorkStepKindV1::Read { url: before, .. }, WorkStepKindV1::Read { url: after, .. }) =
+        (&prior.kind, &next.kind)
+    else {
+        return false;
+    };
+    let target = |value: &str| {
+        url::Url::parse(value).ok().map(|mut url| {
+            url.set_fragment(None);
+            url
+        })
+    };
+    prior
+        .measurements
+        .and_then(|m| m.settled_revision)
+        .zip(next.measurements.and_then(|m| m.settled_revision))
+        .is_some_and(|(before, after)| before < after)
+        && prior.account == next.account
+        && target(before)
+            .zip(target(after))
+            .is_some_and(|(before, after)| before == after)
+        && next
+            .measurements
+            .and_then(|m| m.resolved_handoff)
+            .is_some_and(|receipt| receipt.includes(kind))
+}
+
 /// Search text may not repeat a private context body: a 24-character window
 /// of the query found inside any private body refuses the whole turn.
 pub fn query_discloses(query: &str, private: &[String]) -> bool {
@@ -2765,8 +3181,8 @@ pub fn query_discloses(query: &str, private: &[String]) -> bool {
 
 /// Bounded fan-out without a futures dependency: polls every pending future
 /// each wake and returns once all have settled.
-async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>) -> Vec<T> {
-    let mut results: Vec<Option<T>> = futures.iter().map(|_| None).collect();
+async fn join_all<F: Future + ?Sized>(mut futures: Vec<Pin<Box<F>>>) -> Vec<F::Output> {
+    let mut results: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
     std::future::poll_fn(|cx: &mut Context<'_>| {
         let mut pending = false;
         for (index, future) in futures.iter_mut().enumerate() {
@@ -2845,6 +3261,41 @@ fn execution_summary(execution: &WorkExecutionFact) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ledger_rides_a_page_note_and_comes_back_out() {
+        let note = "Read the page\nSaved on the page: Add task\nSent on the page: Send";
+        assert_eq!(
+            super::split_ledger(note),
+            (
+                "Read the page",
+                vec!["Saved on the page: Add task", "Sent on the page: Send"]
+            )
+        );
+        for plain in [
+            "The page took too long",
+            "Placed 3 cited records\nOne more line",
+        ] {
+            assert_eq!(super::split_ledger(plain), (plain, vec![]));
+        }
+    }
+
+    #[test]
+    fn legacy_local_steps_withhold_recognized_secrets_before_admission() {
+        let secret = "sk-fixture-never-a-real-credential-value";
+        for value in [
+            serde_json::json!({"kind":"read_file","path":format!("/project/{secret}")}),
+            serde_json::json!({"kind":"write_file","path":"/project/code.rs","content":secret}),
+            serde_json::json!({"kind":"edit_file","path":"/project/code.rs","old":"before","new":"after","replacements":[{"old":secret,"new":"after"}]}),
+            serde_json::json!({"kind":"search_files","path":"/project","query":secret}),
+            serde_json::json!({"kind":"run_command","cwd":"/project","command":format!("echo {secret}")}),
+        ] {
+            let kind: WorkStepKindV1 = serde_json::from_value(value).unwrap();
+            assert!(!local_step_is_disclosable(&kind));
+        }
+        let safe: WorkStepKindV1 = serde_json::from_value(serde_json::json!({"kind":"write_file","path":"/project/code.rs","content":"let authorization = env::var(\"API_KEY\");"})).unwrap();
+        assert!(local_step_is_disclosable(&safe));
+    }
+
     use super::*;
     #[test]
     fn repeated_read_reuses_results_but_failed_or_changed_requests_can_run() {
@@ -2855,11 +3306,13 @@ mod tests {
         }))
         .unwrap();
         let request = WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://shop.example.test/catalog?q=sets".into(),
             collection: Some(collection),
             goal: None,
         };
         let mut step = WorkStepFact {
+            model_fault: None,
             part: None,
             id: 1.into(),
             turn: 1,
@@ -2999,6 +3452,8 @@ mod tests {
                                     name: "Lisbon shortlist".into(),
                                     descriptor: None,
                                     homepage: None,
+                                    record_media: None,
+                                    media_attempted: false,
                                     image_candidates: vec![],
                                 }],
                                 items: vec![],

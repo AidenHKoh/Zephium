@@ -28,7 +28,10 @@ mod cdp;
 mod content_filter;
 mod find;
 pub(crate) use find::{find, FindReport, FindSession};
+mod automatic_pip;
 mod fullscreen;
+pub(crate) use automatic_pip::automatic_pip;
+mod fullscreen_transition;
 pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state};
 pub use fullscreen::{install_fullscreen_observer, FullscreenObserver};
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -36,10 +39,14 @@ mod cookie_storage_diagnostic;
 #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
 pub(crate) use cookie_storage_diagnostic::shutdown_admission as diagnose_shutdown_admission;
 #[cfg(feature = "agentic-browser")]
+pub(crate) mod browse_reader;
+#[cfg(feature = "agentic-browser")]
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
 pub(crate) mod extensions;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod page_glow;
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -57,9 +64,10 @@ mod paint;
 #[allow(dead_code)]
 mod semantic_screenshot;
 mod stage;
+pub use stage::{forget_window_caption_offset, set_window_caption_offset};
 #[cfg(feature = "agentic-browser")]
 mod work_rendering;
-pub(crate) use native_paths::webview2_user_data_path;
+pub(crate) use native_paths::{webview2_download_path, webview2_user_data_path};
 #[cfg(feature = "agentic-browser")]
 pub use work_rendering::{install_work_rendering_backing, remove_work_rendering_backing};
 #[cfg(feature = "agentic-browser")]
@@ -135,11 +143,12 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
-    BrowserProcessExitedEventHandler, ClearBrowsingDataCompletedHandler,
-    ClientCertificateRequestedEventHandler, HistoryChangedEventHandler,
-    LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
-    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
-    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
+    BrowserProcessExitedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
+    ClearBrowsingDataCompletedHandler, ClientCertificateRequestedEventHandler,
+    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
+    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
+    ProcessFailedEventHandler, ServerCertificateErrorDetectedEventHandler,
+    SourceChangedEventHandler,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
@@ -148,7 +157,7 @@ use windows::Win32::{
     Foundation::{HANDLE, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
 };
-use windows_core::{IUnknown, Interface, PWSTR};
+use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
@@ -247,7 +256,25 @@ pub fn configure(
     webview: &wry::WebView,
     _radius: f64,
     expected_in_private: bool,
+    expected_user_data_folder: &Path,
+) -> windows_core::Result<SecurityPolicy> {
+    configure_with_credential_denied(
+        webview,
+        _radius,
+        expected_in_private,
+        expected_user_data_folder,
+        None,
+    )
+}
+
+/// Owned Work views can remove public lineage when credential UI is cancelled.
+/// The optional callback carries no native challenge or credential data.
+fn configure_with_credential_denied(
+    webview: &wry::WebView,
+    _radius: f64,
+    expected_in_private: bool,
     _expected_user_data_folder: &Path,
+    credential_denied: Option<Rc<dyn Fn()>>,
 ) -> windows_core::Result<SecurityPolicy> {
     let controller = webview.controller();
     let core = unsafe { controller.CoreWebView2()? };
@@ -291,7 +318,11 @@ pub fn configure(
     // do not cover them. Until Zephium has an origin-labelled broker, cancel
     // both surfaces and mark certificate requests handled so WebView2 cannot
     // fall back to ambient OS credentials/UI.
-    let basic_auth = BasicAuthenticationRequestedEventHandler::create(Box::new(|_, args| {
+    let basic_credential_denied = credential_denied.clone();
+    let basic_auth = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
+        if let Some(notify) = basic_credential_denied.as_ref() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
+        }
         if let Some(args) = args {
             unsafe { args.SetCancel(true)? };
         }
@@ -301,15 +332,19 @@ pub fn configure(
     unsafe { core10.add_BasicAuthenticationRequested(&basic_auth, &mut basic_auth_token)? };
     policy.basic_auth_token = Some(basic_auth_token);
 
-    let client_certificate = ClientCertificateRequestedEventHandler::create(Box::new(|_, args| {
-        if let Some(args) = args {
-            unsafe {
-                args.SetCancel(true)?;
-                args.SetHandled(true)?;
+    let client_certificate =
+        ClientCertificateRequestedEventHandler::create(Box::new(move |_, args| {
+            if let Some(notify) = credential_denied.as_ref() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
             }
-        }
-        Ok(())
-    }));
+            if let Some(args) = args {
+                unsafe {
+                    args.SetCancel(true)?;
+                    args.SetHandled(true)?;
+                }
+            }
+            Ok(())
+        }));
     let mut client_certificate_token = 0_i64;
     unsafe {
         core5.add_ClientCertificateRequested(&client_certificate, &mut client_certificate_token)
@@ -436,7 +471,7 @@ impl SecurityPolicy {
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str) + 'static,
+        request: impl Fn(&str, bool) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -444,12 +479,14 @@ impl SecurityPolicy {
             };
             unsafe {
                 args.SetCancel(true)?;
+                let mut user_gesture = windows_core::BOOL::default();
+                args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri);
+                    request(&uri, user_gesture.as_bool());
                 }
             }
             Ok(())
@@ -726,6 +763,68 @@ impl Drop for NavigationObserver {
         let _ = unsafe { self.core.remove_SourceChanged(self.source_token) };
         let _ = unsafe { self.core.remove_HistoryChanged(self.history_token) };
     }
+}
+
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    let state = (view.can_go_back().ok()?, view.can_go_forward().ok()?);
+    if state.0 && !state.1 {
+        prune_blank_bootstrap(&view.webview());
+    }
+    Some(state)
+}
+
+thread_local! {
+    static BOOTSTRAP_CHECKED: RefCell<std::collections::HashSet<usize>> = RefCell::default();
+}
+
+/// A warm spare is adopted from an about:blank load that stays in WebView2's
+/// list, so its own answer offers a "back" to nothing. Once a real page stands
+/// in front of it the entry is dropped; HistoryChanged then restates the
+/// state. Each view is asked once.
+fn prune_blank_bootstrap(core: &ICoreWebView2) {
+    let key = core.as_raw() as usize;
+    if !BOOTSTRAP_CHECKED.with(|checked| checked.borrow_mut().insert(key)) {
+        return;
+    }
+    let reset = core.clone();
+    let completion =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            if result.is_ok() && blank_bootstrap_only(&response) {
+                let reset_done =
+                    CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+                // SAFETY: exact STA-owned core and immutable argument buffers.
+                let _ = unsafe {
+                    reset.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.resetNavigationHistory"),
+                        &HSTRING::from("{}"),
+                        &reset_done,
+                    )
+                };
+            }
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    let _ = unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &completion,
+        )
+    };
+}
+
+/// Whether the history is exactly the bootstrap blank page and the page in
+/// front of it.
+fn blank_bootstrap_only(response: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return false;
+    };
+    let entries = value.get("entries").and_then(|entries| entries.as_array());
+    value.get("currentIndex").and_then(|index| index.as_u64()) == Some(1)
+        && entries.is_some_and(|entries| {
+            entries.len() == 2
+                && entries[0].get("url").and_then(|url| url.as_str()) == Some("about:blank")
+        })
 }
 
 pub fn current_url(view: &wry::WebView) -> Option<String> {
@@ -2140,5 +2239,34 @@ mod process_exit_tests {
         proof.record(event);
         proof.record(event);
         assert_eq!(runs.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_history_tests {
+    use super::blank_bootstrap_only;
+
+    #[test]
+    fn only_the_blank_bootstrap_behind_one_page_is_pruned() {
+        let history = |current: u32, urls: &[&str]| {
+            let entries: Vec<_> = urls
+                .iter()
+                .map(|url| serde_json::json!({ "url": url }))
+                .collect();
+            serde_json::json!({ "currentIndex": current, "entries": entries }).to_string()
+        };
+        assert!(blank_bootstrap_only(&history(
+            1,
+            &["about:blank", "https://a.test/"]
+        )));
+        assert!(!blank_bootstrap_only(&history(
+            2,
+            &["about:blank", "https://a.test/", "https://b.test/"]
+        )));
+        assert!(!blank_bootstrap_only(&history(
+            1,
+            &["https://a.test/", "https://b.test/"]
+        )));
+        assert!(!blank_bootstrap_only("not json"));
     }
 }

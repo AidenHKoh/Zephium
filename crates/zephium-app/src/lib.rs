@@ -20,7 +20,9 @@ pub(crate) use diagnostic;
 
 mod actor;
 mod api;
+mod lookup;
 mod onboarding;
+mod reply;
 mod shell;
 mod store_reads;
 #[cfg(feature = "work-execution")]
@@ -75,6 +77,7 @@ pub use api::{
     SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
 };
+pub use lookup::{NoteMatch, TaskMatch};
 pub use onboarding::{finish_onboarding, onboarding_due};
 #[cfg(feature = "work-planning")]
 pub mod work_context;
@@ -88,8 +91,12 @@ mod work_authoring_intent;
 pub use work_authoring::{WorkDocumentProjection, WorkDocumentRequest, WorkDocumentSubmission};
 pub use work_authoring_intent::{WorkIntent, WorkUserEdit};
 
+#[cfg(feature = "work-planning")]
+pub mod voice;
 #[cfg(feature = "work-runtime")]
 pub mod work_agent;
+#[cfg(feature = "work-runtime")]
+mod work_changes;
 #[cfg(feature = "work-runtime")]
 pub mod work_commands;
 #[cfg(feature = "work-runtime")]
@@ -112,6 +119,8 @@ pub mod work_personal;
 pub mod work_planning;
 #[cfg(feature = "work-runtime")]
 pub mod work_runtime;
+#[cfg(feature = "work-planning")]
+pub mod work_screenshots;
 #[cfg(feature = "work-runtime")]
 mod work_search;
 #[cfg(feature = "work-runtime")]
@@ -122,6 +131,6 @@ mod work_synthesis;
 pub mod work_trace;
 pub use api::{
     BookmarkCompletion, FaviconProber, FaviconProberAttachment, HistoryCompletion,
-    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion, TabAction,
-    TimeCompletion,
+    ImportCompletion, NoteCompletion, NotesAttachment, ResourceCompletion, SpaceCommand, TabAction,
+    TabCompletion, TimeCompletion,
 };

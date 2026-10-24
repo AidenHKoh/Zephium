@@ -12,7 +12,6 @@ use crate::work_runtime::{WorkAttemptProbe, WorkCancelCause};
 /// How long a question or a proposed change waits for the person before the
 /// run stops on it; the next request answers it.
 pub(crate) const WAIT_PATIENCE: Duration = Duration::from_secs(30 * 60);
-const POLL: Duration = Duration::from_millis(500);
 const MAX_UNREADABLE_POLLS: u8 = 12;
 pub(crate) const MAX_SOURCES: usize = 160;
 /// The address question's option words; the frame sends them back as given.
@@ -25,6 +24,7 @@ pub(crate) struct LeadSource {
     pub key: String,
     pub link: WorkEvidenceLink,
     pub url: Option<String>,
+    pub preview: Option<WorkEvidencePreviewV1>,
 }
 
 #[derive(Clone, Default)]
@@ -63,6 +63,15 @@ struct State {
     /// Sites the person named in the request or while it ran, and sites they
     /// let the run open addresses on.
     trusted_sites: Vec<String>,
+    /// The person's own words: the request and what they added while it ran.
+    said: String,
+    /// What the person asked the run to create or change in their own
+    /// apps: the sites they named, or every site they let it work in when
+    /// they named none ("create the issue").
+    asked_saves: Option<Vec<String>>,
+    /// How the person let the run enter a site when the way question was
+    /// asked: the page tasks on it take the answer instead of asking.
+    entries: Vec<(String, crate::work_sites::EntryAnswer)>,
     waits: usize,
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
@@ -70,6 +79,10 @@ struct State {
 }
 
 pub(crate) struct LeadRun {
+    pub records: Mutex<super::records::Records>,
+    pub blocks: super::blocks::BlockScope,
+    /// One native choose-folder handoff per run; siblings share its outcome.
+    pub folder_picker: tokio::sync::Mutex<Option<bool>>,
     pub probe: WorkAttemptProbe,
     pub handle: crate::Handle,
     pub profile: ProfileId,
@@ -83,6 +96,12 @@ pub(crate) struct LeadRun {
     /// Connections the person chose for this run where they were asked for
     /// something broader (their day's sources): no second question.
     accepted: Mutex<Vec<String>>,
+    /// Held while a part is routed, so parts of one service ask once.
+    pub routing: tokio::sync::Mutex<()>,
+    /// A page waited its whole turn for the browser and was never seated:
+    /// the run's page lane will not take another, so later pages fail at
+    /// once instead of each waiting as long again.
+    browser_down: std::sync::atomic::AtomicBool,
     diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
 }
 
@@ -113,6 +132,9 @@ impl LeadRun {
         diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
     ) -> Self {
         Self {
+            records: Mutex::new(super::records::Records::default()),
+            blocks: super::blocks::BlockScope::default(),
+            folder_picker: tokio::sync::Mutex::new(None),
             probe,
             handle,
             profile,
@@ -136,14 +158,26 @@ impl LeadRun {
                 allowed: Vec::new(),
                 private: false,
                 trusted_sites: Vec::new(),
+                said: String::new(),
+                asked_saves: None,
+                entries: Vec::new(),
                 waits: 0,
                 waiting_since: None,
                 stopped: None,
                 unreadable: 0,
             }),
             accepted: Mutex::new(Vec::new()),
+            routing: tokio::sync::Mutex::new(()),
+            browser_down: std::sync::atomic::AtomicBool::new(false),
             diagnostic,
         }
+    }
+    pub(crate) fn browser_down(&self) -> bool {
+        self.browser_down.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn set_browser_down(&self) {
+        self.browser_down
+            .store(true, std::sync::atomic::Ordering::Release);
     }
     /// The person chose this connection for the run, by the answer that
     /// uses it ("Use Slack").
@@ -162,6 +196,18 @@ impl LeadRun {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|known| known == connection)
+    }
+    pub(crate) fn set_entry(&self, site: &str, answer: crate::work_sites::EntryAnswer) {
+        let mut state = self.state();
+        state.entries.retain(|(known, _)| known != site);
+        state.entries.push((site.to_owned(), answer));
+    }
+    pub(crate) fn entry_answer(&self, site: &str) -> Option<crate::work_sites::EntryAnswer> {
+        self.state()
+            .entries
+            .iter()
+            .find(|(known, _)| known == site)
+            .map(|(_, answer)| *answer)
     }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state
@@ -308,6 +354,7 @@ impl LeadRun {
         part: Option<WorkPartId>,
     ) -> WorkStepFact {
         WorkStepFact {
+            model_fault: None,
             id: WorkStepId::generate(),
             turn: self.turn(),
             kind,
@@ -388,7 +435,7 @@ impl LeadRun {
             .map(|_| ())
     }
     pub(crate) async fn input(&self, input: WorkInputFactV1) {
-        if input.kind != WorkInputKindV1::Skill {
+        if reads_private(input.kind) {
             self.mark_private();
         }
         if let Err(error) = self
@@ -451,8 +498,9 @@ impl LeadRun {
         let id = self.begin(step, vec![]).await?;
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let execution = self.execution().await?;
             let asked = execution
                 .steps
@@ -500,8 +548,9 @@ impl LeadRun {
         let id = self.begin(step, vec![]).await?;
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
             let execution = self.execution().await?;
             let decision =
                 execution
@@ -548,6 +597,7 @@ impl LeadRun {
         self.activity(WorkActivityV1::WaitingForHuman);
         let waiting = self.wait();
         let since = Instant::now();
+        let mut changes = self.probe.changes();
         loop {
             let execution = self.execution().await?;
             let decision = execution
@@ -568,7 +618,7 @@ impl LeadRun {
             if self.cancelled().await {
                 return Ok(None);
             }
-            tokio::time::sleep(POLL).await;
+            changes.next(crate::work_changes::FALLBACK).await;
         }
     }
     /// Why the run stopped, in the person's words.
@@ -596,9 +646,29 @@ impl LeadRun {
             key: key.clone(),
             link,
             url: url.map(str::to_owned),
+            preview: None,
         });
         key
     }
+    pub(crate) fn cite_preview(&self, preview: &WorkEvidencePreviewV1, url: &str) -> String {
+        let key = self.cite(preview.link.clone(), "", Some(url));
+        if preview.text.len() <= 8192 && !preview.truncated {
+            if let Some(source) = self.state().sources.iter_mut().find(|s| s.key == key) {
+                source.preview = Some(preview.clone());
+            }
+        }
+        key
+    }
+
+    pub(crate) fn source_previews(&self) -> Vec<LeadSource> {
+        self.state()
+            .sources
+            .iter()
+            .filter(|s| s.preview.is_some())
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn source(&self, key: &str) -> Option<LeadSource> {
         self.state()
             .sources
@@ -656,6 +726,29 @@ impl LeadRun {
     /// what they add while it runs, never attached text, which can quote
     /// anyone's links.
     pub(crate) fn trust_sites_in(&self, text: &str) {
+        {
+            let mut state = self.state();
+            state.said.push_str(text);
+            state.said.push('\n');
+        }
+        let named = crate::work_sites::named_services(text);
+        if asks_to_save(text) {
+            let mut state = self.state();
+            let asked = state.asked_saves.get_or_insert_with(Vec::new);
+            for site in &named {
+                if !asked.contains(site) {
+                    asked.push(site.clone());
+                }
+            }
+        }
+        self.trust_named(text);
+    }
+
+    /// Trusts the sites a text names, without letting it ask to save.
+    pub(crate) fn trust_named(&self, text: &str) {
+        for site in crate::work_sites::named_services(text) {
+            self.trust_site(&site);
+        }
         for word in
             text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '(' | ')'))
         {
@@ -667,6 +760,20 @@ impl LeadRun {
                 }
             }
         }
+    }
+
+    /// Whether the person's own words ask the run to create or change
+    /// something on this site, which they let it work in.
+    pub(crate) fn asked_to_save(&self, site: &str) -> bool {
+        self.state()
+            .asked_saves
+            .as_ref()
+            .is_some_and(|sites| sites.is_empty() || sites.iter().any(|known| known == site))
+    }
+
+    /// The person's own words in this run, never attached text.
+    pub(crate) fn said(&self) -> String {
+        self.state().said.clone()
     }
 
     /// Whether the person named this site or let the run work on it.
@@ -740,6 +847,56 @@ impl LeadRun {
     }
 }
 
+/// Whether an input brings in the person's own data. Skills are Work's own
+/// guidance and memory is what the person told Work to use; neither is
+/// content a page could have planted, so neither holds the run's addresses.
+fn reads_private(kind: WorkInputKindV1) -> bool {
+    !matches!(
+        kind,
+        WorkInputKindV1::Skill | WorkInputKindV1::Memory | WorkInputKindV1::Work
+    )
+}
+
+/// Whether a lead tool answers with the person's own data. Remembering and
+/// recalling memory do not.
+pub(crate) fn tool_reads_private(name: &str) -> bool {
+    !matches!(name, "remember" | "recall")
+}
+
+/// Whether a request asks to create or change something: "create an
+/// issue", "add a task", "update the doc". Sending, buying and deleting are
+/// never covered by it; each waits for the person.
+fn asks_to_save(text: &str) -> bool {
+    const VERBS: &[&str] = &[
+        "create",
+        "add",
+        "make",
+        "save",
+        "update",
+        "edit",
+        "rename",
+        "move",
+        "schedule",
+        "assign",
+        "label",
+        "complete",
+        "check off",
+        "mark",
+        "write",
+        "draft",
+        "log",
+        "note",
+        "put",
+        "set",
+    ];
+    let text = format!(
+        " {} ",
+        text.to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric(), " ")
+    );
+    VERBS.iter().any(|verb| text.contains(&format!(" {verb} ")))
+}
+
 /// The registrable site a word of the person's names: a link, or a bare
 /// domain such as "airbnb.com" or "www.lego.com".
 fn named_site(word: &str) -> Option<String> {
@@ -768,4 +925,37 @@ fn home_page(url: &str, site: &str) -> bool {
         && parsed.password().is_none()
         && parsed.port().is_none()
         && (host == site || host.strip_prefix("www.") == Some(site))
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::{asks_to_save, reads_private, tool_reads_private};
+    use zephium_core::work::parts::WorkInputKindV1;
+
+    #[test]
+    fn memory_and_skills_leave_a_run_free_to_open_and_type_and_the_persons_data_does_not() {
+        assert!(!reads_private(WorkInputKindV1::Memory));
+        assert!(!reads_private(WorkInputKindV1::Skill));
+        assert!(reads_private(WorkInputKindV1::Files));
+        assert!(reads_private(WorkInputKindV1::History));
+        assert!(reads_private(WorkInputKindV1::Connection));
+        assert!(!tool_reads_private("recall"));
+        assert!(!tool_reads_private("remember"));
+        assert!(tool_reads_private("search_history"));
+        assert!(tool_reads_private("read_note"));
+    }
+
+    #[test]
+    fn a_request_to_create_or_change_covers_saving_and_a_question_does_not() {
+        assert!(asks_to_save(
+            "Create an issue in Linear about \"Testing the agentic browsing\""
+        ));
+        assert!(asks_to_save(
+            "Okay, can you please continue and actually create the issue?"
+        ));
+        assert!(asks_to_save("add a task to Todoist: call the bank"));
+        assert!(!asks_to_save("Check my Linear as well"));
+        assert!(!asks_to_save("Send Anna a message on Slack"));
+        assert!(!asks_to_save("Delete the old tasks"));
+    }
 }

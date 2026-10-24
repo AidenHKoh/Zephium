@@ -159,9 +159,10 @@ impl WorkCoordinator {
                 1
             },
         );
+        let mut changes = self.primary.changes();
         let cancelled = async {
             loop {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                changes.next(crate::work_changes::FALLBACK).await;
                 if self.primary.cancellation_requested().await.unwrap_or(true) {
                     break;
                 }

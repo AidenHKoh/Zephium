@@ -4,6 +4,8 @@ mod agent_context;
 mod agent_history;
 #[cfg(feature = "agentic-browser-qa")]
 pub(crate) mod agentic_liveness_probe;
+#[cfg(feature = "agentic-browser-qa")]
+pub(crate) mod profile_seed_probe;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_history::AgentHistoryBackTicket;
 #[cfg(all(
@@ -26,8 +28,18 @@ mod agentic_semantic_probe;
 #[cfg(feature = "native-agentic-foreground-probe")]
 pub(crate) use agentic_foreground_probe::ForegroundRenderingLease;
 mod apps;
+mod automatic_pip;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod browse_reader;
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod page_glow;
+#[cfg(feature = "page-reader-probe")]
+mod page_reader_probe;
+#[cfg(feature = "page-reader-probe")]
+pub(crate) use page_reader_probe::run as run_page_reader_probe;
 pub(crate) mod capture;
 pub(crate) mod fullscreen;
+pub(crate) use automatic_pip::automatic_pip;
 pub(crate) use fullscreen::{exit as exit_fullscreen, state as fullscreen_state};
 mod content_filter;
 mod credentials;
@@ -59,6 +71,7 @@ pub(crate) use work_human_presentation::WorkHumanPresentation;
 pub(crate) use work_observation_presentation::retained_page_hidden;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use work_observation_presentation::{PresentationState, WorkObservationPresentation};
+mod pointer_cover;
 mod stage;
 mod webext_action_icon;
 
@@ -85,8 +98,9 @@ use std::{cell::Cell, rc::Rc};
 
 #[cfg(feature = "agentic-browser")]
 pub(crate) use agent_context::{
-    build_owned_agent_view, build_owned_work_view, AgentNavigationCommit, AgentNavigationTerminal,
-    AgentOwnedView, AgentOwnedViewCallbacks, AgentOwnedViewConstructionError,
+    build_owned_agent_view, build_owned_work_view, clear_work_data_store, work_data_store,
+    AgentNavigationCommit, AgentNavigationTerminal, AgentOwnedView, AgentOwnedViewCallbacks,
+    AgentOwnedViewConstructionError,
 };
 #[cfg(feature = "native-agentic-input-probe")]
 pub(crate) use agentic_input_probe::run as run_agentic_input_matrix;
@@ -234,6 +248,39 @@ pub fn install_navigation_observer(
 
 pub fn current_url(view: &wry::WebView) -> Option<String> {
     bounded_current_url(view).ok()
+}
+
+/// Back and forward as the person would count them. A warm spare is adopted
+/// from an about:blank load that stays in WebKit's list, so its own answer
+/// offers a "back" to nothing. That entry is dropped once a real page stands
+/// in front of it; the swipe stays on throughout, so WebKit keeps recording
+/// the snapshots it draws from.
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    let page = native::webkit(view);
+    let (mut back, forward) = unsafe { (page.canGoBack(), page.canGoForward()) };
+    if back {
+        let list = unsafe { page.backForwardList() };
+        let previous = unsafe { list.backItem() }
+            .and_then(|item| unsafe { item.URL() }.absoluteString())
+            .map(|url| url.to_string());
+        if blank_behind(previous.as_deref()) {
+            // SAFETY: main-thread WebKit access; the SPI is used only when present. It
+            // keeps the current entry and drops every other.
+            let clears: bool =
+                unsafe { objc2::msg_send![&*list, respondsToSelector: objc2::sel!(_clear)] };
+            if clears && unsafe { list.backList().count() } == 1 && !forward {
+                let _: () = unsafe { objc2::msg_send![&*list, _clear] };
+                back = unsafe { page.canGoBack() };
+            } else {
+                back = false;
+            }
+        }
+    }
+    Some((back, forward))
+}
+
+fn blank_behind(previous: Option<&str>) -> bool {
+    previous == Some("about:blank")
 }
 
 #[derive(Clone, Copy)]
@@ -557,46 +604,47 @@ fn clear_and_verify_ephemeral_store(
 }
 
 fn erase_named_profile_data(erasure: ProfileErasure) {
-    use wry::WebViewExtDarwin;
-
     if initialize_data_store_enumeration().is_err() {
         erasure.finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
         return;
     }
-    let identifier = erasure.profile.bytes();
-    let initial_erasure = erasure.clone();
+    // The profile's own store, then Work's own store for the profile.
+    let identifiers = vec![
+        erasure.profile.bytes(),
+        crate::work_website_data::identifier(erasure.profile),
+    ];
+    remove_named_stores(identifiers, Vec::new(), erasure);
+}
+
+/// Removes each present named store in turn. Every step re-enumerates the
+/// app's identifiers, so a removed store still listed fails the erasure.
+fn remove_named_stores(pending: Vec<[u8; 16]>, removed: Vec<[u8; 16]>, erasure: ProfileErasure) {
+    use wry::WebViewExtDarwin;
+
+    let listed_erasure = erasure.clone();
     let result =
         <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(move |identifiers| {
-            if !identifiers.contains(&identifier) {
-                initial_erasure
-                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+            if removed.iter().any(|id| identifiers.contains(id)) {
+                listed_erasure
+                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
                 return;
             }
-
-            let removed_erasure = initial_erasure.clone();
-            <wry::WebView as WebViewExtDarwin>::remove_data_store(&identifier, move |removed| {
-                if removed.is_err() {
-                    removed_erasure
+            let mut present = pending.into_iter().filter(|id| identifiers.contains(id));
+            let Some(identifier) = present.next() else {
+                listed_erasure
+                    .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Verified);
+                return;
+            };
+            let rest: Vec<_> = present.collect();
+            let mut removed = removed;
+            <wry::WebView as WebViewExtDarwin>::remove_data_store(&identifier, move |result| {
+                if result.is_err() {
+                    listed_erasure
                         .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
                     return;
                 }
-
-                let verified_erasure = removed_erasure.clone();
-                if <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(
-                    move |identifiers| {
-                        let outcome = if identifiers.contains(&identifier) {
-                            zephium_core::ports::engine::ProfileDataErasureOutcome::Failed
-                        } else {
-                            zephium_core::ports::engine::ProfileDataErasureOutcome::Verified
-                        };
-                        verified_erasure.finish(outcome);
-                    },
-                )
-                .is_err()
-                {
-                    removed_erasure
-                        .finish(zephium_core::ports::engine::ProfileDataErasureOutcome::Failed);
-                }
+                removed.push(identifier);
+                remove_named_stores(rest, removed, listed_erasure);
             });
         });
     if result.is_err() {
@@ -620,6 +668,13 @@ fn initialize_data_store_enumeration() -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_blank_bootstrap_is_not_a_page_to_go_back_to() {
+        assert!(blank_behind(Some("about:blank")));
+        assert!(!blank_behind(Some("https://example.com/")));
+        assert!(!blank_behind(None));
+    }
+
     #[test]
     fn current_url_reader_preserves_exact_utf16_and_utf8_bounds() {
         use super::*;
@@ -769,4 +824,13 @@ mod tests {
         assert_eq!(remaining.load(Ordering::Acquire), 0);
         assert!(failed.load(Ordering::Acquire));
     }
+}
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) fn media_diagnostics_enabled() -> bool {
+    semantic_runtime::media_diagnostics_enabled()
+}
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) fn configure_media_diagnostic(public: bool, account: bool) {
+    semantic_runtime::configure_media_diagnostic(public, account);
 }

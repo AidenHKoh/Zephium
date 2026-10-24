@@ -23,6 +23,7 @@ use crate::{
 
 /// Maximum time between final policy dispatch and one native backend terminal.
 pub const MAX_SEMANTIC_ACTION_NATIVE_EXECUTION_MILLIS: u32 = 5_000;
+const MAX_SETTLE_QUIET_MILLIS: u64 = 1_500;
 /// Maximum admitted native viewport dimension used by visibility evidence.
 pub const MAX_SEMANTIC_ACTION_VIEWPORT_DIMENSION: u32 = 32_768;
 
@@ -346,7 +347,9 @@ impl SemanticActionFollow {
 /// Non-cloneable closed recipe for one trusted native adapter.
 #[must_use]
 pub struct SemanticActionNativeRequest {
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     page_dialog_opened: bool,
+    settle_quiet: bool,
     effect: crate::SemanticEffectClass,
     follow: Option<SemanticActionFollow>,
     consent: bool,
@@ -359,6 +362,9 @@ pub struct SemanticActionNativeRequest {
 }
 
 impl SemanticActionNativeRequest {
+    pub(crate) const fn approval_binding(&self) -> Option<crate::SemanticApprovalBinding> {
+        self.approval_binding
+    }
     pub(crate) const fn page_dialog_opened(&self) -> bool {
         self.page_dialog_opened
     }
@@ -371,6 +377,28 @@ impl SemanticActionNativeRequest {
     pub fn with_follow(mut self, follow: SemanticActionFollow) -> Self {
         self.follow = Some(follow);
         self
+    }
+
+    /// Has the page runtime hold the result until the page's DOM and loads
+    /// have been quiet for a moment, bounded by `settle_quiet_millis`. A
+    /// scroll keeps its own rendering sample.
+    pub fn with_settle_quiet(mut self) -> Self {
+        self.settle_quiet = !matches!(self.recipe, NativeRecipe::Scroll(..));
+        self
+    }
+
+    /// The quiet wait's ceiling: half the native budget, at most 1.5 s, so
+    /// dispatch and the return keep the rest.
+    pub(crate) fn settle_quiet_millis(&self) -> Option<u32> {
+        let budget = self
+            .correlation
+            .deadline
+            .millis()
+            .saturating_sub(self.correlation.requested_at.millis());
+        self.settle_quiet
+            .then(|| u32::try_from((budget / 2).min(MAX_SETTLE_QUIET_MILLIS)).ok())
+            .flatten()
+            .filter(|millis| *millis > 0)
     }
 
     /// The follow slot the controller attached, if any.
@@ -1148,6 +1176,7 @@ pub(crate) fn prepare_semantic_action_execution(
         deadline,
     );
     let effect = active.effect();
+    let approval_binding = active.approval_binding();
     let correlation = NativeCorrelation {
         effect: active.id(),
         attempt: active.attempt(),
@@ -1167,12 +1196,14 @@ pub(crate) fn prepare_semantic_action_execution(
             active,
         },
         SemanticActionNativeRequest {
+            approval_binding,
             page_dialog_opened: matches!(
                 action.verification(),
                 crate::SemanticVerification::PageDialogOpened
                     | crate::SemanticVerification::PageDialogClosed
             ),
             effect,
+            settle_quiet: false,
             follow: None,
             consent: false,
             correlation,
@@ -2076,6 +2107,21 @@ mod tests {
             ordinary_wire.get("u").is_none(),
             "ordinary actions must not request global samples"
         );
+        assert!(ordinary_wire.get("q").is_none(), "quiet settle is opt-in");
+        let (_, quiet_native) = prepare_semantic_action_execution(
+            active(&click, 68),
+            &click,
+            SemanticActionExecutionInstant::from_millis(1),
+        )
+        .expect("click");
+        let budget = quiet_native.deadline().millis() - quiet_native.requested_at().millis();
+        let quiet_wire: serde_json::Value = serde_json::from_str(
+            crate::encode_semantic_action_runtime_invocation(&quiet_native.with_settle_quiet())
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+        assert_eq!(quiet_wire["q"], (budget / 2).min(1_500));
         let dialog = prepared(
             &observation,
             86,

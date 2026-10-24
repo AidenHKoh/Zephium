@@ -1,7 +1,9 @@
 use super::*;
 
 const MAX_RESULTS: usize = 8;
-const MAX_BYTES: usize = 4096;
+const MAX_BYTES: usize = 6144;
+const MAX_STEPS: usize = 12;
+const MAX_STEP_BYTES: usize = 400;
 
 pub(in crate::agent_provider) struct AgentActionProgress {
     context: crate::ContextJoin,
@@ -11,6 +13,10 @@ pub(in crate::agent_provider) struct AgentActionProgress {
     total: u64,
     recent: Vec<serde_json::Value>,
     encoded: String,
+    /// The planner's own verified calls on this page, replayed to it as its
+    /// own words so a rebuilt transcript never starts the page over. Kept in
+    /// memory for this page task only.
+    steps: Vec<String>,
 }
 
 impl AgentActionProgress {
@@ -22,9 +28,23 @@ impl AgentActionProgress {
         &self.encoded
     }
 
+    pub(in crate::agent_provider) fn steps(&self) -> Option<String> {
+        (!self.steps.is_empty()).then(|| {
+            format!(
+                "My own steps on this page so far, oldest first (their refs are retired; use only the latest look's refs):\n{}",
+                self.steps.join("\n")
+            )
+        })
+    }
+
+    pub(in crate::agent_provider) fn retained_len(&self) -> usize {
+        self.encoded.len() + self.steps.iter().map(String::len).sum::<usize>()
+    }
+
     pub(in crate::agent_provider) fn record(
         previous: Option<Self>,
         result: &crate::SemanticActionResult,
+        call: Option<(&str, &str)>,
     ) -> Result<Self, AgentProviderContinuationError> {
         let verified = result.verified();
         let context = verified.current_context();
@@ -66,6 +86,7 @@ impl AgentActionProgress {
                 total: 0,
                 recent: Vec::new(),
                 encoded: String::new(),
+                steps: Vec::new(),
             },
         };
         // Only closed host enums and counters survive; no values, labels or refs.
@@ -76,6 +97,9 @@ impl AgentActionProgress {
             "batch_ordinal": verified.ordinal(),
             "observation": observation.get(),
         });
+        if let Some(role) = result.target_role() {
+            entry["target_role"] = serde_json::json!(role);
+        }
         if let Some((direction, amount)) = verified.scroll {
             entry["scroll"] = serde_json::json!({"direction": format!("{direction:?}"), "amount": format!("{amount:?}")});
         }
@@ -83,6 +107,21 @@ impl AgentActionProgress {
             progress.recent.remove(0);
         }
         progress.recent.push(entry);
+        if let Some((name, arguments)) = call {
+            let mut step = format!("{}. {name} {arguments} -> verified", progress.total + 1);
+            if step.len() > MAX_STEP_BYTES {
+                let mut end = MAX_STEP_BYTES;
+                while !step.is_char_boundary(end) {
+                    end -= 1;
+                }
+                step.truncate(end);
+                step.push_str("… -> verified");
+            }
+            if progress.steps.len() == MAX_STEPS {
+                progress.steps.remove(0);
+            }
+            progress.steps.push(step);
+        }
         progress.total = progress
             .total
             .checked_add(1)
@@ -92,7 +131,12 @@ impl AgentActionProgress {
         progress.last_observation = observation;
         progress.encoded = format!(
             "ZEPHIUM_HOST_ACTION_PROGRESS_V1\n{}",
-            serde_json::json!({"verified_results": progress.total, "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64), "recent": progress.recent})
+            serde_json::json!({
+                "verified_results": progress.total,
+                "omitted_older_results": progress.total.saturating_sub(progress.recent.len() as u64),
+                "recent": progress.recent,
+                "guidance": "Your own steps on this page, oldest first, each already run once and verified. Do not repeat one to check it or start over: continue from the last. Extract when the task is complete. A page change alone does not prove a business outcome."
+            })
         );
         if progress.encoded.len() > MAX_BYTES {
             return Err(AgentProviderContinuationError::TranscriptLimit);
@@ -111,8 +155,8 @@ mod tests {
         for id in 1..=20 {
             let result =
                 crate::semantic_action_result::tests::scroll_provider_fixture(id, id % 2 == 0);
-            progress = Some(AgentActionProgress::record(progress, &result).unwrap());
-            progress = Some(AgentActionProgress::record(progress, &result).unwrap());
+            progress = Some(AgentActionProgress::record(progress, &result, None).unwrap());
+            progress = Some(AgentActionProgress::record(progress, &result, None).unwrap());
         }
         let progress = progress.unwrap();
         let wire: serde_json::Value =
@@ -126,7 +170,18 @@ mod tests {
         );
         assert!(progress.text().len() < MAX_BYTES);
         assert!(!progress.text().contains("Private") && !progress.text().contains("@a"));
+        let replayed = AgentActionProgress::record(
+            None,
+            &crate::semantic_action_result::tests::scroll_provider_fixture(1, false),
+            Some(("act", r#"{"value":"JFK"}"#)),
+        )
+        .unwrap();
+        assert!(replayed
+            .steps()
+            .unwrap()
+            .contains(r#"1. act {"value":"JFK"} -> verified"#));
+        assert!(!replayed.text().contains("JFK"));
         let old = crate::semantic_action_result::tests::scroll_provider_fixture(1, false);
-        assert!(AgentActionProgress::record(Some(progress), &old).is_err());
+        assert!(AgentActionProgress::record(Some(progress), &old, None).is_err());
     }
 }

@@ -4,13 +4,15 @@ import { playwright } from "@vitest/browser-playwright";
 import tailwindcss from "@tailwindcss/vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { alias } from "./aliases.ts";
+import { i18nLocales } from "./i18n-locales.ts";
+import { benchPhotos, webkitFootprint } from "./vitest.bench-commands.ts";
 
 export default defineConfig({
   test: {
     projects: [
       {
         resolve: { alias },
-        plugins: [svelte()],
+        plugins: [svelte(), i18nLocales()],
         test: {
           name: "unit",
           environment: "node",
@@ -23,7 +25,7 @@ export default defineConfig({
       },
       {
         resolve: { alias },
-        plugins: [svelte(), tailwindcss()],
+        plugins: [svelte(), tailwindcss(), i18nLocales()],
         optimizeDeps: {
           include: [
             "@xyflow/svelte",
@@ -55,6 +57,47 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            formSubmitRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-engine/src/platform/form_submit_observer.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+            formActionRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-engine/src/platform/macos/agentic_form_diagnostic_probe.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+            formOracleRuntime: readFileSync(
+              new URL("../crates/zephium-engine/src/host/work_form_oracle.js", import.meta.url),
+              "utf8",
+            ),
+            pixelPrivacyRuntime: readFileSync(
+              new URL(
+                "../crates/zephium-agentic/assets/semantic-pixel-privacy-v1.js",
+                import.meta.url,
+              ),
+              "utf8",
+            ),
+            semanticMediaRuntime:
+              readFileSync(
+                new URL(
+                  "../crates/zephium-agentic/assets/semantic-record-media-v1.js",
+                  import.meta.url,
+                ),
+                "utf8",
+              ) +
+              readFileSync(
+                new URL("../crates/zephium-agentic/assets/semantic-runtime-v1.js", import.meta.url),
+                "utf8",
+              ),
+            humanWallSurvey: readFileSync(
+              new URL("../crates/zephium-agentic/assets/work-human-wall-v1.js", import.meta.url),
+              "utf8",
+            ),
             contentStyleSource: readFileSync(
               new URL("../crates/zephium-engine/src/host/content_style.js", import.meta.url),
               "utf8",
@@ -82,6 +125,7 @@ export default defineConfig({
             enabled: true,
             headless: true,
             screenshotFailures: false,
+            commands: { benchPhotos, webkitFootprint },
             // Retina is the display this chrome is drawn for, and the one
             // where a radius or a hairline can actually be judged.
             provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),

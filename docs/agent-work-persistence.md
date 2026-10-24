@@ -48,7 +48,35 @@ Each fixed 96-byte record contains only version/disposition/debt bits, a checked
 monotonic revision, process identity, manifest/run identity and the existing
 content-free manifest guard. No objective, credential, page/provider content,
 URL, profile path, screenshot or raw trace is stored. Debug omits identifiers.
-The 1,024-run ceiling never silently evicts audit or recovery obligations.
+
+### Retention
+
+Every page read is one run, so a Store that kept every run forever filled up
+after 1,024 reads and then refused Work for good, across relaunches. Meta
+migration 25 (and its twin, migration 2 of the protected Windows Work database)
+splits runs in two:
+
+- **Clean terminal runs** (terminal disposition, no recorded debt) are history.
+  Each records the order it settled in. The Store keeps the 256 most recently
+  settled ones, with their results, and prunes older ones oldest first: at
+  Store open (the Windows Work database prunes when it lazily opens), after a
+  run ends (at most 64 per pass, after the reply, so nothing waits on it), and
+  before a result is published when the 32 MiB result budget needs room (the
+  16 newest results are never taken this way, since a run reads its own result
+  back). A result that a Work execution still cites as evidence keeps its run.
+  Older results were only read back by the run that wrote them.
+- **Live or debt-bearing runs** (`Admitted`, `Running`, `Interrupted`,
+  `RecoveryRequired`, and any reviewed or fail-closed run whose debt is not
+  `NONE`) are recovery history. They are never pruned, and the delete trigger
+  still refuses deleting one, whoever asks. Only these count against the
+  1,024-run admission ceiling. A claim returns all of them plus the retained
+  clean window.
+
+If recovery history ever fills the ceiling, admission is refused rather than
+anything being evicted, and the page ends with the closed note "Work storage
+needs attention", which the canvas shows instead of a generic read failure.
+The Store also refuses admission past 4,096 stored runs of any kind; only
+results still cited by Work can hold clean runs beyond the window.
 
 Updates compare exact previous bytes, not just counters. An exact retransmission
 can acknowledge an already-committed write, but cannot execute anything. Terminal
@@ -139,6 +167,17 @@ Explicit durable-profile extraction can require an atomic private
 retained request slot and Store permits, not the content-free journal/audit
 body format. Read-only archive failures release their own slot without consuming
 future admission; publication uncertainty retains the exact original owner.
+A result that cannot be prepared for publication never reached the Store, so
+it is not uncertainty: the exact Running row is classified `FailedClosed`
+through the same resent CAS, and the page closes like any failed page.
+
+A page whose request is still uncertain after its last resend cannot be
+classified in this process. It keeps that request, its debt and its native
+seat, because its native audit never precedes the row's classification; a
+late acknowledgement still settles it. Its page group therefore cannot close,
+so the Shell refuses every page waiting for a seat at once with `Unsettled`
+instead of letting each wait out its own deadline. A restart classifies the
+row `Interrupted` as usual.
 
 The existing shell mailbox carries one globally coalesced Work wake. No extra
 worker or periodic poll is added; the existing timer wakes only for pending

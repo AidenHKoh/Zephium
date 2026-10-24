@@ -15,6 +15,7 @@ use thiserror::Error;
 use zephium_core::ids::ProfileId;
 
 mod effect;
+mod images;
 mod navigation;
 use effect::AgentEffectRow;
 pub use effect::{
@@ -57,7 +58,7 @@ pub const MAX_AGENT_PENDING_MODEL_CALLS: usize = 4;
 /// Maximum distinct profile/account/origin taint cohorts retained per run.
 pub const MAX_AGENT_TAINT_COHORTS: usize = 128;
 /// Maximum opaque actionable references retained across committed model input.
-pub const MAX_AGENT_TAINT_REFERENCES: usize = 4_096;
+pub const MAX_AGENT_TAINT_REFERENCES: usize = 16_384;
 /// Maximum age of an account attestation at model-input admission (30 seconds).
 pub const MAX_AGENT_ACCOUNT_ATTESTATION_AGE_MILLIS: u64 = 30_000;
 /// Maximum byte size of one copyable clean policy-settlement value.
@@ -179,6 +180,7 @@ pub struct AgentModelCallRequest {
     budget: AgentModelCallBudget,
     now: AgentPolicyInstant,
     remaining_native_actions: Option<u64>,
+    last_decision: bool,
 }
 
 impl AgentModelCallRequest {
@@ -197,6 +199,7 @@ impl AgentModelCallRequest {
             budget,
             now,
             remaining_native_actions: None,
+            last_decision: false,
         }
     }
 
@@ -208,6 +211,17 @@ impl AgentModelCallRequest {
 
     pub(crate) const fn remaining_native_actions(self) -> Option<u64> {
         self.remaining_native_actions
+    }
+
+    /// Offers this call extraction alone, as the page's last decision. It
+    /// only narrows what the model is offered; it grants nothing.
+    pub const fn with_last_decision(mut self) -> Self {
+        self.last_decision = true;
+        self
+    }
+
+    pub(crate) const fn last_decision(self) -> bool {
+        self.last_decision
     }
 
     /// Monotonic exact call identity.
@@ -651,6 +665,7 @@ impl AgentModelCallExpectation {
 
 /// Exact purpose-bound extraction evidence awaiting policy reservation.
 pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
+    viewport_image_guard: Option<[u8; 32]>,
     baseline: &'a SemanticObservationAcknowledgement,
     subtree_target: Option<SemanticReferenceId>,
     schema: &'a SemanticExtractionSchema,
@@ -660,6 +675,10 @@ pub(crate) struct AgentProviderExtractionInput<'a, 'read> {
 }
 
 impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
+    pub(crate) fn with_viewport_image_guard(mut self, guard: Option<[u8; 32]>) -> Self {
+        self.viewport_image_guard = guard;
+        self
+    }
     pub(crate) const fn new(
         baseline: &'a SemanticObservationAcknowledgement,
         subtree_target: Option<SemanticReferenceId>,
@@ -669,6 +688,7 @@ impl<'a, 'read> AgentProviderExtractionInput<'a, 'read> {
         structured_input_tokens: u64,
     ) -> Self {
         Self {
+            viewport_image_guard: None,
             baseline,
             subtree_target,
             schema,
@@ -1089,6 +1109,7 @@ impl fmt::Debug for AgentModelCallReceipt {
 /// Mutable single-owner policy state for one exact manifest revision.
 #[must_use]
 pub struct AgentRunPolicy {
+    image_owners: Option<images::ImageOwners>,
     manifest: AgentRunManifest,
     leases: Vec<PlanLeaseState>,
     consumed: ConsumedUsage,
@@ -1144,6 +1165,7 @@ impl AgentRunPolicy {
             return Err(AgentPolicyError::LeaseSet);
         }
         Ok(Self {
+            image_owners: None,
             manifest,
             leases: bindings
                 .into_iter()
@@ -1174,6 +1196,18 @@ impl AgentRunPolicy {
     /// Immutable approved manifest facts.
     pub const fn manifest(&self) -> &AgentRunManifest {
         &self.manifest
+    }
+
+    /// Whether the original run and lease permit sensitive viewport input.
+    /// Advisory only: capture, context, account, budget and delivery still need
+    /// their exact admission checks. This never broadens the approved scope.
+    pub fn permits_screenshot_sensitivity(&self, lease: AgentPlanLeaseId) -> bool {
+        !self.sealed
+            && self.manifest.scope().max_sensitivity() >= SemanticSensitivity::Sensitive
+            && self
+                .lease_index(lease)
+                .and_then(|index| self.manifest.plan_node(self.leases[index].binding.node()))
+                .is_some_and(|node| node.max_sensitivity() >= SemanticSensitivity::Sensitive)
     }
 
     /// Persistent committed-model-input taint for all later effect checks.
@@ -1256,6 +1290,33 @@ impl AgentRunPolicy {
                 .model_tokens()
                 .checked_sub(accounting.consumed_model_tokens())
                 .and_then(|value| value.checked_sub(accounting.reserved_model_tokens()))
+                .ok_or(AgentPolicyError::Budget)
+        };
+        Ok(
+            remaining(self.manifest.budget(), self.accounting())?.min(remaining(
+                node.budget(),
+                self.lease_accounting(lease)
+                    .ok_or(AgentPolicyError::Invariant)?,
+            )?),
+        )
+    }
+
+    /// Unreserved cost under both the run and the exact lease node.
+    /// Advisory only: every request still requires its original reservation.
+    pub fn remaining_cost_micro_usd(
+        &self,
+        lease: AgentPlanLeaseId,
+    ) -> Result<u64, AgentPolicyError> {
+        let index = self.lease_index(lease).ok_or(AgentPolicyError::Lease)?;
+        let node = self
+            .manifest
+            .plan_node(self.leases[index].binding.node())
+            .ok_or(AgentPolicyError::Invariant)?;
+        let remaining = |budget: AgentRunBudget, accounting: AgentPolicyAccounting| {
+            budget
+                .cost_micro_usd()
+                .checked_sub(accounting.consumed_cost_micro_usd())
+                .and_then(|value| value.checked_sub(accounting.reserved_cost_micro_usd()))
                 .ok_or(AgentPolicyError::Budget)
         };
         Ok(
@@ -1691,7 +1752,7 @@ impl AgentRunPolicy {
         if !input.delivery.matches(input.schema, input.read) {
             return Err(AgentPolicyError::PayloadMismatch);
         }
-        let candidates = match input.subtree_target {
+        let mut candidates = match input.subtree_target {
             None => provider_extraction_read_taints(
                 input.read,
                 input.baseline,
@@ -1706,6 +1767,25 @@ impl AgentRunPolicy {
                 &self.taints,
             )?,
         };
+        let viewport = input
+            .read
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage);
+        if viewport != input.viewport_image_guard.is_some() {
+            return Err(AgentPolicyError::Authority);
+        }
+        if let Some(guard) = input.viewport_image_guard {
+            for candidate in &mut candidates {
+                if candidate.source_guard == input.read.guard()
+                    && candidate.sensitivity == SemanticSensitivity::Sensitive
+                    && candidate.references.is_empty()
+                {
+                    candidate.source_guard = guard;
+                    candidate.attested_at = request.account().observed_at();
+                }
+            }
+        }
         self.prepare_model_input(
             request,
             input.delivery.context(),
@@ -2098,12 +2178,21 @@ impl AgentRunPolicy {
         } else {
             Vec::new()
         };
+        // Only exact native-image cohorts with a current joined disclosure
+        // grant receive this scope exception. Actual retained taint stays
+        // Sensitive; text, arbitrary zero-reference cohorts, and crops do not.
+        let mut scope_candidates = candidates.clone();
+        for candidate in &mut scope_candidates {
+            if self.permits_exact_image_cohort(candidate) {
+                candidate.sensitivity = SemanticSensitivity::Public;
+            }
+        }
         validate_context_scope_with_history(
             &self.manifest,
             node,
             context,
             account,
-            &candidates,
+            &scope_candidates,
             &historical_contexts,
         )?;
 
@@ -2895,6 +2984,33 @@ fn provider_extraction_read_taints(
         }
         merge_taint(&mut candidates, source.clone());
     }
+    if read
+        .fragments()
+        .iter()
+        .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage)
+    {
+        // Public DOM text cannot establish the sensitivity of viewport pixels.
+        // Keep the image cohort distinct and unable to mint action references.
+        let pixels = candidates
+            .iter()
+            .filter(|cohort| {
+                cohort.context == baseline.context()
+                    && cohort.observation == baseline.observation()
+                    && cohort.observation_generation == baseline.generation()
+                    && cohort.source_guard == baseline.guard()
+            })
+            .cloned()
+            .map(|mut cohort| {
+                cohort.source_guard = read.guard();
+                cohort.sensitivity = SemanticSensitivity::Sensitive;
+                cohort.references.clear();
+                cohort
+            })
+            .collect::<Vec<_>>();
+        for cohort in pixels {
+            merge_taint(&mut candidates, cohort);
+        }
+    }
     Ok(candidates)
 }
 
@@ -2953,10 +3069,18 @@ fn read_taints(
                 source_guard: read.guard(),
                 account: account.account(),
                 origin: provenance.origin().clone(),
-                sensitivity: provenance.sensitivity(),
+                sensitivity: if fragment.field() == crate::SemanticReadField::ViewportImage {
+                    SemanticSensitivity::Sensitive
+                } else {
+                    provenance.sensitivity()
+                },
                 trust: provenance.trust(),
                 attested_at: account.observed_at(),
-                references: vec![provenance.reference()],
+                references: if fragment.field() == crate::SemanticReadField::ViewportImage {
+                    Vec::new()
+                } else {
+                    vec![provenance.reference()]
+                },
             },
         );
     }
@@ -3255,6 +3379,8 @@ fn hash_context(hasher: &mut Sha256, context: ContextJoin) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "provider-transport")]
+    mod image_tests;
     mod navigation_tests;
     use super::*;
     use crate::semantic_screenshot::admitted_test_screenshot;
@@ -3361,14 +3487,22 @@ mod tests {
         )
         .expect("frame");
         let invocation = observation_id + 10;
-        let bytes = serde_json::to_vec(&json!({
+        let mut wire = json!({
             "v": SEMANTIC_WIRE_VERSION,
             "i": invocation,
             "g": invocation,
             "c": "complete",
             "n": nodes,
-        }))
-        .expect("wire");
+        });
+        if wire["n"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node.get("ai").is_some())
+        {
+            wire["ap"] = json!("01010101010101010101010101010101");
+        }
+        let bytes = serde_json::to_vec(&wire).expect("wire");
         let snapshot = decode_semantic_snapshot(
             SemanticDecodeContext::new(
                 SemanticInvocationId::new(invocation).expect("invocation"),
@@ -4511,6 +4645,16 @@ mod tests {
             fixture.policy.remaining_model_tokens(fixture.lease),
             Ok(920)
         );
+        assert_eq!(
+            fixture.policy.remaining_cost_micro_usd(fixture.lease),
+            Ok(9_900)
+        );
+        assert_eq!(
+            fixture
+                .policy
+                .remaining_cost_micro_usd(AgentPlanLeaseId::from_raw(999)),
+            Err(AgentPolicyError::Lease)
+        );
         let admission_debug = format!("{admission:?}");
 
         assert_eq!(fixture.policy.pending_model_calls(), 1);
@@ -4970,7 +5114,8 @@ mod tests {
         assert!(wire.get("metadata").is_none());
         assert_eq!(wire["input"].as_array().expect("input").len(), 2);
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 1);
+        assert_eq!(tools.len(), crate::AgentBrowserToolKind::ALL.len() - 2);
+        assert!(tools.iter().all(|tool| tool["name"] != "fill_form"));
         assert!(tools.iter().all(|tool| tool["name"] != "back"));
         assert!(wire["tools"]
             .as_array()
@@ -6843,6 +6988,81 @@ mod tests {
     }
 
     #[test]
+    fn viewport_mapping_keeps_sensitive_taint_without_granting_action_references() {
+        let source = origin("viewport-mapping");
+        let context = make_context(9_281, 9_282, 9_283);
+        let observation = actionable_observation(context, source.clone(), 1);
+        let baseline = observation_payload(&observation, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            crate::SemanticExtractionSchemaId::new(71).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &observation,
+            crate::SemanticReadAuthority::Acknowledged(&baseline),
+            SemanticCaptureInstant::from_millis(NOW),
+            SemanticReadSensitivityLimit::PublicOnly,
+            crate::SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        assert!(read
+            .fragments()
+            .iter()
+            .any(|f| f.field() == crate::SemanticReadField::ViewportImage));
+        let screenshot = admitted_test_screenshot(&observation, &baseline, 83, 0x33);
+        assert!(screenshot.matches_baseline(&baseline));
+        let other = actionable_observation(context, source.clone(), 2);
+        let other_baseline = observation_payload(&other, 10)
+            .settle_delivery(SemanticModelDeliverySettlement::Committed)
+            .unwrap();
+        assert!(!screenshot.matches_baseline(&other_baseline));
+        let binding = account(context, NOW - 1);
+        let retained = observation_taints(&observation, binding).unwrap();
+        let cohorts =
+            provider_extraction_read_taints(&read, &baseline, binding, &retained).unwrap();
+        let pixels: Vec<_> = cohorts
+            .iter()
+            .filter(|c| c.source_guard == read.guard())
+            .collect();
+        assert!(!pixels.is_empty());
+        assert!(pixels
+            .iter()
+            .all(|c| c.sensitivity == SemanticSensitivity::Sensitive && c.references.is_empty()));
+        for sensitivity in [SemanticSensitivity::Public, SemanticSensitivity::Sensitive] {
+            let mut fixture = policy_fixture(
+                9_281,
+                9_282,
+                source.clone(),
+                sensitivity,
+                &[SemanticEffectClass::Read],
+                run_budget(10, 5_000, 10_000),
+            );
+            let allowed = sensitivity == SemanticSensitivity::Sensitive;
+            assert_eq!(
+                fixture.policy.permits_screenshot_sensitivity(fixture.lease),
+                allowed
+            );
+            assert!(!fixture
+                .policy
+                .permits_screenshot_sensitivity(AgentPlanLeaseId::generate()));
+            let manifest = fixture.policy.manifest();
+            let node = manifest.plan_node(AgentPlanNodeId::from_raw(1)).unwrap();
+            let admission = validate_context_scope(manifest, node, context, binding, &cohorts);
+            if allowed {
+                assert!(admission.is_ok());
+            } else {
+                assert_eq!(admission, Err(AgentPolicyError::Sensitivity));
+            }
+            fixture.policy.sealed = true;
+            assert!(!fixture.policy.permits_screenshot_sensitivity(fixture.lease));
+        }
+    }
+
+    #[test]
     fn screenshot_taint_covers_every_observed_frame_without_reference_authority() {
         let context = make_context(9_257, 9_258, 9_259);
         let observation = multi_origin_observation(context, 1);
@@ -7022,7 +7242,7 @@ mod tests {
                 .tokens(),
             120
         );
-        assert_eq!(committed.continuation_transcript_bytes(), None);
+        assert!(committed.continuation_transcript_bytes().is_some());
         let receipt = committed
             .input_evidence()
             .screenshot_receipt()
@@ -7055,8 +7275,8 @@ mod tests {
         assert_eq!(visual_taint.account(), AgentAccountScope::Anonymous);
         let (_, input, continuation) = committed.into_parts();
         assert!(
-            continuation.is_none(),
-            "visual pixels must never enter replay"
+            continuation.is_some(),
+            "the already delivered semantic baseline survives the one-shot visual input"
         );
         let (active, evidence) = input.into_parts();
         assert!(matches!(
@@ -9100,6 +9320,99 @@ mod tests {
     }
 
     #[test]
+    fn original_approval_seal_survives_read_declared_permit_and_native_dispatch() {
+        let source = origin("private-approval");
+        let (mut registry, context) = make_context_registry(445, 446, 447);
+        let make = |identity| {
+            observation(
+                context,
+                source.clone(),
+                1,
+                vec![
+                    json!({"k": 1, "r": "document", "o": 16}),
+                    json!({"k": 2, "ai": identity, "p": 0, "r": "button", "n": "Save draft", "o": 9,
+                   "b": {"x": 10, "y": 10, "w": 100, "h": 30}}),
+                ],
+            )
+        };
+        let observation = make(1);
+        let changed = make(2);
+        let action = prepared_click(&observation, 2, SemanticEffectClass::Read);
+        let replacement = prepared_click(&changed, 2, SemanticEffectClass::Read);
+        let approved = action.approval_binding().expect("native seal");
+        let assessment = AgentEffectAssessment::with_approval(
+            &action,
+            source.clone(),
+            SemanticEffectClass::Read,
+            approved,
+        )
+        .expect("original reviewed seal");
+        assert!(AgentEffectAssessment::with_approval(
+            &replacement,
+            source.clone(),
+            SemanticEffectClass::Read,
+            approved,
+        )
+        .is_none());
+        assert!(!assessment.matches_action(&replacement));
+        registry
+            .acknowledge_observation(context.identity().id(), context)
+            .unwrap();
+        let automation = registry.automation_state(context.identity().id()).unwrap();
+        let binding = account(context, NOW - 1);
+        let mut fixture = policy_fixture(
+            445,
+            446,
+            source,
+            SemanticSensitivity::Sensitive,
+            &[SemanticEffectClass::Read],
+            run_budget(10, 1_000, 10_000),
+        );
+        commit_observation_to_model(&mut fixture.policy, fixture.lease, 1, binding, &observation);
+        let permit = match fixture
+            .policy
+            .authorize_semantic_effect(
+                effect_request(1, fixture.lease, binding, automation),
+                &action,
+                &assessment,
+            )
+            .expect("policy authorization")
+        {
+            AgentEffectAuthorization::Permit(permit) => permit,
+            AgentEffectAuthorization::NeedsHuman(_) => panic!("already-reviewed same-origin read"),
+        };
+        let active = fixture
+            .policy
+            .dispatch_semantic_effect(
+                permit,
+                &action,
+                effect_dispatch_request(1, binding, automation),
+            )
+            .expect("dispatch exact permit");
+        let mut coordinator = crate::SemanticActionExecutionCoordinator::new();
+        let (_, native) = coordinator
+            .begin(
+                active,
+                &action,
+                crate::SemanticActionExecutionInstant::from_millis(NOW),
+            )
+            .expect("native reservation");
+        let invocation = crate::encode_semantic_action_runtime_invocation(&native).unwrap();
+        let encoded: Value = serde_json::from_str(invocation.as_str()).unwrap();
+        assert_eq!(
+            encoded["ap"],
+            json!(["01010101010101010101010101010101", 1, null])
+        );
+        for debug in [
+            format!("{assessment:?}"),
+            format!("{native:?}"),
+            format!("{invocation:?}"),
+        ] {
+            assert!(!debug.contains("0101010101"));
+        }
+    }
+
+    #[test]
     fn effect_token_or_action_substitution_seals_and_retains_ambiguity() {
         let source = origin("effect-mismatch");
         let (mut registry, context) = make_context_registry(145, 146, 147);
@@ -9166,7 +9479,7 @@ mod tests {
             &[SemanticEffectClass::Read],
             run_budget(10, 1_000, 10_000),
         );
-        fixture.policy.taints = (0..8_u128)
+        fixture.policy.taints = (0..32_u128)
             .map(|index| AgentTaintCohort {
                 context: make_context(147, 148, 1_000 + index),
                 observation: SemanticObservationId::new(1).expect("observation"),

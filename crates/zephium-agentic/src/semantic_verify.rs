@@ -821,7 +821,7 @@ pub(crate) fn verify_semantic_action(
                 if before != observed_before
                     || after != observed_after
                     || before == expected.as_str()
-                    || after != expected.as_str()
+                    || !crate::semantic_action::fill_value_matches(after, expected.as_str())
                 {
                     return Err(SemanticVerificationError::OutcomeNotObserved);
                 }
@@ -1312,7 +1312,7 @@ mod tests {
                 )
                 .unwrap();
                 let prepared = batch.actions()[0].prepare(&observation.frames()[0]);
-                let allowed = status == "field_limit" && local == Some(true);
+                let allowed = local == Some(true);
                 assert_eq!(prepared.is_ok(), allowed, "preparation: {status}/{local:?}");
                 if !allowed {
                     // A later complete checkpoint cannot repair an incomplete
@@ -1357,7 +1357,7 @@ mod tests {
                             verify_semantic_action(&immediate(&action, 1), &action, evidence);
                         assert_eq!(
                             verified.is_ok(),
-                            after_status == "field_limit" && after_local == Some(true),
+                            after_local == Some(true),
                             "verification: {after_status}/{after_local:?}"
                         );
                     }
@@ -1920,6 +1920,53 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_line_fill_verifies_when_the_editor_keeps_other_line_breaks() {
+        let (observation, _) = observation();
+        let typed = "Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
+        let batch = bind(
+            &observation,
+            SemanticActionIntent::Fill {
+                target: SemanticReferenceId::new(3).expect("target"),
+                value: SemanticActionText::try_new(typed.to_owned()).expect("text"),
+            },
+            SemanticWaitCondition::Immediate,
+            SemanticVerification::TargetValueMatchesInput,
+        )
+        .expect("batch");
+        let prepared = batch.actions()[0]
+            .prepare(&observation.frames()[0])
+            .expect("prepare");
+        let action = &prepared;
+        let attempt = SemanticActionAttemptId::new(1).expect("attempt");
+        let tracker = immediate(action, 1);
+        for (kept, verifies) in [
+            ("Hi Dana,\n\n\nThe release is ready.\nThanks, Hayk\n", true),
+            ("Hi Dana,\n\nThe release is ready.", false),
+        ] {
+            let snapshot = current(
+                &observation,
+                json!([
+                    {"k": 1, "r": "document", "o": 16},
+                    {"k": 3, "p": 0, "r": "textbox", "n": "Private title",
+                     "v": {"k": "text", "value": kept}, "o": 10}
+                ]),
+            );
+            let result = verify_semantic_action(
+                &tracker,
+                action,
+                SemanticEffectEvidence::exact_target_value(
+                    attempt,
+                    SemanticSettleInstant::from_millis(101),
+                    &snapshot,
+                    "old",
+                    kept,
+                ),
+            );
+            assert_eq!(result.is_ok(), verifies);
+        }
+    }
+
+    #[test]
     fn exact_fill_uses_transient_unmodified_value_and_adjacent_metadata() {
         let (observation, _) = observation();
         let batch = bind(
@@ -2394,7 +2441,7 @@ mod tests {
             (Some(true), 2, 1, true),
             (Some(false), 2, 1, false),
             (None, 2, 1, false),
-            (Some(true), 3, 1, false),
+            (Some(true), 3, 1, true),
             (Some(true), 2, 0, false),
         ] {
             let mut node = json!({"k":4,"p":0,"r":"checkbox","n":"Private toggle","s":state,"o":1});

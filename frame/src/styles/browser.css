@@ -8,6 +8,10 @@
   min-width: 0;
   height: 100%;
   padding-inline-start: 8px;
+
+  /* Nothing here scrolls sideways: clipped, not hidden, so a focus reveal has
+     no offset to leave behind and the page cannot slide off its column. */
+  overflow: clip;
 }
 /* The new tab sits above the sidebar, as a native page does: whatever the
    column lets go of while it changes shape passes beneath it. The sidebar's
@@ -29,6 +33,18 @@
   from {
     opacity: 0;
     scale: 0.985;
+  }
+}
+
+/* Work places native panes from measured rects, and a scale in flight would be
+   measured: the pane would land off by the amount the page had left to grow,
+   with no resize to say so. Its page only fades. */
+.stage-page[data-page="work"] {
+  animation-name: stage-fade;
+}
+@keyframes stage-fade {
+  from {
+    opacity: 0;
   }
 }
 .settings-shell,
@@ -93,22 +109,14 @@
   flex: none;
 }
 .settings-nav-item,
-.settings-back {
-  transition:
-    background-color var(--motion-instant) var(--ease-smooth),
-    color var(--motion-instant) var(--ease-smooth),
-    scale var(--motion-fast) var(--ease-smooth);
-}
 .settings-nav-item,
-.settings-back,
 .settings-nav-group h2,
 .ui-settings-section > h2 {
   /* stylelint-disable-next-line property-no-vendor-prefix */
   -webkit-user-select: none;
   user-select: none;
 }
-.settings-nav-item:active,
-.settings-back:active {
+.settings-nav-item:active {
   scale: 0.97;
   transition-duration: var(--motion-fast);
 }
@@ -195,124 +203,6 @@
   color: var(--color-danger);
   font-size: 12px;
 }
-.appearance-previews {
-  display: flex;
-  gap: 12px;
-  padding: 20px 20px 10px;
-}
-.appearance-preview {
-  flex: 1;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-row);
-  background: transparent;
-  color: var(--color-label-secondary);
-  cursor: default;
-}
-.appearance-preview[aria-checked="true"] {
-  color: var(--color-text);
-}
-.appearance-preview[aria-checked="true"] .mini-window {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
-.appearance-preview-label {
-  display: block;
-  margin-top: 8px;
-  font-size: var(--text-caption);
-  text-align: center;
-}
-.mini-window {
-  height: 90px;
-  display: flex;
-  padding: 6px;
-  gap: 6px;
-  background: #e2e3e8;
-  border-radius: var(--radius-row);
-  overflow: hidden;
-}
-.mini-sidebar {
-  display: flex;
-  flex: 0 0 26%;
-  flex-direction: column;
-  gap: 5px;
-  padding-block: 3px;
-}
-.mini-sidebar span {
-  display: block;
-  width: 20px;
-  height: 4px;
-  background: #a5a6ae;
-  border-radius: 3px;
-  margin-bottom: 8px;
-}
-.mini-sidebar i {
-  height: 5px;
-  border-radius: 3px;
-  background: #c1c2ca;
-}
-.mini-sidebar i:nth-child(2) {
-  background: #f4f4f6;
-  height: 9px;
-}
-.mini-page {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 4px;
-  background: #f7f7f9;
-}
-.mini-page span {
-  width: 34%;
-  height: 6px;
-  border-radius: 3px;
-  background: #b9bac4;
-  margin-bottom: 3px;
-}
-.mini-page i {
-  width: 60%;
-  height: 4px;
-  border-radius: 3px;
-  background: #dedee5;
-}
-.appearance-preview[data-preview-theme="dark"] .mini-window {
-  background: #303137;
-}
-.appearance-preview[data-preview-theme="dark"] .mini-page,
-.appearance-preview[data-preview-theme="system"] .mini-page {
-  background: #1c1d22;
-}
-.appearance-preview[data-preview-theme="dark"] .mini-sidebar i {
-  background: #494a52;
-}
-.appearance-preview[data-preview-theme="dark"] .mini-page i,
-.appearance-preview[data-preview-theme="system"] .mini-page i {
-  background: #383941;
-}
-.accent-choices {
-  display: flex;
-  gap: 9px;
-}
-.accent-swatch {
-  display: grid;
-  place-items: center;
-  width: 23px;
-  height: 23px;
-  border: 0;
-  border-radius: 50%;
-  color: #fff;
-  background: var(--swatch);
-  outline: 2px solid transparent;
-  outline-offset: 3px;
-  cursor: default;
-}
-.accent-swatch[aria-pressed="true"] {
-  outline-color: var(--swatch);
-}
 .settings-results {
   display: grid;
   gap: 8px;
@@ -345,50 +235,6 @@
   display: block;
   margin-block-start: 5px;
   font-size: 12px;
-}
-.identity-card {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 8px 0 30px;
-}
-.identity-avatar {
-  display: grid;
-  place-items: center;
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  background: var(--color-fill);
-  color: var(--color-muted);
-}
-.identity-card h2,
-.settings-intro h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-}
-.identity-card p {
-  margin: 4px 0 0;
-  color: var(--color-muted);
-  font-size: 12px;
-}
-.settings-intro {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
-  padding-block: 8px 32px;
-  color: var(--color-muted);
-}
-.settings-intro h2 {
-  color: var(--color-text);
-}
-.settings-intro p {
-  max-width: 450px;
-  font-size: 13px;
-  line-height: 1.7;
-  margin: 0;
 }
 .settings-about {
   display: flex;
@@ -437,35 +283,6 @@
   margin-inline: auto;
   padding: 40px clamp(24px, 6vw, 72px);
 }
-.library-empty {
-  min-height: 350px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-}
-.library-icon {
-  display: grid;
-  place-items: center;
-  height: 64px;
-  width: 64px;
-  border-radius: var(--radius-card);
-  background: var(--color-fill);
-  color: var(--color-muted);
-  margin-block-end: 20px;
-}
-.library-empty h2 {
-  font-size: 17px;
-  font-weight: 500;
-  letter-spacing: -0.025em;
-}
-.library-empty p {
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--color-muted);
-  max-width: 340px;
-}
 @container (max-width: 450px) {
   .settings-page .ui-settings-row {
     flex-wrap: wrap;
@@ -473,13 +290,6 @@
   }
   .settings-page .ui-settings-control {
     max-width: 100%;
-  }
-  .appearance-previews {
-    gap: 6px;
-    padding-inline: 12px;
-  }
-  .mini-window {
-    height: 70px;
   }
 }
 @media (max-width: 1000px) {
@@ -502,9 +312,6 @@
 @media (forced-colors: active) {
   .settings-nav-item[aria-current="page"] {
     outline: 1px solid Highlight;
-  }
-  .accent-swatch {
-    border: 1px solid ButtonText;
   }
   .settings-page .ui-settings-group {
     border: 1px solid CanvasText;
@@ -547,44 +354,49 @@
 .sidebar-tool-rail {
   flex: 0 0 56px;
 }
+/* Beside a full-height panel the rail keeps only the lights' row. */
+.sidebar-lights {
+  flex: none;
+  height: var(--titlebar-height);
+}
 .settings-sidebar-navigation {
   position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 8px 8px 0;
+  padding: 0 8px;
 }
-.settings-back {
+/* Headed like a tool panel: its name, and the way out. */
+/* The panel runs the full height, so its title shares the lights' row. */
+.settings-panel-header {
   display: flex;
   align-items: center;
-  gap: 9px;
-  min-height: 36px;
-  padding: 8px;
-  margin-bottom: 10px;
-  border: 0;
-  border-radius: var(--radius-row);
-  color: var(--color-muted);
-  background: transparent;
-  font-size: 12px;
-  text-align: start;
-  cursor: default;
+  gap: 8px;
+  min-height: var(--titlebar-height);
+  margin-block: 4px 6px;
+  padding-inline: 4px 0;
 }
-.settings-back:hover {
-  background: var(--color-fill);
-  color: var(--color-text);
+.settings-panel-header h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: -0.015em;
 }
 .settings-sidebar-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding-inline: 10px;
-  background: var(--color-fill);
-  border-radius: var(--radius-row);
-  box-shadow: var(--shadow-field);
-  margin-bottom: 12px;
+  gap: 6px;
+  min-height: var(--search-height);
+  padding-inline: var(--control-inset);
+  background: var(--color-field);
+  border-radius: var(--radius-field);
+  margin-bottom: 10px;
   color: var(--color-faint);
+}
+.settings-sidebar-search:hover {
+  background: var(--color-field-hover);
 }
 .settings-sidebar-search input {
   min-width: 0;
@@ -593,11 +405,12 @@
   border: 0;
   outline: none;
   color: var(--color-text);
-  font-size: 12px;
+  font-size: var(--text-body);
 }
 .settings-sidebar-search:focus-within {
-  outline: 2px solid var(--color-ring);
-  outline-offset: 2px;
+  background: var(--color-field-hover);
+  box-shadow: var(--shadow-field-focus);
+  color: var(--color-muted);
 }
 .settings-sidebar-navigation .settings-nav-item {
   font-size: 13px;
@@ -607,15 +420,11 @@
   border-radius: inherit;
   box-shadow: none;
 }
-.settings-eyebrow {
-  display: block;
-  font-size: 11px;
-  color: var(--color-faint);
-  margin-bottom: 10px;
-}
-.settings-page .ui-settings-group > [data-setting] + [data-setting],
-.settings-page .ui-settings-group > [data-setting] + .ui-settings-row,
-.settings-page .ui-settings-group > .ui-settings-row + [data-setting] {
+/* A row after a row draws its own inset hairline; this rule only joins a row
+   to a section that is not one, so two rows never get two dividers. */
+.settings-page .ui-settings-group > [data-setting]:not(.ui-settings-row) + [data-setting],
+.settings-page .ui-settings-group > [data-setting]:not(.ui-settings-row) + .ui-settings-row,
+.settings-page .ui-settings-group > .ui-settings-row + [data-setting]:not(.ui-settings-row) {
   border-top: 1px solid var(--color-border);
 }
 [data-setting] {
@@ -742,6 +551,10 @@
   background: rgb(0 0 0 / 0.3);
   animation: interface-fade var(--motion-base) var(--ease-out);
 }
+/* The same dimming behind a native modal dialog in Settings. */
+.settings-modal::backdrop {
+  background: rgb(0 0 0 / 0.3);
+}
 .settings-dialog {
   position: fixed;
   z-index: 81;
@@ -787,64 +600,6 @@
   justify-content: flex-end;
   gap: 8px;
   margin-top: 28px;
-}
-.profile-editor-hero {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  margin-bottom: 30px;
-}
-.profile-editor-hero h2 {
-  font-size: 21px;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  margin: 0;
-}
-.profile-editor-hero p {
-  font-size: 12px;
-  color: var(--color-muted);
-  margin: 5px 0 0;
-}
-.profile-photo-preview {
-  width: 86px;
-  height: 86px;
-  flex: none;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border-radius: 50%;
-  background: var(--color-fill);
-  border: 1px solid var(--color-border);
-  color: var(--color-muted);
-  font-size: 32px;
-}
-.profile-photo-preview img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.profile-icon-choices {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 26px;
-}
-.profile-icon-choices button {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  background: var(--color-fill);
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-  color: var(--color-muted);
-}
-.profile-icon-choices button[aria-pressed="true"] {
-  border-color: var(--color-accent);
-  color: var(--color-text);
-}
-.profile-range {
-  display: grid;
-  gap: 10px;
 }
 @keyframes interface-fade {
   from {
@@ -968,13 +723,11 @@
   box-shadow: none !important;
 }
 
-/* A row being dragged to a new place in its list: lifted off the column,
-   the one thing in it that casts a shadow, until it is set down. */
-.browse-tab[data-lifted][data-lifted] {
-  z-index: 2;
-  scale: 1.02;
-  background: var(--row-active);
-  box-shadow: var(--shadow-float);
+/* A row being dragged to a new place in its list: it waits in the slot a drop
+   would take, dimmed, while its card is with the pointer. */
+.browse-tab[data-lifted][data-lifted],
+.rail-list > li[data-lifted] {
+  opacity: 0.38;
 }
 
 /* The dock's site row. */
@@ -985,14 +738,18 @@
     box-shadow var(--motion-fast) var(--ease-out);
 }
 /* With nothing kept, the row still holds a tile's worth of space on the
-   tiles' own ground: an empty slot, not a dashed outline of one. A line of
-   grey text alone would read as a bug; a wireframe reads as unfinished. */
+   tiles' own ground: an empty slot, not a dashed outline of one. */
 .dock-sites[data-empty="true"] {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: var(--dock-tile);
-  background: var(--color-card);
+  background: var(--color-tile);
+}
+/* On a card the thumb has to stand off white, so it is raised, not lifted. */
+.settings-page {
+  --segment-thumb: var(--segment-thumb-card);
+  --shadow-segment-thumb: var(--shadow-segment-thumb-card);
 }
 .dock-sites[data-over="true"] {
   background: var(--color-fill-hover);
@@ -1084,78 +841,6 @@
   max-width: 180px;
   white-space: nowrap;
 }
-.settings-inline-note {
-  margin: 10px 4px 24px;
-  font-size: 11px;
-  line-height: 1.65;
-  color: var(--color-muted);
-}
-.language-order {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  background: var(--color-surface);
-  border-radius: var(--radius-control);
-  overflow: hidden;
-}
-.language-order li {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 16px;
-}
-.language-order li + li {
-  border-top: 1px solid var(--color-border);
-}
-.language-index {
-  width: 18px;
-  flex: none;
-  color: var(--color-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.language-label {
-  flex: 1;
-  min-width: 0;
-}
-.language-label strong {
-  display: block;
-  font-size: 13px;
-  font-weight: 450;
-}
-.language-label > span {
-  display: block;
-  font-size: 11px;
-  color: var(--color-muted);
-  margin-top: 4px;
-}
-.language-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.language-picker {
-  overflow-y: auto;
-  max-height: min(320px, 38vh);
-  overscroll-behavior: contain;
-}
-.language-picker-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 2px;
-}
-.language-picker-row small {
-  color: var(--color-faint);
-  font-size: 10px;
-}
-.language-picker > p {
-  font-size: 12px;
-  color: var(--color-muted);
-  padding: 20px;
-  text-align: center;
-}
 .settings-result-section {
   display: block;
   font-size: 10px;
@@ -1171,10 +856,6 @@
   .settings-callout > .ui-button {
     margin-inline-start: 60px;
   }
-  .language-order li {
-    padding: 12px;
-    gap: 10px;
-  }
 }
 :root[data-density="compact"] .browser-sidebar {
   --row-sidebar: 32px;
@@ -1186,30 +867,14 @@
 :root[data-contrast="true"] .settings-page .ui-settings-group {
   outline: 1px solid var(--color-border-strong);
 }
-:root[data-text="large"]
-  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
-  font-size: 14px;
-}
-:root[data-text="small"]
-  :is(.settings-nav-item, .ui-input, .ui-button, .settings-page .ui-settings-copy h3) {
-  font-size: 12px;
-}
-:root[data-text="large"] .browser-sidebar {
-  --sidebar-row-text: 14px;
-}
-:root[data-text="small"] .browser-sidebar {
-  --sidebar-row-text: 12px;
-}
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */
 .settings-sidebar-navigation .settings-nav-item,
-.settings-sidebar-navigation .settings-back,
 .browser-sidebar .folder-row {
   color: var(--color-label-secondary);
 }
 .settings-sidebar-navigation .settings-nav-item:hover,
-.settings-sidebar-navigation .settings-nav-item[aria-current="page"],
-.settings-sidebar-navigation .settings-back:hover {
+.settings-sidebar-navigation .settings-nav-item[aria-current="page"] {
   color: var(--color-text);
 }
 .settings-sidebar-navigation .settings-nav-group h2 {
@@ -1220,7 +885,6 @@
 .settings-page-heading > p,
 .settings-page .ui-settings-copy p,
 .settings-page .ui-settings-section > h2,
-.settings-page .settings-eyebrow,
 .settings-page .settings-value {
   color: var(--color-label-secondary);
 }
@@ -1243,5 +907,56 @@
   from {
     opacity: 0;
     translate: -8px 0;
+  }
+}
+
+/* A list that scrolls dissolves at whichever edge still has more of it, and
+   is cut by nothing: a plate there would sit on the glass. Driven by the
+   list's own scroll, so it costs nothing while still and shows nothing when
+   everything fits. */
+@property --edge-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+@property --edge-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0;
+}
+.scroll-edges {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--edge-top),
+    #000 calc(100% - var(--edge-bottom)),
+    transparent
+  );
+}
+@supports (animation-timeline: scroll()) {
+  .scroll-edges {
+    animation:
+      edge-top linear both,
+      edge-bottom linear both;
+    animation-timeline: scroll(self), scroll(self);
+    animation-range:
+      0 24px,
+      calc(100% - 24px) 100%;
+  }
+}
+@keyframes edge-top {
+  from {
+    --edge-top: 0px;
+  }
+  to {
+    --edge-top: 18px;
+  }
+}
+@keyframes edge-bottom {
+  from {
+    --edge-bottom: 18px;
+  }
+  to {
+    --edge-bottom: 0px;
   }
 }

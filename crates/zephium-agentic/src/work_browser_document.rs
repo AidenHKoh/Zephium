@@ -18,12 +18,23 @@ pub enum WorkBrowserDocumentPolicy {
     /// Public browsing may rewrite its query during initial page setup. Freeze
     /// one safe native URL on the exact same origin/path and committed load;
     /// this grants neither a redirect nor any subsequent location change.
+    /// A redirect of the initial load is refused; the gate keeps its safe
+    /// public destination so the read's owner may admit a new read there.
     PublicQueryFinalization,
     /// Public interactions may update a safe query within the committed document.
-    /// The native gate still refuses every unapproved load, origin/path change,
+    /// A bounded first-page GET reload of the exact requested address may settle
+    /// automatic browser verification; no post-action replay is authorized.
+    /// The native gate still refuses every other unapproved load, origin/path change,
     /// fragment and credential-bearing location. The admitted URL remains the
     /// resource's stable citation address; query state grants no new destination.
+    /// Redirects are refused and kept as for `PublicQueryFinalization`.
     PublicSameDocumentQuery,
+    /// A browser search's results page, read by Rust and never cited by its
+    /// own address: before its first document is ready, its server and
+    /// script redirects may move it anywhere on the requested site (safe
+    /// public HTTPS only). Once ready it is held like
+    /// `PublicSameDocumentQuery`; cross-site redirects are refused.
+    PublicResultsPage,
     /// Work in the person's session on one site: redirects, committed loads
     /// and same-document location changes may move anywhere on the requested
     /// site (registrable domain, same scheme and port). Page-initiated loads
@@ -32,13 +43,22 @@ pub enum WorkBrowserDocumentPolicy {
 }
 
 impl WorkBrowserDocumentPolicy {
+    /// Anonymous public reading, whose loads must be safe public HTTPS.
+    pub const fn is_public(self) -> bool {
+        matches!(
+            self,
+            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery | Self::PublicResultsPage
+        )
+    }
+    /// The native gate follows same-site loads while the first document
+    /// settles, instead of refusing them.
+    pub const fn follows_site_loads(self) -> bool {
+        matches!(self, Self::SiteSession | Self::PublicResultsPage)
+    }
     /// Checks trusted admission, before any request is sent to the native port.
     pub fn admits_request(self, requested: &ContextNavigationTarget) -> bool {
         let url = requested.as_url();
-        if matches!(
-            self,
-            Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
-        ) {
+        if self.is_public() {
             return url.scheme() == "https"
                 && url.fragment().is_none()
                 && crate::semantic_wire::model_safe_public_url(requested);
@@ -72,6 +92,9 @@ impl WorkBrowserDocumentPolicy {
         if self == Self::SiteSession {
             return same_site(requested, effective);
         }
+        if self == Self::PublicResultsPage {
+            return same_site(requested, effective) && self.admits_request(effective);
+        }
         if matches!(
             self,
             Self::PublicQueryFinalization | Self::PublicSameDocumentQuery
@@ -97,8 +120,33 @@ impl WorkBrowserDocumentPolicy {
     }
 }
 
+/// Where a public read's first document was sent, by its server or its own
+/// script, before it was ready. The native gate refuses that load and keeps
+/// its safe public destination here, once; it grants no navigation itself.
+#[derive(Clone, Default)]
+pub struct WorkBrowserRedirect(std::sync::Arc<std::sync::Mutex<Option<ContextNavigationTarget>>>);
+
+impl WorkBrowserRedirect {
+    /// Keeps the first refused destination; later ones change nothing.
+    pub fn record(&self, destination: ContextNavigationTarget) {
+        if let Ok(mut slot) = self.0.lock() {
+            slot.get_or_insert(destination);
+        }
+    }
+    /// The refused destination, if the read was redirected.
+    pub fn destination(&self) -> Option<ContextNavigationTarget> {
+        self.0.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
+impl std::fmt::Debug for WorkBrowserRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkBrowserRedirect([redacted])")
+    }
+}
+
 /// HTTPS, or plain HTTP on a loopback host (local qualification sites only).
-fn site_scheme(target: &ContextNavigationTarget) -> bool {
+pub fn site_scheme(target: &ContextNavigationTarget) -> bool {
     let url = target.as_url();
     url.username().is_empty()
         && url.password().is_none()
@@ -212,6 +260,56 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn a_results_page_settles_anywhere_on_its_site_over_safe_https() {
+        let policy = WorkBrowserDocumentPolicy::PublicResultsPage;
+        let search =
+            ContextNavigationTarget::parse("https://www.google.com/search?q=rust").unwrap();
+        assert!(policy.admits_request(&search));
+        assert!(policy.is_public() && policy.follows_site_loads());
+        for settled in [
+            "https://www.google.com/search?q=rust&sei=abc",
+            "https://consent.google.com/ml?continue=x",
+            "https://google.com/sorry/index",
+        ] {
+            let settled = ContextNavigationTarget::parse(settled).unwrap();
+            assert!(
+                policy.admits_final_document(&search, &settled),
+                "{settled:?}"
+            );
+        }
+        for foreign in [
+            "https://www.bing.com/search?q=rust",
+            "http://www.google.com/search?q=rust",
+            "https://www.google.com/search?q=rust#frag",
+            "https://www.google.com/search?access_token=private-value",
+        ] {
+            let foreign = ContextNavigationTarget::parse(foreign).unwrap();
+            assert!(
+                !policy.admits_final_document(&search, &foreign),
+                "{foreign:?}"
+            );
+        }
+        for policy in [
+            WorkBrowserDocumentPolicy::PublicQueryFinalization,
+            WorkBrowserDocumentPolicy::PublicSameDocumentQuery,
+        ] {
+            assert!(policy.is_public() && !policy.follows_site_loads());
+        }
+        assert!(WorkBrowserDocumentPolicy::SiteSession.follows_site_loads());
+        assert!(!WorkBrowserDocumentPolicy::SiteSession.is_public());
+    }
+    #[test]
+    fn a_redirect_slot_keeps_its_first_destination_and_redacts_it() {
+        let slot = WorkBrowserRedirect::default();
+        assert_eq!(slot.destination(), None);
+        let first = ContextNavigationTarget::parse("https://www.example.com/a").unwrap();
+        slot.clone().record(first.clone());
+        slot.record(ContextNavigationTarget::parse("https://www.example.com/b").unwrap());
+        assert_eq!(slot.destination(), Some(first));
+        assert!(!format!("{slot:?}").contains("example"));
     }
 
     #[test]

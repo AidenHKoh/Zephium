@@ -85,6 +85,7 @@ impl WorkModelClient for Script {
                 usage: WorkModelUsage {
                     input_tokens: 1_000,
                     cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
                     output_tokens: 100,
                     reasoning_tokens: 0,
                     cost_micros: None,
@@ -142,6 +143,7 @@ fn begin(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
         command: WorkCommandId::generate(),
         intent: WorkRuntimeIntent::BeginAgent {
             grant: WorkAgentGrantV1 {
+                draft: None,
                 provider: WorkSearchProvider::OpenAi,
                 model: PUBLIC_SEARCH_MODEL.into(),
                 max_turns: 10,
@@ -152,6 +154,7 @@ fn begin(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
                 private: false,
                 lead: None,
                 skill: None,
+                search_fallback: None,
             },
             limits: WorkExecutionLimits {
                 model_tokens: 1_000_000,

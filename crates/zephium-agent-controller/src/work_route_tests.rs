@@ -346,7 +346,9 @@ impl AgentWorkTask for RouteTask {
                 }
             }
         }
-        if self.documents.len() == 3 {
+        // The final document's samples, the one taken as soon as its load
+        // settles included.
+        if self.documents.len() == 3 || context.navigation_epoch().get() == 4 {
             let prior = self.prior_account.get().unwrap();
             match self.fault {
                 RouteFault::StaleFinalAccount => {
@@ -799,7 +801,7 @@ pub(super) fn assert_outcome(
         if let Some(session) = &recovery.state.session {
             assert_eq!(session.policy.pending_model_calls(), 0);
             assert_eq!(session.policy.pending_effects(), 0);
-            assert!(session.credential.is_none());
+            assert!(session.access.is_none());
             if fault == RouteFault::RefusalSecondClockStuck {
                 assert_eq!(session.policy.pending_navigations(), 1);
                 assert!(session.navigation_refusal.is_some());

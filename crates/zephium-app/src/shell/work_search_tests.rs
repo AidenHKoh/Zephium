@@ -69,6 +69,7 @@ impl WorkPublicSearchProvider for SearchFixture {
                                 title: "Public source".into(),
                                 start_index: 100 + index * 150,
                                 end_index: 120 + index * 150,
+                                snippet: None,
                             })
                             .collect()
                     } else {
@@ -77,6 +78,7 @@ impl WorkPublicSearchProvider for SearchFixture {
                             title: "Source".into(),
                             start_index: 14,
                             end_index: 17,
+                            snippet: None,
                         }]
                     },
                     actual_input_tokens: 200,
@@ -955,6 +957,7 @@ impl WorkPublicSearchProvider for ReuseFixture {
                         title: "Cloud".into(),
                         start_index: 14,
                         end_index: 17,
+                        snippet: None,
                     }],
                     actual_input_tokens: 200,
                     actual_output_tokens: 100,

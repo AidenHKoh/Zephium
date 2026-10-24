@@ -6,6 +6,7 @@
     ModelsSession,
     entryOf,
     keyedProviders,
+    locked,
     pickerGroups,
     providerName,
     usable,
@@ -15,6 +16,8 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import AiProviderRow from "../AiProviderRow.svelte";
+  import AiVoiceRow from "../AiVoiceRow.svelte";
+  import AiZephiumRow from "../AiZephiumRow.svelte";
   import WorkDecisions from "../WorkDecisions.svelte";
 
   let profile = $derived(tabs.profile());
@@ -48,7 +51,8 @@
     { role: "light", title: m.ai_role_light, description: m.ai_role_light_desc },
   ];
   const anyUsable = $derived(
-    !!models && keyedProviders.some((provider) => usable(models, provider)),
+    !!models &&
+      (usable(models, "cloud") || keyedProviders.some((provider) => usable(models, provider))),
   );
 
   function label(entry: WorkModelEntry) {
@@ -77,7 +81,14 @@
       ...(session?.endpoint ?? []),
       ...(expanded ? (session?.more ?? []) : []),
     ]).ready.flatMap((group) => group.entries);
-    return [automatic, ...offered.map((entry) => ({ value: entry.id, label: label(entry) }))];
+    return [
+      automatic,
+      ...offered.map((entry) =>
+        locked(models, entry.id)
+          ? { value: entry.id, label: m.ai_model_locked({ model: label(entry) }), disabled: true }
+          : { value: entry.id, label: label(entry) },
+      ),
+    ];
   }
 </script>
 
@@ -85,6 +96,8 @@
 {:else if session?.unavailable && !models}<p class="ai-note" role="alert">{m.ai_unavailable()}</p>
 {:else}
   {#if !anyUsable}<p class="ai-note">{m.ai_byok_start()}</p>{/if}
+
+  <AiZephiumRow />
 
   <SettingsGroup title={m.ai_keys_group()} description={m.ai_keys_note()}>
     {#if session}{#each keyedProviders as provider (provider)}<AiProviderRow
@@ -123,6 +136,7 @@
         {m.ai_more_failed()}
       </p>{/if}
   </SettingsGroup>
+  <AiVoiceRow />
   <WorkDecisions profile={profile.id} />
 {/if}
 

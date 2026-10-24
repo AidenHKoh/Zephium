@@ -1,5 +1,6 @@
 use super::*;
 mod activity_writes;
+mod chats;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::ids::{ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
@@ -33,6 +34,7 @@ fn tab(id: u128, space: SpaceId, url: &str) -> PersistedItem {
             url: url.into(),
             title: "T".into(),
             zoom: 1.0,
+            last_active_ms: None,
         },
     }
 }
@@ -244,6 +246,7 @@ fn sample() -> SessionState {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         items: vec![
             PersistedItem {
@@ -268,6 +271,7 @@ fn sample() -> SessionState {
                     url: "https://docs.rs/".into(),
                     title: "Docs".into(),
                     zoom: 1.5,
+                    last_active_ms: None,
                 },
             },
             tab(10, space, "https://example.com/"),
@@ -296,6 +300,7 @@ fn two_profile_sample() -> SessionState {
         id: SpaceId::from(4),
         profile: ProfileId::from(3),
         name: "Work".into(),
+        look: Default::default(),
     });
     state
 }
@@ -1797,6 +1802,29 @@ fn favicon_raster_batch_is_single_request_bounded_and_exact() {
 }
 
 #[test]
+fn permission_setting_readback_distinguishes_missing_value_and_unavailable() {
+    use zephium_core::ports::store::AppSettingReadback as Readback;
+    let store = SqliteStore::in_memory().unwrap();
+    assert!(matches!(
+        store.app_setting_readback("work.screenshots"),
+        Readback::Missing
+    ));
+    assert!(store.set_app_setting("work.screenshots".into(), "false".into()));
+    assert!(store.flush());
+    assert!(
+        matches!(store.app_setting_readback("work.screenshots"), Readback::Value(value) if value == "false")
+    );
+    assert!(matches!(
+        store.app_setting_readback(""),
+        Readback::Unavailable
+    ));
+    assert!(matches!(
+        store.app_setting_readback(&"x".repeat(MAX_SETTING_KEY_BYTES + 1)),
+        Readback::Unavailable
+    ));
+}
+
+#[test]
 fn app_settings_roundtrip() {
     let store = SqliteStore::in_memory().unwrap();
     assert_eq!(store.app_setting("keymap"), None);
@@ -2778,6 +2806,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
                 url: url.clone(),
                 title: "\\".repeat(zephium_core::item::MAX_PAGE_TITLE_CHARS),
                 zoom: 1.0,
+                last_active_ms: None,
             },
         })
         .collect();
@@ -2791,6 +2820,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
             id: space,
             profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         items,
         active_space: Some(space),
@@ -3229,6 +3259,7 @@ fn profile_deletion_rejects_a_hard_link_to_another_profile_database() {
             id: SpaceId::from(4),
             profile: survivor,
             name: "Work".into(),
+            look: Default::default(),
         }],
         items: Vec::new(),
         active_space: Some(SpaceId::from(4)),

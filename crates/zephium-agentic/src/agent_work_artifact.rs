@@ -123,6 +123,8 @@ impl AgentWorkArtifactPublication {
                                 SemanticReadField::LinkDestination => 6,
                                 SemanticReadField::ImageSource => 7,
                                 SemanticReadField::DocumentAddress => 8,
+                                // Read by the model from pixels.
+                                SemanticReadField::ViewportImage => 9,
                             },
                             context: identity.id().bytes(),
                             context_generation: source.frame.context().context_generation().get(),
@@ -174,7 +176,9 @@ impl AgentWorkArtifactPublication {
                 6
             } else if sources.values().any(|source| source.field == 7) {
                 5
-            } else if sources.values().any(|source| source.field == 6) {
+            } else if sources.values().any(|source| source.field == 6)
+                || fields.iter().any(contains_link)
+            {
                 4
             } else if result
                 .fields()
@@ -551,6 +555,27 @@ impl AgentWorkArchivedExtraction {
     pub fn fields(&self) -> &[ArchivedField] {
         &self.document.fields
     }
+    /// Fingerprint of one flattened, schema-ordered archived row and this exact
+    /// extraction. Used only to associate optional native media after success.
+    pub fn record_media_source(&self, index: u16) -> Option<[u8; 32]> {
+        let row = self
+            .document
+            .fields
+            .iter()
+            .filter_map(|field| match &field.value {
+                ArchivedValue::Rows { items } => Some(items.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .nth(usize::from(index))?;
+        let mut hash = Sha256::new();
+        hash.update(b"zephium-record-media-source-v1\0");
+        hash.update(self.descriptor.id());
+        hash.update(self.descriptor.digest());
+        hash.update(index.to_le_bytes());
+        hash.update(serde_json::to_vec(row).ok()?);
+        Some(hash.finalize().into())
+    }
     /// Resolves one historical citation within this exact archive.
     pub fn source(&self, id: u16) -> Option<&ArchivedSource> {
         self.document.sources.iter().find(|source| source.id == id)
@@ -685,6 +710,20 @@ impl ArchivedDocument {
                     }
                     source_bytes += value.len();
                 }
+                // The viewport screenshot a mapping carried: it stands in
+                // for pixels and holds no page text.
+                ArchivedSourceContent::Preview {
+                    value,
+                    source_bytes: original,
+                    truncated,
+                } if source.field == 9 && self.version >= 2 && source.role == "document" => {
+                    if *truncated
+                        || *original != value.len() as u64
+                        || value != crate::SEMANTIC_VIEWPORT_IMAGE_TEXT
+                    {
+                        return Err(invalid);
+                    }
+                }
                 ArchivedSourceContent::Boolean { .. } if source.field == 4 => {}
                 ArchivedSourceContent::Ordinal { .. } if source.field == 5 => {}
                 _ => return Err(invalid),
@@ -695,11 +734,17 @@ impl ArchivedDocument {
         }
         let (mut text_bytes, mut edges, mut values) = (0, 0, 0);
         let mut names = std::collections::BTreeSet::new();
-        let mut cite = |ids: &[u16]| -> Result<(), AgentWorkJournalError> {
+        // Text and text-list items may stand as model-read pixels. Pixel
+        // citations never establish a URL, typed amount or native scalar.
+        let mut cite = |ids: &[u16], pixels: bool| -> Result<(), AgentWorkJournalError> {
             if ids.is_empty()
                 || ids.len() > MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE
                 || ids.iter().enumerate().any(|(index, id)| {
-                    ids[..index].contains(id) || !self.sources.iter().any(|source| source.id == *id)
+                    ids[..index].contains(id)
+                        || !self
+                            .sources
+                            .iter()
+                            .any(|source| source.id == *id && (pixels || source.field != 9))
                 })
             {
                 return Err(invalid);
@@ -746,21 +791,33 @@ impl ArchivedDocument {
                         valid_text(value, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES)?;
                         text_bytes += value.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, true)?;
                     }
                     ArchivedValue::Url { value, sources }
                     | ArchivedValue::ImageUrl { value, sources } => {
                         let image = matches!(field.value, ArchivedValue::ImageUrl { .. });
+                        // A link is a cited destination, the read's own
+                        // address, or one a cited text prints on its page.
+                        let printed = |source: &ArchivedSource| {
+                            !image
+                                && matches!(source.field, 1 | 2)
+                                && matches!(&source.content, ArchivedSourceContent::Text { value: text }
+                                if url::Url::parse(&source.origin).is_ok_and(|origin| {
+                                    crate::semantic_extract::printed_addresses(text, &origin)
+                                        .iter()
+                                        .any(|(_, _, resolved)| resolved == value)
+                                }))
+                        };
                         if self.version < if image { 5 } else { 4 } || !crate::semantic_extract::exact_public_url(value)
                             || !sources.iter().any(|id| self.sources.iter().any(|source|
-                                source.id == *id && (source.field == if image { 7 } else { 6 } || (!image && source.field == 8)) && matches!(&source.content,
-                                    ArchivedSourceContent::Preview { value: observed, .. } if observed == value))) {
+                                source.id == *id && (((source.field == if image { 7 } else { 6 } || (!image && source.field == 8)) && matches!(&source.content,
+                                    ArchivedSourceContent::Preview { value: observed, .. } if observed == value)) || printed(source)))) {
                             return Err(invalid);
                         }
                         valid_text(value, crate::semantic::MAX_SEMANTIC_LINK_DESTINATION_BYTES)?;
                         text_bytes += value.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::Money {
                         amount,
@@ -799,23 +856,23 @@ impl ArchivedDocument {
                         }
                         text_bytes += amount.len() + currency.len();
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::Boolean { sources, .. }
                     | ArchivedValue::Unsigned { sources, .. } => {
                         values += 1;
-                        cite(sources)?;
+                        cite(sources, false)?;
                     }
                     ArchivedValue::TextList { items, sources } => {
                         if items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
                             return Err(invalid);
                         }
-                        cite(sources)?;
+                        cite(sources, true)?;
                         for item in items {
                             valid_text(&item.value, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES)?;
                             text_bytes += item.value.len();
                             values += 1;
-                            cite(&item.sources)?;
+                            cite(&item.sources, true)?;
                         }
                     }
                 }
@@ -841,6 +898,14 @@ fn extracted_money(field: &SemanticExtractedField) -> bool {
     }
 }
 
+fn contains_link(field: &ArchivedField) -> bool {
+    match &field.value {
+        ArchivedValue::Url { .. } => true,
+        ArchivedValue::Rows { items } => items.iter().flatten().any(contains_link),
+        _ => false,
+    }
+}
+
 fn contains_money(field: &ArchivedField) -> bool {
     match &field.value {
         ArchivedValue::Money { .. } => true,
@@ -853,9 +918,11 @@ fn valid_text(value: &str, limit: usize) -> Result<(), AgentWorkJournalError> {
     if value.len() > limit {
         return Err(AgentWorkJournalError::Capacity);
     }
-    if crate::semantic_wire::looks_like_secret_value(value)
-        || SemanticText::try_new(value.to_owned(), limit).is_err()
-    {
+    // A cited multi-line value (a message body) keeps its line breaks.
+    let plain = |character: char| {
+        matches!(character, '\n' | '\t') || !crate::semantic::invalid_semantic_char(character)
+    };
+    if crate::semantic_wire::looks_like_secret_value(value) || !value.chars().all(plain) {
         Err(AgentWorkJournalError::Uncertain)
     } else {
         Ok(())

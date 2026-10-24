@@ -1,4 +1,5 @@
 use super::*;
+use crate::reply::block_on;
 use std::sync::Mutex;
 use zephium_core::blocker::{
     BlockerConfig, BlockerConfigRevision, ContentPolicyFailure, ContentPolicyGeneration,
@@ -293,10 +294,12 @@ type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
     extension_action_requests: Mutex<Vec<(ProfileId, ItemId, ExtensionBrowserSurfaceGeneration)>>,
     extension_action_invocations: Mutex<Vec<ExtensionActionRequest>>,
@@ -344,6 +347,9 @@ pub(crate) struct FakeEngine {
 impl FakeEngine {
     fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
+    }
+    fn previews(&self) -> Vec<Option<zephium_core::ports::engine::DropPreview>> {
+        self.previews.lock().unwrap().clone()
     }
     fn log(&self, s: String) {
         self.calls.lock().unwrap().push(s);
@@ -455,6 +461,16 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
+        self.automatic_pip
+            .lock()
+            .unwrap()
+            .push((Some(id), background));
+        NativeDispatch::Scheduled
+    }
+    fn cancel_automatic_pip(&self) {
+        self.automatic_pip.lock().unwrap().push((None, false));
+    }
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
         self.log(match gate {
             Some(gate) => format!("focus-gate {}", gate.shut.join(",")),
@@ -698,7 +714,12 @@ impl Engine for FakeEngine {
         self.log(format!("layout@{window} {}", ids.join(",")));
         self.native_admission()
     }
-    fn set_drop_indicator(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        _window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
+        self.previews.lock().unwrap().push(preview);
         self.native_admission()
     }
     fn hint_stage_motion(
@@ -925,7 +946,23 @@ pub(crate) struct FakeStore {
             zephium_core::permissions::PagePermissionPatch,
         )>,
     >,
+    pub(super) avatars: Mutex<Vec<AvatarWrite>>,
+    pub(crate) chat_clears: Mutex<Vec<(ProfileId, Option<i64>)>>,
+    /// Tasks `resource_call` lists, and the searches it was asked for.
+    pub(super) task_rows: Mutex<
+        Vec<(
+            zephium_core::resources::ResourceSummary,
+            zephium_core::resources::TaskMetadata,
+        )>,
+    >,
+    pub(super) task_searches: Mutex<Vec<String>>,
 }
+
+type AvatarWrite = (
+    ProfileId,
+    zephium_core::profiles::ProfileAvatar,
+    Option<Arc<Vec<u8>>>,
+);
 
 impl FakeStore {
     fn complete_blocker_update(&self, outcome: BlockerConfigUpdateOutcome) {
@@ -950,6 +987,67 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn resource_call(
+        &self,
+        _profile: ProfileId,
+        call: zephium_core::resources::ResourceCall,
+        done: zephium_core::resources::ResourceDone,
+    ) {
+        use zephium_core::resources::{ResourceCall, ResourceError, ResourceResponse};
+        let ResourceCall::ListTasks { query } = call else {
+            return done(ResourceResponse::Error {
+                error: ResourceError::Unavailable,
+            });
+        };
+        self.task_searches
+            .lock()
+            .unwrap()
+            .push(query.search.clone());
+        let (items, metadata) = self
+            .task_rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(task, _)| task.title.to_lowercase().contains(&query.search))
+            .take(usize::from(query.limit))
+            .cloned()
+            .unzip();
+        done(ResourceResponse::TaskPage {
+            lists: Vec::new(),
+            metadata,
+            items,
+            next: None,
+            counts: Default::default(),
+        });
+    }
+
+    fn save_profile_avatar(
+        &self,
+        profile: ProfileId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        done: Box<dyn FnOnce(bool) + Send>,
+    ) {
+        self.avatars.lock().unwrap().push((profile, avatar, photo));
+        done(true);
+    }
+
+    fn profile_avatar_photo(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let photo = self
+            .avatars
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(owner, _, _)| *owner == profile)
+            .and_then(|(_, _, photo)| photo.as_deref().cloned());
+        done(photo);
+    }
+
     fn load_page_permission_catalog(
         &self,
         profile: ProfileId,
@@ -1361,6 +1459,11 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn clear_chats(&self, profile: ProfileId, since: Option<i64>) -> u32 {
+        self.chat_clears.lock().unwrap().push((profile, since));
+        0
+    }
+
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
@@ -1632,6 +1735,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
         Projection::OperationProcessed(_) => {}
+        Projection::Profiles(_) => {}
         Projection::OpenNote { .. } => {}
     }
 }
@@ -1663,6 +1767,37 @@ pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Scre
 
 fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
     setup_with(Arc::new(FakeStore::default()))
+}
+
+/// A running actor with its first window shown: the handle and the profile,
+/// space and tab it opened with.
+pub(super) fn started(store: Arc<FakeStore>) -> (Handle, ProfileId, SpaceId, ItemId) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = spawn(
+        Arc::new(FakeEngine::default()),
+        store,
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| {
+            let _ = tx.send(projection);
+        }),
+    )
+    .expect("spawn test shell");
+    assert!(handle.dispatch(Command::SetWindowSize(Size::new(1200.0, 800.0))));
+    assert!(handle.dispatch(Command::Bootstrap));
+    let state = std::iter::from_fn(|| rx.recv_timeout(std::time::Duration::from_secs(2)).ok())
+        .find_map(|projection| match projection {
+            Projection::Items(state) if state.profile.is_some() => Some(state),
+            _ => None,
+        })
+        .expect("bootstrap snapshot");
+    (
+        handle,
+        ProfileId::parse(&state.profile.unwrap().id).unwrap(),
+        SpaceId::parse(state.active_space_id.as_deref().unwrap()).unwrap(),
+        ItemId::parse(state.active.as_deref().unwrap()).unwrap(),
+    )
 }
 
 type IconLog = Arc<Mutex<Vec<zephium_ipc::FaviconsView>>>;
@@ -1780,6 +1915,7 @@ fn add_inactive_named_profile(shell: &mut Shell, seed: u128) -> ProfileId {
         id: space,
         profile,
         name: "Deletable".into(),
+        look: Default::default(),
     }));
     profile
 }
@@ -1905,6 +2041,7 @@ mod extension_browser_surface;
 mod favicons;
 mod fullscreen;
 mod history;
+mod lookup;
 #[path = "navigation.rs"]
 mod navigation_tests;
 mod notes;
@@ -1915,9 +2052,11 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod spaces;
 mod tabs;
 mod time;
 mod view_lifecycle;

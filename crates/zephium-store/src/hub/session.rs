@@ -42,6 +42,22 @@ struct BoundedSpace {
     id: SpaceId,
     profile: ProfileId,
     name: String,
+    #[serde(default)]
+    look: zephium_core::spaces::SpaceLook,
+}
+
+fn space_look_bounded(look: &zephium_core::spaces::SpaceLook) -> bool {
+    use zephium_core::spaces::{SpaceIcon, SpaceTheme, MAX_SPACE_EMOJI_BYTES};
+    let icon = match &look.icon {
+        Some(SpaceIcon::Emoji(text)) => text.len() <= MAX_SPACE_EMOJI_BYTES,
+        _ => true,
+    };
+    let theme = match &look.theme {
+        Some(SpaceTheme::Preset(id)) => id.len() <= 64,
+        Some(SpaceTheme::Custom(seeds)) => seeds.len() <= zephium_core::theme::MAX_CUSTOM_BYTES,
+        None => true,
+    };
+    icon && theme
 }
 
 #[derive(serde::Deserialize)]
@@ -89,6 +105,8 @@ enum BoundedKind {
         url: String,
         title: String,
         zoom: f64,
+        #[serde(default)]
+        last_active_ms: Option<u64>,
     },
     BrowserTab {
         page: zephium_core::item::BrowserOwnedTab,
@@ -109,7 +127,7 @@ where
     D: serde::Deserializer<'de>,
 {
     bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_SPACES, |space| {
-        space.name.len() <= MAX_NAME_BYTES
+        space.name.len() <= MAX_NAME_BYTES && space_look_bounded(&space.look)
     })
 }
 
@@ -120,7 +138,9 @@ where
     bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_ITEMS, |item| {
         match &item.kind {
             BoundedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
-            BoundedKind::Tab { url, title, zoom } => {
+            BoundedKind::Tab {
+                url, title, zoom, ..
+            } => {
                 url.len() <= MAX_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES
                     && zoom.is_finite()
@@ -168,6 +188,7 @@ impl From<BoundedSessionState> for SessionState {
                     id: space.id,
                     profile: space.profile,
                     name: space.name,
+                    look: space.look,
                 })
                 .collect(),
             items: value
@@ -184,9 +205,17 @@ impl From<BoundedSessionState> for SessionState {
                     },
                     kind: match item.kind {
                         BoundedKind::Folder { name } => PersistedKind::Folder { name },
-                        BoundedKind::Tab { url, title, zoom } => {
-                            PersistedKind::Tab { url, title, zoom }
-                        }
+                        BoundedKind::Tab {
+                            url,
+                            title,
+                            zoom,
+                            last_active_ms,
+                        } => PersistedKind::Tab {
+                            url,
+                            title,
+                            zoom,
+                            last_active_ms,
+                        },
                         BoundedKind::BrowserTab { page } => PersistedKind::BrowserTab { page },
                     },
                 })
@@ -236,6 +265,7 @@ mod qa_settings_recovery_tests {
                 id: space,
                 profile,
                 name: "Browse".into(),
+                look: Default::default(),
             }],
             items: vec![
                 PersistedItem {
@@ -249,6 +279,7 @@ mod qa_settings_recovery_tests {
                         url: "https://example.test/".into(),
                         title: "Example".into(),
                         zoom: 1.0,
+                        last_active_ms: None,
                     },
                 },
                 PersistedItem {
@@ -464,6 +495,33 @@ mod qa_settings_recovery_tests {
 }
 
 #[cfg(test)]
+mod unchanged_session_tests {
+    use super::*;
+    use zephium_core::session::PersistedProfile;
+
+    #[test]
+    fn an_identical_session_is_not_written_again_and_a_changed_one_is() {
+        let mut hub = Hub::in_memory().unwrap();
+        let mut session = SessionState {
+            profiles: vec![PersistedProfile {
+                id: 1.into(),
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            }],
+            ..SessionState::default()
+        };
+        hub.save(&session).unwrap();
+        let written = hub.meta.total_changes();
+        hub.save(&session).unwrap();
+        assert_eq!(hub.meta.total_changes(), written);
+        session.profiles[0].name = "Home".into();
+        hub.save(&session).unwrap();
+        assert!(hub.meta.total_changes() > written);
+        assert_eq!(hub.load().unwrap().unwrap().profiles[0].name, "Home");
+    }
+}
+
+#[cfg(test)]
 mod closed_session_wire_tests {
     use super::*;
 
@@ -493,6 +551,79 @@ mod closed_session_wire_tests {
     }
 }
 
+#[cfg(test)]
+mod space_look_wire_tests {
+    use super::*;
+    use zephium_core::spaces::{SpaceIcon, SpaceLook, SpaceTheme};
+
+    fn session(look: SpaceLook) -> SessionState {
+        let profile = ProfileId::from(1);
+        let space = SpaceId::from(2);
+        SessionState {
+            profiles: vec![PersistedProfile {
+                id: profile,
+                name: "Personal".into(),
+                kind: ProfileKind::Default,
+            }],
+            spaces: vec![
+                PersistedSpace {
+                    id: space,
+                    profile,
+                    name: "Home".into(),
+                    look: SpaceLook::default(),
+                },
+                PersistedSpace {
+                    id: SpaceId::from(3),
+                    profile,
+                    name: "Studio".into(),
+                    look,
+                },
+            ],
+            active_space: Some(SpaceId::from(3)),
+            ..SessionState::default()
+        }
+    }
+
+    #[test]
+    fn spaces_keep_their_look_and_order_across_a_restart() {
+        let look = SpaceLook {
+            icon: Some(SpaceIcon::Emoji("🎨".into())),
+            color: 4,
+            theme: Some(SpaceTheme::Preset("nord".into())),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = session(look.clone());
+        Hub::open(dir.path().to_path_buf())
+            .unwrap()
+            .save(&state)
+            .unwrap();
+        let loaded = Hub::open(dir.path().to_path_buf())
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, state);
+        assert_eq!(loaded.spaces[1].look, look);
+        assert_eq!(loaded.active_space, Some(SpaceId::from(3)));
+    }
+
+    #[test]
+    fn a_snapshot_from_before_looks_decodes_and_a_damaged_look_does_not() {
+        let mut value = serde_json::to_value(session(SpaceLook::default())).unwrap();
+        assert!(value["spaces"][1].get("look").is_none());
+        let old = decode_authoritative_snapshot(&value.to_string()).unwrap();
+        assert!(old.spaces.iter().all(|space| space.look.is_default()));
+
+        value["spaces"][1]["look"] = serde_json::json!({ "icon": { "symbol": 3 }, "color": 2 });
+        let decoded = decode_authoritative_snapshot(&value.to_string()).unwrap();
+        assert_eq!(decoded.spaces[1].look.icon, Some(SpaceIcon::Symbol(3)));
+        value["spaces"][1]["look"]["glow"] = serde_json::json!(true);
+        assert!(decode_authoritative_snapshot(&value.to_string()).is_none());
+        value["spaces"][1]["look"] = serde_json::json!({ "icon": { "emoji": "🎨".repeat(20) } });
+        assert!(decode_authoritative_snapshot(&value.to_string()).is_none());
+    }
+}
+
 impl Hub {
     pub(crate) fn save(&mut self, s: &SessionState) -> rusqlite::Result<()> {
         let prepared = self.prepare_session(s)?;
@@ -505,6 +636,15 @@ impl Hub {
             return Err(invalid_data(
                 "profile removal requires explicit deletion authorization",
             ));
+        }
+        // Most persists follow an action that changed nothing durable (a tab
+        // focused again, a sidebar toggled back); the session already
+        // committed is not written and synced again.
+        if self.legacy_state_purged
+            && prepared.registry == self.registry
+            && self.committed_session.as_deref() == Some(prepared.snapshot.as_str())
+        {
+            return Ok(());
         }
         self.validate_session_transition(&prepared.registry)?;
         self.commit_prepared_session(prepared, None)
@@ -646,6 +786,7 @@ impl Hub {
             params![SESSION_SCHEMA_VERSION, snapshot],
         )?;
         tx.commit()?;
+        self.committed_session = Some(snapshot);
         #[cfg(test)]
         if authorize_deletion.is_some()
             && std::mem::take(&mut self.ambiguous_profile_deletion_commit_once)

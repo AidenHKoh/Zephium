@@ -45,6 +45,8 @@ export type ConfirmAsk = Base & {
 
 export type EntryAsk = Base & {
   kind: "entry";
+  /** Exact origin for independent screenshot consent, never account entry. */
+  screenshotOrigin?: string;
   /** What people call the site: "Slack". */
   name: string;
   host: string | null;
@@ -90,7 +92,7 @@ export type FolderAsk = Base & {
   kind: "folder";
   /** The folder's own name: "Lunios". */
   name: string;
-  path: string;
+  path: string | null;
   /** Rust's option words, as they go back: allow first, then not now. */
   allow: string;
   decline: string;
@@ -115,13 +117,13 @@ export type AddressAsk = Base & {
 };
 
 export type SignInAsk = {
-  kind: "sign_in";
+  kind: "sign_in" | "check";
   step: string;
   part: string | null;
   host: string;
-  /** The held page, for Open and "I've signed in". */
-  page: WorkHumanPageV1;
-  state: "open" | "working";
+  /** The same live page, absent on a durable resolution receipt. */
+  page: WorkHumanPageV1 | null;
+  state: "open" | "working" | "done" | "failed";
 };
 
 export type Ask =
@@ -240,6 +242,35 @@ function entryOf(
   };
 }
 
+/** Rust uses the exact canonical origin as this typed question's operand. */
+function screenshotOf(base: AskBase, { prompt, options, answer }: Words): EntryAsk | null {
+  try {
+    const url = new URL(prompt);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.origin !== prompt ||
+      options.length !== 3 ||
+      options[0] !== ASK_WORDS.allow ||
+      options[1] !== "Always allow" ||
+      options[2] !== ASK_WORDS.notNow
+    )
+      return null;
+    return {
+      ...base,
+      kind: "entry",
+      screenshotOrigin: prompt,
+      name: url.hostname,
+      host: url.hostname,
+      hosts: [url.hostname],
+      plan: "",
+      always: options[1],
+      answer,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** "Use your history?": which of the person's things, by its fixed words or, failing them, its noun. */
 function contextOf(base: AskBase, { prompt, answer }: Words, loose: boolean): ContextAsk | null {
   for (const source of Object.keys(CONTEXT_PROMPTS) as ContextSource[]) {
@@ -292,10 +323,10 @@ function folderOf(
   step: WorkStepFact,
   { prompt, options, answer }: Words,
 ): FolderAsk | null {
-  const path = step.local?.folder?.trim();
-  if (!path) return null;
-  const name = folderName(path);
+  const path = step.local?.folder?.trim() || null;
   const choose = options[0] === ASK_WORDS.chooseFolder;
+  if (!path && (!choose || !step.local)) return null;
+  const name = path ? folderName(path) : "";
   const reason = choose ? prompt.replace(/^[^?]*\?\s*/u, "").trim() : "";
   return {
     ...base,
@@ -311,7 +342,17 @@ function folderOf(
 }
 
 /** A folder's own name, the last part of its path: "Documents". */
-export const folderName = (path: string) => path.replace(/\/+$/u, "").split("/").at(-1) || path;
+export const folderName = (path: string) =>
+  path
+    .replace(/[\\/]+$/u, "")
+    .split(/[\\/]/u)
+    .at(-1) || path;
+/** Display shape only; Rust admits the actual native choice and its protected-path policy. */
+export const folderChoice = (answer: string | null | undefined): string | null =>
+  answer &&
+  (/^\/(?!\/)/u.test(answer) || /^[a-z]:[\\/]/iu.test(answer) || answer.startsWith("\\\\"))
+    ? answer
+    : null;
 
 function fromAsk(
   step: WorkStepFact,
@@ -327,6 +368,8 @@ function fromAsk(
   switch (purpose) {
     case "entry":
       return entryOf(base, words, steps) ?? question;
+    case "screenshot":
+      return screenshotOf(base, words) ?? question;
     case "context":
       return contextOf(base, words, true) ?? question;
     case "connection":
@@ -408,19 +451,41 @@ export function asksOf(
     if (ask) asks.push(ask);
   }
   for (const page of held) {
-    if (page.reason !== "sign_in" || page.phase === "reading" || page.phase === "released")
+    if (
+      (page.reason !== "sign_in" && page.reason !== "challenge") ||
+      page.phase === "reading" ||
+      page.phase === "released"
+    )
       continue;
     const step = steps.find((entry) => entry.id === page.id.step);
     const url = step?.kind.kind === "read" ? step.kind.url : null;
     const host = url ? hostOf(url) : null;
     if (!host) continue;
     asks.push({
-      kind: "sign_in",
+      kind: page.reason === "sign_in" ? "sign_in" : "check",
       step: page.id.step,
       part: step?.part ?? null,
       host,
       page,
       state: page.phase === "continuing" ? "working" : "open",
+    });
+  }
+  for (const step of steps) {
+    if (step.kind.kind !== "read" || asks.some((ask) => ask.step === step.id)) continue;
+    const host = hostOf(step.kind.url);
+    const outcome = step.measurements?.outcome?.kind;
+    const unresolved =
+      outcome === "needs_sign_in" ? "sign_in" : outcome === "needs_check" ? "check" : null;
+    const resolved = step.measurements?.resolved_handoff;
+    const kind = unresolved ?? (resolved === "sign_in_and_check" ? "sign_in" : resolved);
+    if (!host || !kind) continue;
+    asks.push({
+      kind,
+      step: step.id,
+      part: step.part ?? null,
+      host,
+      page: null,
+      state: unresolved ? "failed" : "done",
     });
   }
   return asks;
@@ -434,7 +499,7 @@ export const openAsks = (asks: readonly Ask[]) =>
 export function askPart(ask: Ask): string | null {
   if (ask.part) return ask.part;
   if (ask.kind === "confirm") return registrableSite(ask.site);
-  if (ask.kind === "sign_in") return registrableSite(ask.host);
+  if (ask.kind === "sign_in" || ask.kind === "check") return registrableSite(ask.host);
   if (ask.kind === "entry" && ask.host) return registrableSite(ask.host);
   if (ask.kind === "connection" && ask.host) return registrableSite(ask.host);
   return null;

@@ -178,13 +178,48 @@ impl Shell {
         }
         self.project_blocker_status();
         if let Some(snapshot) = self.items_snapshot() {
+            self.announce_icon_owner();
             self.publish_icons();
+            if self.items_already_offered(&snapshot) {
+                return;
+            }
             (self.emit)(Projection::Items(snapshot));
+        }
+    }
+
+    /// Every committed action used to resend the whole sidebar, though many
+    /// change nothing in it. Only the revision differs between equal
+    /// snapshots; a tab's own changes in between arrived as its deltas, and
+    /// the snapshot after one differs from the last offered.
+    fn items_already_offered(&self, snapshot: &ItemsState) -> bool {
+        let Ok(mut last) = self.presentation.last_items.try_borrow_mut() else {
+            return false;
+        };
+        let same = last.as_ref().is_some_and(|offered| {
+            offered.profile == snapshot.profile
+                && offered.spaces == snapshot.spaces
+                && offered.active_space_id == snapshot.active_space_id
+                && offered.nodes == snapshot.nodes
+                && offered.tabs == snapshot.tabs
+                && offered.active == snapshot.active
+                && offered.split_group == snapshot.split_group
+        });
+        if !same {
+            *last = Some(snapshot.clone());
+        }
+        same
+    }
+
+    /// Chrome lost what it held (its document reloaded): the next snapshot goes out whole.
+    pub(super) fn forget_offered_items(&self) {
+        if let Ok(mut last) = self.presentation.last_items.try_borrow_mut() {
+            *last = None;
         }
     }
 
     pub(super) fn items_snapshot(&self) -> Option<ItemsState> {
         let win = self.windows.focused()?;
+        self.select_icon_profile(zephium_ipc::IconSurface::Chrome, win.profile);
         self.items_snapshot_from(
             &self.profiles,
             &self.spaces,
@@ -224,10 +259,7 @@ impl Shell {
         let spaces = spaces
             .iter()
             .filter(|space| space.profile == profile.id)
-            .map(|space| SpaceView {
-                id: space.id.to_string(),
-                name: space.name.clone(),
-            })
+            .map(|space| self.space_view(space))
             .collect();
 
         let mut sidebar = SidebarProjection::default();
@@ -483,7 +515,20 @@ impl Shell {
         profile: Option<ProfileId>,
     ) -> Option<zephium_ipc::IconRef> {
         let origin = tab.url.as_ref().and_then(origin_of)?;
-        self.icon_ref_for(surface, profile?, &origin)
+        let profile = profile?;
+        if let Some(icon) = self.icon_ref_for(surface, profile, &origin) {
+            return Some(icon);
+        }
+        let sibling = super::favicons::same_site_icon_origin(
+            &origin,
+            self.favicons
+                .icon_cache_order
+                .iter()
+                .rev()
+                .filter(|(owner, _)| *owner == profile)
+                .map(|(_, candidate)| candidate.as_str()),
+        )?;
+        self.icon_ref_for(surface, profile, sibling)
     }
 
     pub(super) fn icon_ref_for_url(

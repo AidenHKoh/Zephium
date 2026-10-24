@@ -3,6 +3,7 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import { WorkEnvironmentSession } from "$domain/work-environment";
+import { WORK_PLACEMENT_PIN } from "$shared/ipc/work-constants";
 import type {
   WorkArtifactDataV1,
   WorkCallV1,
@@ -41,7 +42,8 @@ function faults(view: WorkEnvironmentView, elements: ReadonlySet<string>): strin
     if (!coordinate(place.x) || !coordinate(place.y)) found.push(`coordinate ${name}`);
     if (!within(place.width, 120, 4096) || !within(place.height, 80, 4096))
       found.push(`size ${name}`);
-    if (![undefined, 0, 2].includes(place.revision ?? undefined)) found.push(`revision ${name}`);
+    if (![undefined, 0, 2, WORK_PLACEMENT_PIN].includes(place.revision ?? undefined))
+      found.push(`revision ${name}`);
   }
   for (const area of view.areas ?? [])
     if (!within(area.width, 240, 8192) || !within(area.height, 160, 8192))
@@ -174,7 +176,6 @@ test("every placement a canvas publishes holds to the checkpoint contract", asyn
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

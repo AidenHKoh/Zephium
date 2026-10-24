@@ -197,6 +197,12 @@ fn retained_observations_carry_only_the_frozen_discovery_url_capability() {
             finish(&mut result),
             AgentWorkRetainedOutcome::Accepted { .. }
         ));
+        // Only production discovery maps a sparse look beside one viewport
+        // image, where the platform can take one (c509850a).
+        assert_eq!(
+            native.screenshots.load(Ordering::Acquire),
+            usize::from(production && cfg!(any(target_os = "macos", target_os = "windows")))
+        );
         let budgets = native.observation_budgets.lock().unwrap();
         assert_eq!(budgets.len(), 3);
         assert!(budgets
@@ -527,7 +533,10 @@ fn retained_inspection_rejects_bad_refs_scopes_and_synchronous_refusal_without_r
         .unwrap_or_else(|e| e.into_inner());
     for (scope_json, reject, reads) in [
         (r#"{"kind":"subtree","target":"@a99"}"#, false, 1),
-        (r#"{"kind":"region","target":"@a2"}"#, false, 1),
+        // A region on a node that is no region is read as its subtree
+        // (6e206541); an unknown region still refuses.
+        (r#"{"kind":"region","target":"@a2"}"#, false, 2),
+        (r#"{"kind":"region","target":"@a99"}"#, false, 1),
         (r#"{"kind":"frame","target":"@a1"}"#, false, 1),
         (
             r#"{"kind":"surrounding_text","target":"@a1","before_bytes":8192,"after_bytes":1}"#,
@@ -786,7 +795,9 @@ fn retained_region_initial_oscillation_preserves_progress_not_old_authority() {
     };
     assert_eq!(settlement.closure().model_calls(), 7);
     assert_eq!(settlement.closure().navigations(), 1);
-    assert_eq!(native.reads.load(Ordering::Acquire), 6);
+    // The second whole look is refused unrun: this page already holds one
+    // (be61ff2a, 1aea564b). The refusal still answers the model.
+    assert_eq!(native.reads.load(Ordering::Acquire), 5);
     assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
     assert!(matches!(
         lifecycle.drain_until(Instant::now() + Duration::from_secs(2)),
@@ -798,7 +809,9 @@ fn retained_region_initial_oscillation_preserves_progress_not_old_authority() {
     assert!(!requests[0].contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
     for (index, request) in requests.iter().enumerate().take(5).skip(1) {
         assert!(request.contains("ZEPHIUM_HOST_INSPECTION_PROGRESS_V1"));
-        assert!(request.contains(&format!(r#"\"completed_inspections\":{index}"#)));
+        let completed = index.min(3);
+        assert!(request.contains(&format!(r#"\"completed_inspections\":{completed}"#)));
+        assert_eq!(request.contains("page_unchanged"), index >= 4);
         assert!(request.contains(r#"\"current_target\":\"@a1\""#));
         assert!(request.contains(r#"\"incomplete\":true"#));
         assert!(!request.contains("fc_1") && !request.contains("call_1"));

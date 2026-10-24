@@ -3,6 +3,7 @@ import { commands } from "$shared/ipc/bindings";
 import type {
   WorkFailureV1,
   WorkHumanAccountV1,
+  WorkHumanCheckOutcomeV1,
   WorkHumanPageIdV1,
   WorkHumanPageV1,
   WorkHumanRegionV1,
@@ -31,6 +32,7 @@ export class WorkHumanSession {
   private reading = new SvelteSet<string>();
   private again = new SvelteSet<string>();
   private beat: ReturnType<typeof setInterval> | undefined;
+  private checks = new SvelteMap<string, Promise<WorkHumanCheckOutcomeV1>>();
   constructor(readonly profile: string) {}
   /** Subscribe before the first read: an invalidation in between is never lost. */
   async start() {
@@ -118,6 +120,48 @@ export class WorkHumanSession {
   release(work: string, page: WorkHumanPageIdV1) {
     return this.act(work, commands.workHumanRelease(this.profile, work, page));
   }
+  /** Keeps a short wait (a bot check's) going a while longer; Rust bounds it. */
+  extend(work: string, page: WorkHumanPageIdV1) {
+    return this.act(work, commands.workHumanExtend(this.profile, work, page));
+  }
+  /** Fresh native verification only: queue admission and clicks never imply clearance. */
+  check(work: string, page: WorkHumanPageIdV1): Promise<WorkHumanCheckOutcomeV1> {
+    const key = `${work}:${page.attempt}:${page.step}:${page.generation}`;
+    const pending = this.checks.get(key);
+    if (pending) return pending;
+    const generation = this.generation;
+    const request = (async (): Promise<WorkHumanCheckOutcomeV1> => {
+      if (!this.active || !this.works.includes(work)) return "unavailable";
+      const reply = await observe(
+        Promise.resolve().then(() => commands.workHumanCheck(this.profile, work, page)),
+        3000,
+        this.lifetime.signal,
+      );
+      if (
+        reply.state !== "received" ||
+        !this.active ||
+        generation !== this.generation ||
+        !this.works.includes(work)
+      )
+        return "unavailable";
+      const value = reply.value;
+      if (
+        value.version !== 1 ||
+        value.profile !== this.profile ||
+        value.work !== work ||
+        value.page.attempt !== page.attempt ||
+        value.page.step !== page.step ||
+        value.page.generation !== page.generation
+      )
+        return "unavailable";
+      this.refresh(work);
+      return value.outcome;
+    })().finally(() => {
+      if (this.checks.get(key) === request) this.checks.delete(key);
+    });
+    this.checks.set(key, request);
+    return request;
+  }
   private async act(
     work: string,
     request: Promise<WorkHumanResponseV1>,
@@ -136,6 +180,7 @@ export class WorkHumanSession {
     this.stop?.();
     this.stop = null;
     this.lifetime.abort();
+    this.checks.clear();
     this.reading.clear();
     this.again.clear();
     this.pages.clear();

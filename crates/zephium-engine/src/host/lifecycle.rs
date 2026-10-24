@@ -94,6 +94,11 @@ impl EngineHost {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.forget_fullscreen(id);
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        crate::platform::imp::page_glow::forget(id);
         let removed = self.views.remove(&id);
         self.navigation_snapshots.remove(&id);
         self.partitions.remove(&id);
@@ -294,6 +299,8 @@ impl EngineHost {
             // the shell to have settled every exact Close before this barrier.
             self.native_resource_accounting_failed = true;
         }
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.release_work_profile_cookie_sources(None);
         #[cfg(target_os = "windows")]
         if let Some(downloads) = &self.downloads {
             for view in downloads.take_retained_views() {

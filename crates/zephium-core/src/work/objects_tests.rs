@@ -30,7 +30,7 @@ fn every_kind_round_trips_its_wire_shape() {
             "rating":{"value":"4.5","max":5,"count":120},"why":"Only direct flight","tags":["direct"],
             "recommended":true,"route":{"from":"WAW","to":"SFO","depart":"10:05","arrive":"13:40",
             "duration":"12h 35m","stops":0,"carrier":"LOT","carrier_host":"lot.com"},"source":0}]}),
-        json!({"kind":"plan","steps":[{"when":"Mon 6 Jan","title":"Fly WAW to SFO","kind":"travel",
+        json!({"kind":"plan","steps":[{"when":"Mon 6 Jan","date":"2027-01-04","title":"Fly WAW to SFO","kind":"travel",
             "cost":"$1,240","place":"SFO","pick":{"artifact":"01J00000000000000000000000","index":0}}],
             "total":{"label":"Total","value":"$4,380"},"checkable":true}),
         json!({"kind":"list","style":"messages","items":[{"title":"Reply to Ana about the deck",
@@ -61,6 +61,12 @@ fn every_kind_round_trips_its_wire_shape() {
             "git":{"branch":"main","changed":2,"ahead":1}}),
         json!({"kind":"media","medium":"video","url":"https://www.youtube.com/watch?v=abc","title":"Lecture 1",
             "provider":"youtube","poster":"https://i.ytimg.com/vi/abc/hqdefault.jpg","duration":"1:12:03","start_secs":30}),
+        json!({"kind":"subject","noun":"Pull request","reference":"crynta/terax#1337",
+            "title":"feat(explorer): support pasting files from OS clipboard",
+            "state":{"label":"Open","tone":"active"},"people":[{"label":"Author","value":"drunkardleo-10"}],
+            "facts":[{"label":"Changed files","value":"6"},{"label":"Checks","value":"Passing"}],
+            "labels":["enhancement"],"summary":"Adds pasting files from the **OS clipboard** with Cmd+V.",
+            "url":"https://github.com/crynta/terax/pull/1337"}),
     ];
     for shape in &shapes {
         let parsed = data(shape.clone());
@@ -71,7 +77,7 @@ fn every_kind_round_trips_its_wire_shape() {
 
 #[test]
 fn limits_come_back_as_the_field_and_the_item() {
-    let long = "x".repeat(61);
+    let long = "界".repeat(limit::PICK_NAME + 1);
     let picks = fault(
         json!({"kind":"picks","facet":"stay","items":[{"name":"Loft"},{"name":long}]}),
         0,
@@ -82,7 +88,7 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert!(
         picks
             .describe()
-            .starts_with("items[1].name is 61 characters; the limit is 60. Rule: "),
+            .starts_with("items[1].name is 201 characters; the limit is 200. Rule: "),
         "{}",
         picks.describe()
     );
@@ -103,20 +109,20 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert_eq!(detail.drop, Some(WorkFaultDrop::Remove("steps[].detail")));
     let fact = fault(
         json!({"kind":"picks","facet":"stay","items":[{"name":"Loft","facts":[
-            {"label":"Beds","value":"2","kind":"text"},{"label":"Walk","value":"x".repeat(41),"kind":"text"}]}]}),
+            {"label":"Beds","value":"2","kind":"text"},{"label":"Walk","value":"x".repeat(limit::PICK_FACT_VALUE + 1),"kind":"text"}]}]}),
         0,
     )
     .unwrap();
     assert_eq!(fact.fill(fact.path.unwrap()), "items[0].facts[1].value");
     let was = fault(
         json!({"kind":"picks","facet":"product","items":[{"name":"Falcon",
-            "price":{"display":"$79.99","was":"x".repeat(25)}}]}),
+            "price":{"display":"$79.99","was":"x".repeat(limit::PICK_PRICE + 1)}}]}),
         0,
     )
     .unwrap();
     assert!(was
         .describe()
-        .starts_with("items[0].price.was is 25 characters; the limit is 24."));
+        .starts_with("items[0].price.was is 65 characters; the limit is 64."));
     assert_eq!(was.drop, Some(WorkFaultDrop::Remove("items[].price.was")));
     assert_eq!(fact.drop, Some(WorkFaultDrop::Remove("items[].facts[]")));
     let cells = |first: &str, second: &str| {
@@ -128,10 +134,10 @@ fn limits_come_back_as_the_field_and_the_item() {
         .unwrap()
     };
     assert_eq!(
-        cells("Hetzner", &"x".repeat(61)).drop,
+        cells("Hetzner", &"x".repeat(limit::CELL_TEXT + 1)).drop,
         Some(WorkFaultDrop::Empty("rows[].cells[]"))
     );
-    assert_eq!(cells(&"x".repeat(61), "ok").drop, None);
+    assert_eq!(cells(&"x".repeat(limit::CELL_TEXT + 1), "ok").drop, None);
     let points = fault(
         json!({"kind":"reply","headline":"H","text":"T","points":["a","b","c","d","e","f"]}),
         0,
@@ -162,7 +168,7 @@ fn limits_come_back_as_the_field_and_the_item() {
     assert_eq!(
         field(
             json!({"kind":"sheet","columns":[{"label":"Note","kind":"text"}],
-            "rows":[{"cells":["A sentence that goes on well past the sixty character limit of a cell"]}]})
+            "rows":[{"cells":["界".repeat(limit::CELL_TEXT + 1)]}]})
         ),
         Some(F::SheetCell)
     );
@@ -318,6 +324,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
         max_workers: 4,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 200,
@@ -332,6 +339,7 @@ fn lead_execution() -> (WorkPlanRevision, WorkExecutionFact, WorkRevision) {
             model: "claude-sonnet-5".into(),
         }),
         skill: None,
+        search_fallback: None,
     };
     grant.validate().unwrap();
     assert!(WorkAgentGrantV1 {
@@ -398,6 +406,7 @@ fn parts_and_inputs_are_lead_facts_that_steps_and_objects_name() {
         reference: Some("trip-planning".into()),
     });
     let step = WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Search {
@@ -474,6 +483,7 @@ fn a_revision_names_one_earlier_object_once() {
         part: None,
     };
     let publish = |id: u128, artifacts: Vec<u128>| WorkStepFact {
+        model_fault: None,
         id: id.into(),
         turn: 1,
         kind: WorkStepKindV1::Publish,
@@ -526,6 +536,7 @@ fn saved_artifacts_without_the_new_fields_still_load() {
 #[test]
 fn a_connection_call_is_a_settled_step_with_closed_fields() {
     let call = |url: Option<&str>| WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Call {
@@ -608,6 +619,20 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     };
     assert!(with(WorkPartStateV1::Failed, sign_in()).validate().is_ok());
     assert!(with(WorkPartStateV1::Waiting, sign_in()).validate().is_ok());
+    let check = WorkPartNeedV1::Check {
+        host: "state.gov".into(),
+    };
+    assert!(with(WorkPartStateV1::Waiting, check.clone())
+        .validate()
+        .is_ok());
+    assert_eq!(
+        serde_json::to_value(&check).unwrap(),
+        json!({"kind":"check", "host":"state.gov"})
+    );
+    assert_eq!(
+        serde_json::from_value::<WorkPartNeedV1>(serde_json::to_value(&check).unwrap()).unwrap(),
+        check
+    );
     assert!(with(
         WorkPartStateV1::Stopped,
         WorkPartNeedV1::Retry {
@@ -627,6 +652,9 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
     for need in [
         WorkPartNeedV1::SignIn {
             host: "https://slack.com".into(),
+        },
+        WorkPartNeedV1::Check {
+            host: "https://state.gov/check?token=private".into(),
         },
         WorkPartNeedV1::AllowFolder {
             path: "Dev/Lunios".into(),
@@ -670,6 +698,7 @@ fn a_part_needs_something_only_once_it_cannot_go_on() {
 #[test]
 fn a_folder_question_names_its_folder() {
     let ask = |local: Option<WorkLocalStepV1>| WorkStepFact {
+        model_fault: None,
         id: 1.into(),
         turn: 1,
         kind: WorkStepKindV1::Ask {
@@ -696,6 +725,8 @@ fn a_folder_question_names_its_folder() {
         .validate()
         .is_ok());
     assert!(ask(None).validate().is_err());
+    assert!(ask(Some(WorkLocalStepV1::default())).validate().is_ok());
+    assert!(WorkPartNeedV1::ChooseFolder.validate().is_ok());
     assert!(ask(Some(folder("Dev/Lunios"))).validate().is_err());
     let mut question = ask(Some(folder("/Users/ana/Dev/Lunios")));
     question.kind = WorkStepKindV1::Ask {
@@ -711,6 +742,7 @@ fn a_folder_question_names_its_folder() {
 fn a_first_run_names_its_work_from_its_finish() {
     let (plan, mut fact, revision) = lead_execution();
     let finish = |title: Option<&str>| WorkStepFact {
+        model_fault: None,
         id: 9.into(),
         turn: 2,
         kind: WorkStepKindV1::Finish {
@@ -751,4 +783,88 @@ fn a_first_run_names_its_work_from_its_finish() {
         .unwrap()
         .get("title")
         .is_none());
+}
+
+#[test]
+fn a_subject_needs_its_noun_title_and_address_and_sheds_what_overflows() {
+    let base = |extra: serde_json::Value| {
+        let mut value = json!({"kind":"subject","noun":"Issue","title":"Rerun workflows like Playwright",
+            "url":"https://github.com/zephium-browser/Zephium/issues/103"});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value
+    };
+    assert_eq!(field(base(json!({}))), None);
+    assert_eq!(
+        field(base(json!({"url":"http://localhost/x"}))),
+        Some(F::SubjectUrl)
+    );
+    assert_eq!(
+        field(base(json!({"title":"x".repeat(161)}))),
+        Some(F::SubjectTitle)
+    );
+    assert_eq!(
+        field(base(json!({"summary":"# Heading"}))),
+        Some(F::SubjectSummary)
+    );
+    let people = fault(
+        base(
+            json!({"people":[{"label":"Author","value":"a"},{"label":"B","value":"b"},
+        {"label":"C","value":"c"},{"label":"D","value":"d"},{"label":"E","value":"e"}]}),
+        ),
+        0,
+    )
+    .unwrap();
+    assert_eq!(people.field, F::SubjectPeople);
+    assert_eq!(people.drop, Some(WorkFaultDrop::Keep("people")));
+}
+
+#[test]
+fn a_plan_step_date_is_a_real_day_or_goes() {
+    let step =
+        |date: &str| json!({"kind":"plan","steps":[{"date":date,"title":"Fly","kind":"travel"}]});
+    assert_eq!(field(step("2028-02-29")), None);
+    for wrong in ["2027-02-29", "2027-13-01", "9 Oct", "2027-1-04"] {
+        let fault = fault(step(wrong), 0).unwrap();
+        assert_eq!(fault.field, F::PlanStepDate, "{wrong}");
+        assert_eq!(fault.drop, Some(WorkFaultDrop::Remove("steps[].date")));
+    }
+}
+
+#[test]
+fn the_persons_own_table_list_or_plan_may_stand_empty() {
+    let empty = [
+        json!({"kind":"plan","steps":[]}),
+        json!({"kind":"list","style":"todo","items":[]}),
+        json!({"kind":"sheet","columns":[{"label":"Name","kind":"text"}],"rows":[]}),
+    ];
+    for shape in empty {
+        let data = data(shape);
+        assert!(data.validate(0).is_err(), "{}", data.kind_name());
+        assert!(data.validate_owned(0).is_ok(), "{}", data.kind_name());
+    }
+}
+
+#[test]
+fn extracted_record_limits_count_unicode_characters_without_changing_values() {
+    let shape = json!({"kind":"picks","facet":"product","items":[{
+        "name":"界".repeat(200),"price":{"display":"界".repeat(64)},
+        "facts":[{"label":"Stock","value":"界".repeat(120),"kind":"text"}]
+    }]});
+    let parsed = data(shape.clone());
+    assert!(parsed.validate(0).is_ok());
+    assert_eq!(serde_json::to_value(parsed).unwrap(), shape);
+    let sheet = json!({"kind":"sheet","columns":[{"label":"Value","kind":"text"}],"rows":[{"cells":["界".repeat(200)]}]});
+    assert!(data(sheet).validate(0).is_ok());
+    for (path, size) in [
+        ("/items/0/name", 201),
+        ("/items/0/price/display", 65),
+        ("/items/0/facts/0/value", 121),
+    ] {
+        let mut too_long = shape.clone();
+        *too_long.pointer_mut(path).unwrap() = json!("界".repeat(size));
+        assert!(data(too_long).validate(0).is_err());
+    }
 }

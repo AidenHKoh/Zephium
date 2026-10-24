@@ -1,3 +1,4 @@
+import type { DraftView, OwnedData } from "./board/types";
 import type { EvidenceReference } from "$shared/ui/data/Artifact";
 
 /** Instance-local UI callbacks; never part of a saved canvas node or runtime projection. */
@@ -52,8 +53,25 @@ export type BoardActions = {
   compare?: (id: string) => void;
   /** A draft's Send: always through Confirm. */
   send?: (id: string) => void;
-  /** A note's new Markdown, written through the notes store. */
+  /** A note's new Markdown, written through the notes store; a draft's new words. */
   write?: (id: string, markdown: string) => void;
+  /** What the person made of a draft: their words, its review and whether it went. */
+  drafted?: (id: string) => DraftEdit | undefined;
+  /** A GitHub draft's review: a comment, an approval or a request for changes. */
+  review?: (id: string, review: DraftReview) => void;
+  /** The person's own object changed in place. */
+  edit?: (id: string, change: (data: OwnedData) => OwnedData) => void;
   /** Save as note until the note exists, then Open note; nothing for what has no text. */
   note: (id: string) => { label: string; disabled?: boolean; onclick?: () => void } | undefined;
+};
+
+export type DraftReview = "comment" | "approve" | "request_changes";
+export type DraftEdit = {
+  body?: string;
+  review?: DraftReview;
+  /** The run Send started, whose steps say where the send stands. */
+  run?: string;
+  /** Where that send stands now, read from the run. */
+  send?: DraftView["send"];
+  note?: string;
 };

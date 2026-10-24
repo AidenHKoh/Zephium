@@ -216,8 +216,8 @@ impl Stage {
         attached
     }
 
-    pub fn set_drop_indicator(&self, zone: Option<Rect>) {
-        match zone {
+    pub fn set_drop_indicator(&self, preview: Option<zephium_core::ports::engine::DropPreview>) {
+        match preview.map(|preview| preview.zone) {
             None => {
                 let popup = self
                     .state

@@ -73,6 +73,8 @@ const heldPage = (phase: WorkHumanPhaseV1): WorkHumanPageV1 => ({
   remaining_millis: 150_000,
   document_revision: "9",
   can_continue: true,
+  can_extend: false,
+  work_memory: false,
 });
 
 test("a page waiting for a person is taken over in the pane, handed back, and released on Escape", async () => {
@@ -136,7 +138,6 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
     session,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
@@ -145,9 +146,10 @@ test("a page waiting for a person is taken over in the pane, handed back, and re
   root.style.height = "720px";
   root.style.width = "1100px";
 
-  await expect.element(screen.getByText("Sign in", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Sign in to ferry.example", { exact: true })).toBeVisible();
   // The card sits under the canvas chrome; the control is driven where it lives.
-  const help = () => screen.container.querySelector<HTMLElement>(".page .help")!;
+  const help = () =>
+    screen.container.querySelector<HTMLElement>('.needs [data-variant="primary"]')!;
   help().click();
   await expect.poll(() => native.present.mock.calls.length).toBe(1);
   const region = native.present.mock.lastCall![3];
@@ -218,6 +220,8 @@ test("a page that needs no sign-in asks for no account and hands back anonymousl
     reason: "challenge" as const,
     remaining: 30_000,
     canContinue: true,
+    canExtend: false,
+    workMemory: false,
   };
   const screen = await render(TakeoverPane, {
     host: "ferry.example",
@@ -234,7 +238,7 @@ test("a page that needs no sign-in asks for no account and hands back anonymousl
   expect(header.querySelector(".why")?.textContent).toBe(
     "ferry.example wants a person to prove they are not a robot",
   );
-  expect(header.querySelector(".left")?.textContent).toBe("30s left");
+  expect(header.querySelector(".left")?.textContent).toBe("0:30 left");
   expect(header.querySelector("button")).toBeNull();
   expect(screen.container.querySelector('[role="radio"], input[type="radio"]')).toBeNull();
   expect(screen.container.textContent).not.toContain("Stay anonymous");

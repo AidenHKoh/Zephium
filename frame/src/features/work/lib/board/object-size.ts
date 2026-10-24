@@ -2,6 +2,7 @@ import { diagramLayout, diagramWidth } from "../diagram";
 import { BOARD } from "./layout";
 import type { ObjectView, SheetColumn } from "./types";
 import { versus } from "./versus";
+import { calendarHeight, calendarRowsFor, calendarWidth } from "./plan-calendar";
 
 type Range = { min: number; ideal: number; max: number };
 
@@ -53,10 +54,15 @@ export function objectWidth(view: ObjectView): Range {
       const width = (cards: number) => cards * card + (cards - 1) * CARD.gap;
       return { min: width(Math.min(2, across)), ideal: width(across), max: width(across) + 160 };
     }
-    case "plan":
-      return { min: 440, ideal: 640, max: 760 };
+    case "plan": {
+      if (!calendarRowsFor(view)) return { min: 440, ideal: 640, max: 760 };
+      const width = calendarWidth();
+      return { min: width, ideal: width, max: width };
+    }
     case "list":
-      return { min: 400, ideal: 560, max: 640 };
+      return view.style === "questions"
+        ? { min: 584, ideal: 880, max: 920 }
+        : { min: 400, ideal: 560, max: 640 };
     case "sheet": {
       // A few named things compared stand as columns under a column of measures.
       if (versus(view)) {
@@ -76,6 +82,8 @@ export function objectWidth(view: ObjectView): Range {
       return { min: 520, ideal: 680, max: 860 };
     case "draft":
       return { min: 420, ideal: 520, max: 600 };
+    case "subject":
+      return { min: 440, ideal: 560, max: 640 };
     case "media":
       return view.media === "audio"
         ? { min: 320, ideal: 400, max: 480 }
@@ -100,7 +108,7 @@ export function objectWidth(view: ObjectView): Range {
     case "diagram": {
       // A diagram reads to the right at its own drawn width: the run grows to hold it.
       const ideal = Math.min(BOARD.reach, diagramWidth(view.diagram));
-      return { min: Math.min(ideal, 720), ideal, max: Math.max(ideal, BOARD.min) };
+      return { min: Math.min(ideal, 720), ideal, max: ideal };
     }
   }
 }
@@ -128,9 +136,30 @@ export function objectHeight(view: ObjectView, width: number): number {
       const height = (pictured ? Math.round(card * 0.75) + 132 : 148) + from;
       return (view.title ? 34 : 0) + rows * height + (rows - 1) * CARD.gap;
     }
-    case "plan":
+    case "plan": {
+      const calendar = calendarRowsFor(view);
+      if (calendar) {
+        const dated = view.steps.some((step) => step.date);
+        // The head holds the title, the add-to-calendar link or a month's turns; the foot, the tasks button.
+        const head = calendar.month ? 26 : view.title ? 23 : dated ? 15 : 0;
+        const foot = view.checkable ? 16 + 16 + 26 : 0;
+        return (head ? head + 16 : 0) + calendarHeight(calendar.rows, calendar.month) + foot;
+      }
       return (view.title ? 40 : 0) + view.steps.length * 56 + (view.total ? 48 : 0) + 16;
+    }
     case "list":
+      if (view.style === "questions") {
+        const across = Math.max(1, Math.floor((width + 12) / (280 + 12)));
+        const tallest = (item: (typeof view.items)[number]) =>
+          Math.max(
+            24 + lines(item.title, width / across - 36, 7.5) * 19,
+            lines(item.title, width / across - 36, 7) * 17 +
+              lines(item.detail ?? "", width / across - 36, 7.5) * 19,
+          );
+        const rows = Math.ceil(view.items.length / across);
+        const row = Math.max(...view.items.map(tallest), 60) + 32 + 18;
+        return (view.title ? 40 : 0) + rows * row + (rows - 1) * 12;
+      }
       return (
         (view.title ? 40 : 0) +
         view.items.reduce((sum, item) => sum + (item.from ? 76 : item.detail ? 56 : 40), 0)
@@ -156,8 +185,23 @@ export function objectHeight(view: ObjectView, width: number): number {
       );
     case "draft":
       return 120 + lines(view.body, width, 8) * 22;
+    case "subject":
+      return (
+        92 +
+        lines(view.heading, width - 48, 11) * 28 +
+        (view.summary ? 8 + lines(view.summary, width - 48, 7.5) * 21 : 0) +
+        (view.people.length || view.facts.length ? 70 : 0) +
+        (view.labels.length ? 44 : 0)
+      );
     case "media":
-      return view.media === "audio" ? 72 : Math.round(width * 0.5625) + 40;
+      if (view.media === "audio") return 72;
+      // The caption's title takes up to two lines, a channel one quiet line more.
+      return (
+        Math.round(width * 0.5625) +
+        22 +
+        Math.min(2, view.title ? lines(view.title, width - 28, 7.5) : 1) * 18 +
+        (view.title && view.channel ? 16 : 0)
+      );
     case "page":
       return Math.round((width * 238) / 336);
     case "note":

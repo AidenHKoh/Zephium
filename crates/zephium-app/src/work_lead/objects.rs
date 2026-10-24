@@ -73,6 +73,49 @@ pub(crate) fn newest(objects: &[CanvasObject], id: WorkArtifactId) -> Option<&Ca
     Some(at)
 }
 
+/// A canvas draft as the person last left it, labelled for a page task to
+/// enter exactly: To, Subject and the body, line breaks kept.
+pub(crate) fn draft_words(
+    projection: &WorkRuntimeProjection,
+    current: WorkExecutionId,
+    id: &str,
+) -> Result<String, String> {
+    let canvas = canvas(projection, current);
+    let found = WorkArtifactId::parse(id.trim())
+        .and_then(|id| newest(&canvas, id))
+        .ok_or("draft is the id of a draft object on this canvas")?;
+    let edited = projection
+        .executions
+        .iter()
+        .flat_map(|execution| &execution.user_artifacts)
+        .find(|state| state.artifact == found.artifact.id)
+        .and_then(|state| state.edited_data.as_ref());
+    let WorkArtifactDataV1::Draft {
+        destination,
+        to,
+        subject,
+        body,
+        ..
+    } = edited.unwrap_or(&found.artifact.data)
+    else {
+        return Err("that object is not a draft".into());
+    };
+    let mut words = String::new();
+    if let Some(to) = to {
+        words.push_str(&format!("To: {to}\n"));
+    }
+    if let Some(subject) = subject {
+        words.push_str(&format!("Subject: {subject}\n"));
+    }
+    let label = if *destination == zephium_core::work::objects::WorkDraftDestinationV1::Email {
+        "Body"
+    } else {
+        "Message"
+    };
+    words.push_str(&format!("{label}:\n{body}"));
+    Ok(words)
+}
+
 fn summary(artifact: &WorkArtifactV1) -> String {
     let text = artifact.data.plain_text();
     let line = text
@@ -150,10 +193,13 @@ pub(crate) fn read(run: &LeadRun, objects: &[CanvasObject], ids: &[String]) -> S
             .map(|link| run.cite(link.clone(), "", None))
             .collect();
         let mut data = serde_json::to_value(&artifact.data).unwrap_or(Value::Null);
+        strip_native_media(&mut data);
         items_mut(&mut data, |item| {
-            if let Some(index) = item.get("source").and_then(Value::as_u64) {
-                if let Some(key) = keys.get(index as usize) {
-                    item.insert("source".into(), Value::String(key.clone()));
+            for field in ["source", "record_source"] {
+                if let Some(index) = item.get(field).and_then(Value::as_u64) {
+                    if let Some(key) = keys.get(index as usize) {
+                        item.insert(field.into(), Value::String(key.clone()));
+                    }
                 }
             }
         });
@@ -194,6 +240,160 @@ fn items_mut(data: &mut Value, mut f: impl FnMut(&mut Map<String, Value>)) {
 }
 
 /// Plain values where the wire wants decimal strings; models send numbers.
+/// A reply set the way the canvas shows it, instead of refused for its form:
+/// list lines become points, headings and quotes become prose, links keep
+/// their words, and text past its limit ends at a sentence, the rest moving
+/// to points while they have room.
+fn shape_reply(data: &mut Value) {
+    use zephium_core::work::objects::limit::REPLY_HEADLINE;
+    use zephium_core::work::objects::limit::{REPLY_POINT, REPLY_POINTS, REPLY_TEXT};
+    if let Some(Value::String(headline)) = data.get_mut("headline") {
+        *headline = words_within(headline, REPLY_HEADLINE);
+    }
+    let Some(text) = data.get("text").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    let mut points: Vec<String> = data
+        .get("points")
+        .and_then(Value::as_array)
+        .map(|points| {
+            points
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut prose: Vec<String> = Vec::new();
+    let mut listed: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            continue;
+        }
+        let numbered = line
+            .split_once(['.', ')'])
+            .filter(|(number, rest)| {
+                !number.is_empty()
+                    && number.len() <= 2
+                    && number.bytes().all(|b| b.is_ascii_digit())
+                    && rest.starts_with(' ')
+            })
+            .map(|(_, rest)| rest);
+        let item = ["- ", "* ", "+ ", "• "]
+            .iter()
+            .find_map(|mark| line.strip_prefix(mark))
+            .or(numbered);
+        if let Some(item) = item {
+            listed.push(inline_words(item.trim()));
+        } else {
+            let line = line.trim_start_matches(['#', '>', ' ']);
+            if line.is_empty() {
+                if prose.last().is_some_and(|last| !last.is_empty()) {
+                    prose.push(String::new());
+                }
+            } else {
+                prose.push(inline_words(line));
+            }
+        }
+    }
+    let mut text = prose.join("\n").replace("\n\n\n", "\n\n");
+    text = text.trim().to_owned();
+    // A reply that was only a list leads with its first item.
+    if text.is_empty() && !listed.is_empty() {
+        text = listed.remove(0);
+    }
+    listed.extend(points);
+    points = listed;
+    if text.chars().count() > REPLY_TEXT {
+        let (kept, rest) = sentences_within(&text, REPLY_TEXT);
+        text = kept;
+        let room = REPLY_POINTS.saturating_sub(points.len());
+        let moved: Vec<String> = rest.into_iter().take(room).collect();
+        points.splice(0..0, moved);
+    }
+    let points: Vec<Value> = points
+        .into_iter()
+        .filter(|point| !point.trim().is_empty())
+        .take(REPLY_POINTS)
+        .map(|point| Value::String(words_within(&point, REPLY_POINT)))
+        .collect();
+    data["text"] = Value::String(text);
+    if !points.is_empty() || data.get("points").is_some() {
+        data["points"] = Value::Array(points);
+    }
+}
+
+/// Markdown links keep their words and images go; the canvas draws its own.
+fn inline_words(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let image = rest[..open].ends_with('!');
+        let Some(close) = rest[open..].find("](").map(|i| open + i) else {
+            break;
+        };
+        let Some(end) = rest[close..].find(')').map(|i| close + i) else {
+            break;
+        };
+        out.push_str(&rest[..if image { open - 1 } else { open }]);
+        if !image {
+            out.push_str(&rest[open + 1..close]);
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
+}
+
+/// The whole sentences that fit in `max` characters, and the sentences after.
+fn sentences_within(text: &str, max: usize) -> (String, Vec<String>) {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (index, (at, c)) in chars.iter().enumerate() {
+        let next = chars.get(index + 1).map(|(_, c)| *c);
+        if matches!(c, '.' | '!' | '?' | '\n') && next.is_none_or(char::is_whitespace) {
+            let end = at + c.len_utf8();
+            sentences.push(text[start..end].trim().to_owned());
+            start = end;
+        }
+    }
+    if start < text.len() {
+        sentences.push(text[start..].trim().to_owned());
+    }
+    sentences.retain(|s| !s.is_empty());
+    let mut kept = String::new();
+    let mut taken = 0;
+    for sentence in &sentences {
+        let joined = if kept.is_empty() {
+            sentence.clone()
+        } else {
+            format!("{kept} {sentence}")
+        };
+        if joined.chars().count() > max {
+            break;
+        }
+        kept = joined;
+        taken += 1;
+    }
+    if kept.is_empty() {
+        return (words_within(text, max), vec![]);
+    }
+    (kept, sentences.split_off(taken))
+}
+
+/// At most `max` characters, cut between words with an ellipsis.
+pub(crate) fn words_within(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", cut.trim_end_matches([',', ';', ':', ' ']))
+}
+
 fn normalize(kind: &str, data: &mut Value) {
     fn stringify(value: &mut Value) {
         match value {
@@ -234,6 +434,7 @@ fn normalize(kind: &str, data: &mut Value) {
         }
     });
     match kind {
+        "reply" => shape_reply(data),
         "picks" => items_mut(data, |item| {
             if let Some(price) = item.get_mut("price").and_then(Value::as_object_mut) {
                 if let Some(amount) = price.get_mut("amount") {
@@ -321,6 +522,40 @@ pub(crate) fn propose(
     inherited: &[WorkEvidenceLink],
     lenient: bool,
 ) -> Result<Proposed, (String, ObjectRefusal)> {
+    if matches!(kind, "picks" | "sheet") && data.get("records").is_some() {
+        // Records the lead chose stand on what the read returned; any item
+        // values written beside them are dropped, never published.
+        let records: Vec<_> = match &data["records"] {
+            Value::Array(records) => records
+                .iter()
+                .filter_map(super::records::Selection::loose)
+                .collect(),
+            record => super::records::Selection::loose(record)
+                .into_iter()
+                .collect(),
+        };
+        if records.is_empty() {
+            return Err((
+                "records lists r keys from reads, each a key or {source, subtitle, facts, annotation, recommended}".into(),
+                ObjectRefusal::Shape,
+            ));
+        }
+        let request = super::records::Presentation {
+            title: title.to_owned(),
+            layout: if kind == "picks" {
+                super::records::Layout::Picks
+            } else {
+                super::records::Layout::Table
+            },
+            records,
+        };
+        return run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .present(&request)
+            .map_err(|error| (error.message, error.reason));
+    }
     let title = super::call::plain(title);
     let title = title.trim();
     if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS || title.contains('\n') {
@@ -340,19 +575,41 @@ pub(crate) fn propose(
     };
     map.remove("kind");
     let mut data = Value::Object(map);
+    if kind == "picks" {
+        tidy_picks(&mut data);
+    }
+    strip_native_media(&mut data);
     super::schema::strip_schema_words(kind, &mut data);
     let mut left_out: Vec<String> = Vec::new();
-    if lenient {
-        for path in super::schema::prune(kind, &mut data) {
-            left_out.push(format!("{path} (not a field of {kind})"));
-        }
+    if kind == "list" {
+        items_mut(&mut data, |item| {
+            if item.get("record_source").is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|key| run.source(key.trim()).is_none())
+            }) {
+                item.remove("record_source");
+                left_out.push("items[].record_source (no source of this request)".into());
+            }
+        });
+    }
+    // A field the kind does not have is left out on the first try: the
+    // object stands without it and the lead learns why from its result.
+    for path in super::schema::prune(kind, &mut data) {
+        left_out.push(format!("{path} (not a field of {kind})"));
     }
     if let Some(found) = super::schema::mismatch(kind, &data) {
         return Err((format!("{kind}: {}", found.words), ObjectRefusal::Shape));
     }
     normalize(kind, &mut data);
+    let mut value_sources = Vec::new();
+    if kind == "sheet" {
+        value_sources =
+            super::value_sources::ground_sheet(&mut data, sources, &run.source_previews())
+                .map_err(|error| (error, ObjectRefusal::Source))?;
+    }
     let mut keys: Vec<String> = Vec::new();
-    for key in sources {
+    for key in sources.iter().chain(&value_sources) {
         let key = key.trim().to_owned();
         if !keys.contains(&key) {
             keys.push(key);
@@ -369,6 +626,29 @@ pub(crate) fn propose(
         } else if item.get("source").is_some_and(|v| !v.is_number()) {
             item.remove("source");
         }
+    });
+    // Optional picture provenance cannot discard otherwise valid text.
+    items_mut(&mut data, |item| {
+        let Some(value) = item.remove("record_source") else {
+            return;
+        };
+        let Some(key) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|key| run.source(key).is_some())
+        else {
+            left_out.push("items[].record_source (no source of this request)".into());
+            return;
+        };
+        if !keys.iter().any(|candidate| candidate == key) {
+            if keys.len() >= MAX_ARTIFACT_EVIDENCE {
+                left_out.push("items[].record_source (source limit)".into());
+                return;
+            }
+            keys.push(key.to_owned());
+        }
+        let index = keys.iter().position(|candidate| candidate == key).unwrap();
+        item.insert("record_source".into(), Value::from(index as u64));
     });
     let mut evidence = Vec::new();
     let mut unknown = None;
@@ -401,6 +681,7 @@ pub(crate) fn propose(
     if let Value::Object(map) = &mut data {
         map.insert("kind".into(), Value::String(kind.to_owned()));
     }
+    let mut clipped = 0;
     let data = loop {
         let parsed: WorkArtifactDataV1 = serde_json::from_value(data.clone()).map_err(|error| {
             (
@@ -411,7 +692,13 @@ pub(crate) fn propose(
         let Some(fault) = parsed.lead_fault(evidence.len()) else {
             break parsed;
         };
-        if lenient && left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
+        if clipped < MAX_CLIPS && super::schema::clip_within(&mut data, &fault, words_within) {
+            clipped += 1;
+            continue;
+        }
+        // An optional part outside its limits is left out on the first try,
+        // and the lead reads why in its result.
+        if left_out.len() < MAX_LEFT_OUT && super::schema::drop(&mut data, &fault) {
             left_out.push(left_words(&fault));
             continue;
         }
@@ -543,12 +830,18 @@ fn noun(kind: &str) -> &'static str {
         "draft" => "draft",
         "media" => "media",
         "project" => "project",
+        "subject" => "summary",
         _ => "object",
     }
 }
 
 /// Words that say a value was not found or not checked.
-const NOT_FOUND: [&str; 12] = [
+const NOT_FOUND: [&str; 17] = [
+    "not observed",
+    "not shown",
+    "not listed",
+    "not stated",
+    "not specified",
     "not verified",
     "unverified",
     "could not",
@@ -601,6 +894,11 @@ const PICK_TAGS: [&str; 5] = [
     "best choice",
 ];
 
+/// The value says it was not found rather than giving it.
+pub(crate) fn says_not_found(text: &str) -> bool {
+    says(text, &NOT_FOUND)
+}
+
 fn says(text: &str, words: &[&str]) -> bool {
     affirms(text, words, false)
 }
@@ -632,13 +930,18 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
             let after = text[at + word.len()..].chars().next();
             let whole = !before.is_some_and(char::is_alphanumeric)
                 && !after.is_some_and(char::is_alphanumeric);
+            // A negation anywhere earlier in its clause denies it: "No
+            // listings could be verified", "Nothing here is ready yet".
+            let clause = text[..at]
+                .rsplit(['.', ',', ';', ':', '!', '?', '—', '–'])
+                .next()
+                .unwrap_or("");
+            let clause = clause.rsplit(" but ").next().unwrap_or(clause);
             let denied = negation
-                && text[..at]
+                && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
                     .filter(|w| !w.is_empty())
-                    .rev()
-                    .take(3)
-                    .any(|w| NEGATIONS.contains(&w));
+                    .any(|w| NEGATIONS.contains(&w) || matches!(w, "nothing" | "none"));
             whole && !denied
         })
     })
@@ -831,27 +1134,261 @@ pub(crate) fn part_holds<'a>(
     if names.is_empty() {
         return None;
     }
+    let held = |object: &CanvasObject| -> usize {
+        let WorkArtifactDataV1::Picks { items, .. } = &object.artifact.data else {
+            return 0;
+        };
+        if !(object.current && object.in_this_run && object.artifact.part.is_some()) {
+            return 0;
+        }
+        names
+            .iter()
+            .filter(|name| {
+                items.iter().any(|item| {
+                    let held = item.name.trim().to_lowercase();
+                    held == **name
+                        || (name.len() >= 4 && held.contains(name.as_str()))
+                        || (held.len() >= 4 && name.contains(held.as_str()))
+                })
+            })
+            .count()
+    };
+    // The same thing found by parts on several sites is the offers side by
+    // side: the lead's one picks of them is the result, not a copy.
+    let parts: std::collections::BTreeSet<WorkPartId> = objects
+        .iter()
+        .filter(|object| held(object) > 0)
+        .filter_map(|object| object.artifact.part)
+        .collect();
+    if parts.len() >= 2 {
+        return None;
+    }
+    // Picks that add offers to a part's own are the comparison, not a copy.
+    let count = |object: &CanvasObject| match &object.artifact.data {
+        WorkArtifactDataV1::Picks { items, .. } => items.len(),
+        _ => 0,
+    };
+    objects.iter().find(|object| {
+        held(object) > 0 && held(object) * 2 >= names.len() && names.len() <= count(object)
+    })
+}
+
+/// The lead's own picks of this run that already hold most of `names`: a
+/// second picks of the same things is an update of the first.
+pub(crate) fn lead_holds<'a>(
+    objects: &'a [CanvasObject],
+    names: &[String],
+) -> Option<&'a CanvasObject> {
+    let names: Vec<String> = names.iter().map(|n| n.trim().to_lowercase()).collect();
+    if names.is_empty() {
+        return None;
+    }
     objects.iter().find(|object| {
         let WorkArtifactDataV1::Picks { items, .. } = &object.artifact.data else {
             return false;
         };
+        let held = names
+            .iter()
+            .filter(|name| {
+                items
+                    .iter()
+                    .any(|item| item.name.trim().to_lowercase() == **name)
+            })
+            .count();
         object.current
             && object.in_this_run
-            && object.artifact.part.is_some()
-            && names
-                .iter()
-                .filter(|name| {
-                    items.iter().any(|item| {
-                        let held = item.name.trim().to_lowercase();
-                        held == **name
-                            || (name.len() >= 4 && held.contains(name.as_str()))
-                            || (held.len() >= 4 && name.contains(held.as_str()))
-                    })
-                })
-                .count()
-                * 2
-                >= names.len()
+            && object.artifact.part.is_none()
+            && held * 2 >= names.len()
     })
+}
+
+/// Overlong texts one object may have clipped before it is refused.
+const MAX_CLIPS: usize = 24;
+
+/// Hand-written picks in the shapes models send: a `title` for the name, a
+/// fact without its kind (plain text), a fact as "Label: value".
+fn tidy_picks(data: &mut Value) {
+    // One pick is the recommendation: the first the lead marked.
+    let mut recommended = false;
+    items_mut(data, |item| {
+        if item.get("recommended").and_then(Value::as_bool) == Some(true) {
+            if recommended {
+                item.remove("recommended");
+            }
+            recommended = true;
+        }
+        if item.get("name").is_none() {
+            if let Some(title) = item.remove("title") {
+                item.insert("name".into(), title);
+            }
+        }
+        if let Some(Value::Array(facts)) = item.get_mut("facts") {
+            for fact in facts.iter_mut() {
+                if let Value::String(line) = fact {
+                    if let Some((label, value)) = line.split_once(':') {
+                        *fact = serde_json::json!({"label": label.trim(), "value": value.trim()});
+                    }
+                }
+                if let Value::Object(fact) = fact {
+                    fact.entry("kind")
+                        .or_insert_with(|| Value::String("text".into()));
+                }
+            }
+            facts.retain(Value::is_object);
+        }
+    });
+}
+
+/// Native references never enter or survive the model JSON vocabulary.
+pub(crate) fn strip_native_media(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("record_media");
+            object.remove("media_attempted");
+            for value in object.values_mut() {
+                strip_native_media(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_native_media(item);
+            }
+        }
+        _ => {}
+    }
+}
+/// Hydrates only exact archived evidence identities. Labels and URLs cannot
+/// borrow another record's pixels. Ambiguous source membership yields no image.
+pub(crate) fn hydrate_record_media(
+    proposed: &mut Proposed,
+    executions: &[WorkExecutionFact],
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+) {
+    let lookup = |wanted: &WorkEvidenceLink| {
+        let mut matched = false;
+        let mut image = None;
+        let mut ambiguous = false;
+        for artifact in executions.iter().flat_map(|execution| &execution.artifacts) {
+            if let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = &artifact.data
+            {
+                for (index, subject) in subjects.iter().enumerate() {
+                    let matches = cells.get(index).is_some_and(|cells| {
+                        cells
+                            .iter()
+                            .flat_map(|cell| &cell.evidence)
+                            .any(|index| artifact.evidence.get(usize::from(*index)) == Some(wanted))
+                    });
+                    if matches {
+                        if matched
+                            && image
+                                != Some((subject.record_media.clone(), subject.media_attempted))
+                        {
+                            ambiguous = true;
+                        }
+                        matched = true;
+                        image = Some((subject.record_media.clone(), subject.media_attempted));
+                    }
+                }
+            }
+        }
+        if ambiguous {
+            Some((None, true))
+        } else {
+            image
+        }
+    };
+    if let WorkArtifactDataV1::List { items, .. } = &mut proposed.data {
+        for item in items {
+            item.record_media = None;
+            item.media_attempted = false;
+            let index = item.record_source;
+            let source = index.and_then(|index| proposed.evidence.get(usize::from(index)));
+            if let Some((image, withheld)) =
+                source.and_then(|source| list_record_media(source, executions, profile, work))
+            {
+                item.media_attempted = withheld;
+                item.record_source = index;
+                item.record_media = image;
+            }
+        }
+    }
+    if let WorkArtifactDataV1::Picks { items, .. } = &mut proposed.data {
+        for item in items {
+            item.record_media = None;
+            item.media_attempted = false;
+            let source = item
+                .source
+                .and_then(|index| proposed.evidence.get(usize::from(index)));
+            if let Some((image, withheld)) = source.and_then(lookup) {
+                item.media_attempted = withheld;
+                item.record_media = image;
+                if withheld {
+                    item.image_candidates.clear();
+                }
+            }
+        }
+    }
+}
+
+/// Only an authenticated immutable collection row may supply a List picture.
+/// Every matching row participates, including failed enrichment, so a shared
+/// source cannot silently borrow the one row that happened to have an image.
+fn list_record_media(
+    wanted: &WorkEvidenceLink,
+    executions: &[WorkExecutionFact],
+    profile: zephium_core::ids::ProfileId,
+    work: WorkId,
+) -> Option<(
+    Option<zephium_core::work::media::WorkRecordMediaRefV1>,
+    bool,
+)> {
+    let mut matched = false;
+    let mut refused = false;
+    let mut withheld = false;
+    let mut selected = None;
+    for execution in executions {
+        for artifact in &execution.artifacts {
+            let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = &artifact.data
+            else {
+                continue;
+            };
+            for (index, subject) in subjects.iter().enumerate() {
+                if !cells.get(index).is_some_and(|row| {
+                    row.iter()
+                        .flat_map(|cell| &cell.evidence)
+                        .any(|index| artifact.evidence.get(usize::from(*index)) == Some(wanted))
+                }) {
+                    continue;
+                }
+                matched = true;
+                withheld |= subject.media_attempted;
+                let Some(media) = subject.record_media.as_ref().filter(|media| {
+                    media.validate().is_ok()
+                        && media.profile == profile
+                        && media.work == work
+                        && media.execution == execution.id
+                        && media.execution == artifact.execution
+                        && media.attempt == artifact.attempt
+                        && media.extraction == wanted.extraction_id
+                }) else {
+                    refused = true;
+                    withheld |= subject.record_media.is_some();
+                    continue;
+                };
+                if selected.as_ref().is_some_and(|old| old != media) {
+                    refused = true;
+                    withheld = true;
+                }
+                selected = Some(media.clone());
+            }
+        }
+    }
+    matched.then_some((if refused { None } else { selected }, withheld))
 }
 
 /// Removes picture addresses `shown` does not know from the pictures the
@@ -880,6 +1417,70 @@ fn keep_shown_pictures(data: &mut WorkArtifactDataV1, shown: impl Fn(&str) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_reply_written_as_markdown_is_set_not_refused() {
+        let mut data = json!({
+            "headline": "Svelte 5.40 adds attachments, async components and a new way to read state across files",
+            "text": "## What changed\nSvelte 5.40 is out. See [the release notes](https://svelte.dev/blog).\n\n- Attachments replace actions\n- Async components\n1. Faster hydration",
+        });
+        normalize("reply", &mut data);
+        let headline = data["headline"].as_str().unwrap();
+        assert!(headline.chars().count() <= 80 && headline.ends_with('…'));
+        assert_eq!(
+            data["text"],
+            "What changed\nSvelte 5.40 is out. See the release notes."
+        );
+        assert_eq!(
+            data["points"],
+            json!([
+                "Attachments replace actions",
+                "Async components",
+                "Faster hydration"
+            ])
+        );
+        let reply: WorkArtifactDataV1 = serde_json::from_value(
+            json!({"kind":"reply","headline":headline,"text":data["text"],"points":data["points"]}),
+        )
+        .unwrap();
+        assert!(reply.lead_fault(0).is_none());
+    }
+
+    #[test]
+    fn a_long_reply_ends_at_a_sentence_and_the_rest_become_points() {
+        let sentence =
+            "The updater checks a signed manifest on every launch and installs in the background.";
+        let text = [sentence; 8].join(" ");
+        let mut data = json!({"headline":"Tauri updater","text":text});
+        normalize("reply", &mut data);
+        let text = data["text"].as_str().unwrap();
+        assert!(text.chars().count() <= 480 && text.ends_with('.'));
+        let points = data["points"].as_array().unwrap();
+        assert!(!points.is_empty() && points.len() <= 5);
+        assert!(points
+            .iter()
+            .all(|p| p.as_str().unwrap().chars().count() <= 140));
+    }
+
+    #[test]
+    fn native_media_never_enters_model_input_or_survives_model_object_fields() {
+        let mut value = serde_json::json!({
+            "kind":"picks", "items":[{"name":"One", "source":0,
+                "record_media":{"origin":"native_crop","digest":"private-reference"},
+                "media_attempted":true,
+                "nested":[{"record_media":{"origin":"native_fetch"},"keep":"source text"}]
+            }]
+        });
+        strip_native_media(&mut value);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind":"picks", "items":[{"name":"One","source":0,"nested":[{"keep":"source text"}]}]
+            })
+        );
+        assert!(!value.to_string().contains("private-reference"));
+    }
 
     #[test]
     fn a_private_run_keeps_only_the_pictures_pages_showed() {
@@ -902,6 +1503,56 @@ mod tests {
             items[0].image_candidates,
             ["https://img.example.com/loft.jpg"]
         );
+    }
+
+    #[test]
+    fn the_leads_offers_side_by_side_are_no_copy_of_a_parts_picks() {
+        let picks = |id: &str, part: &str, names: &[&str]| {
+            CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Offers on Amazon.de", "evidence": [],
+                "review": "mechanical", "presentation": "automatic", "part": part,
+                "data": {"kind": "picks", "facet": "product",
+                    "items": names.iter().map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>()}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run: true,
+            part_title: None,
+        }
+        };
+        let amazon = [picks(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            "01M3RV9DBTWYS7770BES8YYKT4",
+            &["LEGO Technic 42115", "LEGO Technic 42115 green"],
+        )];
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert!(part_holds(&amazon, &names(&["LEGO Technic 42115"])).is_some());
+        assert!(part_holds(
+            &amazon,
+            &names(&[
+                "LEGO Technic 42115",
+                "LEGO Technic 42115",
+                "LEGO Technic 42115"
+            ])
+        )
+        .is_none());
+        // The lead's own picks of the same stays, picked again, are updated.
+        let mine = [{
+            let mut object = picks(
+                "01M3RV9DBTWYS7770BES8YYKT5",
+                "01M3RV9DBTWYS7770BES8YYKT4",
+                &["Room in Dogpatch", "Room in Potrero Hill", "Guesthouse"],
+            );
+            object.artifact.part = None;
+            object
+        }];
+        let again = names(&["Room in Dogpatch", "Room in Potrero Hill", "Condo in SoMa"]);
+        assert!(lead_holds(&mine, &again).is_some());
+        assert!(lead_holds(&mine, &names(&["Condo in SoMa", "Loft"])).is_none());
+        assert!(lead_holds(&amazon, &names(&["LEGO Technic 42115"])).is_none());
     }
 
     #[test]
@@ -957,6 +1608,8 @@ mod tests {
             "I couldn't read Slack",
             "The Slack check could not complete",
             "Your day plan isn't ready",
+            "No Best Buy listings could be verified",
+            "Nothing on Allegro is confirmed yet",
         ] {
             let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
                 "kind": "reply", "headline": headline,
@@ -965,6 +1618,11 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
+        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
+        }))
+        .unwrap();
+        assert!(honest(&claimed, &honest_run).is_err());
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))
@@ -1000,5 +1658,203 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&tagged, &honest_run).is_err());
+    }
+}
+
+#[cfg(test)]
+mod list_record_media_tests {
+    use super::*;
+    use serde_json::json;
+    use zephium_core::{ids::ProfileId, work::media::*};
+
+    fn fixture() -> (
+        ProfileId,
+        WorkId,
+        WorkExecutionFact,
+        WorkEvidenceLink,
+        WorkRecordMediaRefV1,
+    ) {
+        let profile = ProfileId::generate();
+        let work = WorkId::generate();
+        let execution = WorkExecutionId::generate();
+        let attempt = WorkAttemptId::generate();
+        let source = WorkEvidenceLink {
+            extraction_id: WorkArtifactId::generate(),
+            source_id: 1,
+        };
+        let media = WorkRecordMediaRefV1 {
+            profile,
+            work,
+            execution,
+            attempt,
+            step: WorkStepId::generate(),
+            extraction: source.extraction_id,
+            record: 0,
+            source: "a".repeat(64),
+            digest: "b".repeat(64),
+            width: 128,
+            height: 96,
+            origin: WorkRecordMediaOriginV1::NativeCrop,
+        };
+        let limits = json!({"model_tokens":1000,"cost_micro_usd":1000,"operations":8,"timeout_seconds":60,"max_workers":1});
+        let mut fact: WorkExecutionFact = serde_json::from_value(json!({
+            "authorization":"user_directed_agent","id":execution,"approved_revision":"3",
+            "spec":{"plan_revision":"2","limits":limits,"nodes":[]},
+            "status":"needs_review","attempts":[],"artifacts":[]
+        }))
+        .unwrap();
+        fact.artifacts.push(serde_json::from_value(json!({
+            "version":1,"id":WorkArtifactId::generate(),"execution":execution,"node":WorkPlanNodeId::generate(),"attempt":attempt,
+            "output":"result","title":"Native rows","review":"source_mapped_needs_review","presentation":"automatic","general_knowledge":false,
+            "evidence":[source],"data":{"kind":"comparison_matrix","subjects":[{"name":"Native row","media_attempted":true,"record_media":media}],"criteria":[{"name":"Title","kind":{"kind":"text"}}],"cells":[[{"value":{"kind":"text","text":"Native row"},"evidence":[0]}]]}
+        })).unwrap());
+        fact.artifacts[0]
+            .validate()
+            .expect("valid synthetic source artifact");
+        (profile, work, fact, source, media)
+    }
+    fn proposed(source: WorkEvidenceLink, record: Option<u16>) -> Proposed {
+        Proposed{title:"Reading".into(),data:serde_json::from_value(json!({"kind":"list","style":"reading","items":[{"title":"Kept source-backed title","detail":"Kept detail","source":1,"record_source":record}]})).unwrap(),evidence:vec![source,WorkEvidenceLink{extraction_id:WorkArtifactId::generate(),source_id:0}],left_out:vec![]}
+    }
+    fn item(proposed: &Proposed) -> &zephium_core::work::objects::WorkListItemV1 {
+        let WorkArtifactDataV1::List { items, .. } = &proposed.data else {
+            panic!("list")
+        };
+        &items[0]
+    }
+    #[test]
+    fn list_exact_record_source_is_independent_of_prose_and_keeps_crop_local() {
+        let (profile, work, fact, source, media) = fixture();
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+        assert_eq!(item(&value).source, Some(1));
+        assert!(item(&value).media_attempted);
+        assert!(value.data.lead_fault(2).is_none());
+        let mut model = serde_json::to_value(&value.data).unwrap();
+        strip_native_media(&mut model);
+        assert!(!model.to_string().contains("native_crop"));
+        assert!(!model.to_string().contains("record_media"));
+        assert_eq!(model["items"][0]["record_source"], 0);
+        let mut context = value.data.clone();
+        context.clear_record_media();
+        assert!(!serde_json::to_string(&context)
+            .unwrap()
+            .contains("record_media"));
+    }
+    #[test]
+    fn public_native_picture_does_not_need_a_withholding_flag() {
+        let (profile, work, mut fact, source, media) = fixture();
+        let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut fact.artifacts[0].data
+        else {
+            panic!()
+        };
+        subjects[0].media_attempted = false;
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+        assert!(!item(&value).media_attempted);
+        assert!(value.data.lead_fault(2).is_none());
+    }
+
+    #[test]
+    fn list_missing_or_stale_record_source_never_falls_back_to_text_source() {
+        let (profile, work, fact, source, _) = fixture();
+        for index in [None, Some(1), Some(99)] {
+            let mut value = proposed(source.clone(), index);
+            let WorkArtifactDataV1::List { items, .. } = &mut value.data else {
+                panic!()
+            };
+            items[0].source = Some(0);
+            hydrate_record_media(&mut value, std::slice::from_ref(&fact), profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert_eq!(item(&value).title, "Kept source-backed title");
+            assert_eq!(item(&value).detail.as_deref(), Some("Kept detail"));
+        }
+    }
+    #[test]
+    fn list_foreign_custody_and_cross_extraction_refuse_picture_only() {
+        let (profile, work, fact, source, _) = fixture();
+        for kind in 0..5 {
+            let mut bad = fact.clone();
+            let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut bad.artifacts[0].data
+            else {
+                panic!()
+            };
+            let media = subjects[0].record_media.as_mut().unwrap();
+            match kind {
+                0 => media.profile = ProfileId::generate(),
+                1 => media.work = WorkId::generate(),
+                2 => media.execution = WorkExecutionId::generate(),
+                3 => media.attempt = WorkAttemptId::generate(),
+                _ => media.extraction = WorkArtifactId::generate(),
+            }
+            let mut value = proposed(source.clone(), Some(0));
+            hydrate_record_media(&mut value, &[bad], profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert!(item(&value).media_attempted);
+            assert_eq!(item(&value).title, "Kept source-backed title");
+        }
+    }
+    #[test]
+    fn list_ambiguous_and_failed_native_rows_cannot_borrow_successful_pixels() {
+        let (profile, work, fact, source, _) = fixture();
+        for missing in [false, true] {
+            let mut duplicate = fact.artifacts[0].clone();
+            duplicate.id = WorkArtifactId::generate();
+            let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = &mut duplicate.data else {
+                panic!()
+            };
+            if missing {
+                subjects[0].record_media = None;
+                subjects[0].media_attempted = false;
+            } else {
+                subjects[0].record_media.as_mut().unwrap().record = 1;
+            }
+            let mut rows = fact.clone();
+            rows.artifacts.push(duplicate);
+            let mut value = proposed(source.clone(), Some(0));
+            hydrate_record_media(&mut value, &[rows], profile, work);
+            assert!(item(&value).record_media.is_none());
+            assert_eq!(item(&value).title, "Kept source-backed title");
+        }
+    }
+    #[test]
+    fn list_identical_immutable_row_copies_remain_one_identity() {
+        let (profile, work, mut fact, source, media) = fixture();
+        let mut duplicate = fact.artifacts[0].clone();
+        duplicate.id = WorkArtifactId::generate();
+        fact.artifacts.push(duplicate);
+        let mut value = proposed(source, Some(0));
+        hydrate_record_media(&mut value, &[fact], profile, work);
+        assert_eq!(item(&value).record_media.as_ref(), Some(&media));
+    }
+    #[test]
+    fn list_additive_defaults_and_record_custody_validation_remain_closed() {
+        let mut plain: WorkArtifactDataV1 = serde_json::from_value(
+            json!({"kind":"list","style":"reading","items":[{"title":"Old object"}]}),
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("record_source"));
+        let (_, _, _, _, media) = fixture();
+        let WorkArtifactDataV1::List { items, .. } = &mut plain else {
+            panic!()
+        };
+        items[0].record_media = Some(media);
+        items[0].media_attempted = true;
+        assert_eq!(
+            plain.lead_fault(1).unwrap().field,
+            WorkArtifactField::ListItemMedia
+        );
+        let WorkArtifactDataV1::List { items, .. } = &mut plain else {
+            panic!()
+        };
+        items[0].record_source = Some(1);
+        assert_eq!(
+            plain.lead_fault(1).unwrap().field,
+            WorkArtifactField::ItemSource
+        );
     }
 }

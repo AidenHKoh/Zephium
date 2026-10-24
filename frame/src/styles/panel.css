@@ -2,11 +2,13 @@
 @import "tailwindcss" source(none);
 @import "./tokens/primitive.css";
 @import "./tokens.css";
+@import "./axes/palette.css";
 @import "./axes/tint.css";
 @import "./axes/density.css";
 @import "./axes/contrast.css";
 @import "./axes/material.css";
 @import "./axes/motion.css";
+@import "./axes/type.css";
 @import "./controls.css";
 @import "./favicon.css";
 @source "../features/panel";
@@ -31,7 +33,7 @@ html[data-theme="light"] {
 }
 body {
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-body);
   color: var(--color-text);
   background: var(--color-canvas);
   font-synthesis: none;

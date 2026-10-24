@@ -1,4 +1,5 @@
-import type { IconRef } from "$shared/ipc/bindings";
+import type { WorkPicture } from "$domain/resources";
+import type { IconRef, WorkArtifactDataV1_Deserialize } from "$shared/ipc/bindings";
 import type {
   ArtifactContent,
   DocumentNodeView,
@@ -42,7 +43,7 @@ export type EntityFacet =
   | "message"
   | "job";
 
-export type Picture = { profile: string; digest: string };
+export type Picture = WorkPicture;
 export type Fact = { label: string; value: string; sources?: string[] };
 export type Entity = {
   /** Merge key: one name, one entity, across the run's artifacts. */
@@ -260,6 +261,8 @@ type StepKind = "travel" | "stay" | "event" | "task" | "milestone" | "note";
 type PickLink = Likeness & { name: string; element?: string };
 export type PlanStepView = {
   when?: string;
+  /** `YYYY-MM-DD`, when it falls on a day. */
+  date?: string;
   title: string;
   detail?: string;
   kind: StepKind;
@@ -273,9 +276,11 @@ export type PlanView = ObjectBase & {
   steps: readonly PlanStepView[];
   total?: { label: string; value: string };
   checkable: boolean;
+  /** Drawn as a calendar whatever it holds: the person's calendar block. */
+  calendar?: boolean;
 };
 
-type ListStyle = "todo" | "messages" | "reading" | "requirements";
+type ListStyle = "todo" | "messages" | "reading" | "requirements" | "questions";
 type ListFrom = {
   /** A site or an app's host for its mark: `slack.com`. */
   host?: string;
@@ -376,8 +381,12 @@ export type DraftView = ObjectBase & {
   targetUrl?: string;
   /** Who it goes out as, for the avatar row; the person's own name and picture. */
   author?: Likeness & { name: string; handle?: string };
-  /** Where Send stands: until Confirm is wired, a draft is only ever a draft. */
-  send?: "draft" | "confirming" | "sent";
+  /** Where Send stands, read from the run it started. */
+  send?: "draft" | "sending" | "sent";
+  /** Why the last send did not go, in the run's words. */
+  note?: string;
+  /** A GitHub draft's review state. */
+  review?: "comment" | "approve" | "request_changes";
 };
 
 export type MediaView = ObjectBase & {
@@ -391,6 +400,8 @@ export type MediaView = ObjectBase & {
   poster?: PictureView;
   duration?: string;
   startSecs?: number;
+  /** The channel a video was published on, when its page said. */
+  channel?: string;
 };
 
 export type PageObjectView = ObjectBase & {
@@ -464,7 +475,24 @@ export type ProjectView = ObjectBase & {
   git?: { branch?: string; changed: number; ahead?: number; behind?: number };
 };
 
+type SubjectTone = "active" | "done" | "waiting" | "blocked" | "closed";
+/** The one thing a request is about, shaped like its service: a pull request, an issue, a thread. */
+export type SubjectView = ObjectBase & {
+  kind: "subject";
+  /** The service's word for it: Pull request, Issue, Thread. */
+  noun: string;
+  reference?: string;
+  heading: string;
+  status?: { label: string; tone: SubjectTone };
+  people: readonly { role: string; name: string }[];
+  facts: readonly { label: string; value: string }[];
+  labels: readonly string[];
+  summary?: string;
+  url: string;
+};
+
 export type ObjectView =
+  | SubjectView
   | ProjectView
   | ReplyView
   | PicksView
@@ -500,8 +528,13 @@ export type ObjectActions = {
   link?: (url: string) => void;
   /** A checkable step or item ticked or unticked. */
   check?: (id: string, index: number, done: boolean) => void;
-  /** A note's new Markdown, written through the notes store. */
+  /** A note's new Markdown, written through the notes store; a draft's new words. */
   write?: (id: string, markdown: string) => void;
   /** A draft's Send: always through Confirm. */
   send?: (id: string) => void;
+  /** A GitHub draft's review state. */
+  review?: (id: string, review: "comment" | "approve" | "request_changes") => void;
+  /** The person's own object changed in place: present only on what they own. */
+  edit?: (id: string, change: (data: OwnedData) => OwnedData) => void;
 };
+export type OwnedData = WorkArtifactDataV1_Deserialize;

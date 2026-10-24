@@ -56,6 +56,9 @@ pub enum AgentNavigationLedgerRefusal {
     AlreadyHere,
     /// The target was visited as often as the scope allows.
     Revisited,
+    /// This exact address already led, through the site's redirect, to the
+    /// document the page is on.
+    Redirected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -620,6 +623,22 @@ impl AgentRunPolicy {
         if current == target {
             return Some(AgentNavigationLedgerRefusal::AlreadyHere);
         }
+        // Planners asked again and again for a results address the site sent
+        // to its home page; asking again only lands there again. Returning
+        // to such an address from elsewhere stays a navigation.
+        if self
+            .navigation_destinations
+            .iter()
+            .zip(&self.navigation_effective_destinations)
+            .take(hop)
+            .any(|(requested, landed)| {
+                requested.as_ref() == Some(target)
+                    && landed.as_ref() == Some(current)
+                    && current != target
+            })
+        {
+            return Some(AgentNavigationLedgerRefusal::Redirected);
+        }
         if self
             .navigation_destinations
             .iter()
@@ -714,6 +733,7 @@ impl AgentRunPolicy {
                     .count()
                     >= scope.max_visits_per_destination()
                 || !follow
+                    && !scope.is_site_session()
                     && !observation
                         .frames()
                         .iter()
@@ -782,7 +802,9 @@ impl AgentRunPolicy {
                     .as_ref()
                     .ok_or(AgentPolicyError::Navigation)?
             };
-            if current == target {
+            // A page that reloads itself (a bot check that cleared) is
+            // followed to the same address; a model never loads it again.
+            if current == target && !follow {
                 return Err(AgentPolicyError::Navigation);
             }
         }

@@ -21,7 +21,7 @@ impl PreparedRetainedWork {
         input: AgentWorkRunInput,
         profile: AgentWorkProfileBinding,
         config: crate::AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         task: Box<dyn AgentWorkTask>,
         ports: RetainedWorkPorts,
     ) -> Result<Self, AgentWorkFailure> {
@@ -35,7 +35,7 @@ impl PreparedRetainedWork {
                     return Err(AgentWorkFailure::Contract);
                 }
                 StagedActor::for_public_qualification(
-                    input, browser, runtime, provider, credential, audit, task,
+                    input, browser, runtime, provider, access, audit, task,
                 )
             }),
         };

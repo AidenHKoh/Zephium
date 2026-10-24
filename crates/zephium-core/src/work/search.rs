@@ -1,4 +1,6 @@
-//! Provider-native public search disclosure and attributable source evidence.
+//! Public search disclosure and attributable source evidence: a provider's
+//! answer with its citations, or the ranked results of the person's own
+//! search engine read in the agent browser.
 use super::{
     runtime::{WorkExecutionLimits, WorkUsage},
     WorkError,
@@ -44,8 +46,33 @@ pub fn validate_direct_public_read(
     Ok(())
 }
 
+/// OpenAI's fixed public search profiles.
 pub fn supported_public_search_model(model: &str) -> bool {
     matches!(model, "gpt-4.1-mini" | "gpt-5.6-luna" | "gpt-6-luna")
+}
+
+/// The engines a browser search can name, as the `search.engine` preference
+/// stores them.
+pub const BROWSER_SEARCH_ENGINES: [&str; 5] = ["google", "duckduckgo", "bing", "brave", "custom"];
+/// Results one browser search's evidence holds at most.
+pub const BROWSER_SEARCH_MAX_RESULTS: usize = 16;
+pub const BROWSER_SEARCH_SNIPPET_BYTES: usize = 1024;
+
+/// A model the provider may search with: a fixed OpenAI profile, for a
+/// chosen model's own search its catalog id, and for a browser search the
+/// engine.
+pub fn supported_search_model(provider: WorkSearchProvider, model: &str) -> bool {
+    match provider {
+        WorkSearchProvider::OpenAi => supported_public_search_model(model),
+        WorkSearchProvider::Browser => BROWSER_SEARCH_ENGINES.contains(&model),
+        WorkSearchProvider::Native => {
+            !model.is_empty()
+                && model.len() <= 160
+                && model
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() && !matches!(b, b'"' | b'\\'))
+        }
+    }
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -53,6 +80,31 @@ pub fn supported_public_search_model(model: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum WorkSearchProvider {
     OpenAi,
+    /// The web search built into the chosen model's own provider.
+    Native,
+    /// The person's search engine's results page, read in the agent browser
+    /// with no model call.
+    Browser,
+}
+
+/// The search a browser search falls back to when it cannot use a results
+/// page.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSearchFallbackV1 {
+    pub provider: WorkSearchProvider,
+    pub model: String,
+}
+impl WorkSearchFallbackV1 {
+    pub fn validate(&self) -> Result<(), WorkError> {
+        if self.provider == WorkSearchProvider::Browser
+            || !supported_search_model(self.provider, &self.model)
+        {
+            return Err(WorkError::Invalid);
+        }
+        Ok(())
+    }
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -64,7 +116,7 @@ pub struct WorkPublicSearchScope {
 }
 impl WorkPublicSearchScope {
     pub fn validate(&self) -> Result<(), WorkError> {
-        if !supported_public_search_model(&self.model) {
+        if !supported_search_model(self.provider, &self.model) {
             return Err(WorkError::Invalid);
         }
         validate_public_search_query(&self.query)
@@ -86,6 +138,10 @@ pub struct WorkProviderSearchCitation {
     pub title: String,
     pub start_index: u32,
     pub end_index: u32,
+    /// The engine's own text under a browser search result. A browser search
+    /// has no answer, so its results span nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
 }
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -98,7 +154,9 @@ pub struct WorkProviderSearchEvidenceV1 {
     pub response_model: String,
     pub response_id: String,
     pub search_call_id: String,
+    /// Empty for a browser search: a results page gives no answer.
     pub answer: String,
+    /// For a browser search, its results in the engine's order.
     pub citations: Vec<WorkProviderSearchCitation>,
     /// Provider-reported usage, distinct from fixed billed search-content units.
     pub actual_input_tokens: u32,
@@ -116,6 +174,12 @@ impl WorkProviderSearchEvidenceV1 {
     /// synthesizing parent. Provider offsets count characters, not UTF-8 bytes.
     pub fn citation_excerpt(&self, index: usize) -> Result<String, WorkError> {
         let citation = self.citations.get(index).ok_or(WorkError::NotFound)?;
+        if self.provider == WorkSearchProvider::Browser {
+            return Ok(citation
+                .snippet
+                .clone()
+                .unwrap_or_else(|| citation.title.clone()));
+        }
         let start = (citation.start_index as usize).saturating_sub(256);
         let text: String = self.answer.chars().skip(start).take(768).collect();
         if text.is_empty() {
@@ -133,20 +197,36 @@ impl WorkProviderSearchEvidenceV1 {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }
-        let model_matches = match self.model.as_str() {
-            "gpt-4.1-mini" => matches!(
+        let model_matches = match (self.provider, self.model.as_str()) {
+            (WorkSearchProvider::OpenAi, "gpt-4.1-mini") => matches!(
                 self.response_model.as_str(),
                 "gpt-4.1-mini" | "gpt-4.1-mini-2025-04-14"
             ),
-            "gpt-5.6-luna" => self.response_model == "gpt-5.6-luna",
-            "gpt-6-luna" => self.response_model == "gpt-6-luna",
-            _ => false,
+            (WorkSearchProvider::OpenAi, "gpt-5.6-luna") => self.response_model == "gpt-5.6-luna",
+            (WorkSearchProvider::OpenAi, "gpt-6-luna") => self.response_model == "gpt-6-luna",
+            (WorkSearchProvider::OpenAi, _) => false,
+            (WorkSearchProvider::Native | WorkSearchProvider::Browser, model) => {
+                supported_search_model(self.provider, model) && self.response_model == model
+            }
+        };
+        // Native and browser searches have no provider response identity to
+        // keep; Rust mints correlation ids, which never claim to be receipts.
+        let (response, call) = match self.provider {
+            WorkSearchProvider::OpenAi => ("resp_", "ws_"),
+            WorkSearchProvider::Native => ("zr_", "zs_"),
+            WorkSearchProvider::Browser => ("zb_", "zq_"),
         };
         if !model_matches
             || self.version != 1
-            || !identity(&self.response_id, "resp_")
-            || !identity(&self.search_call_id, "ws_")
-            || self.answer.trim().is_empty()
+            || !identity(&self.response_id, response)
+            || !identity(&self.search_call_id, call)
+        {
+            return Err(WorkError::Invalid);
+        }
+        if self.provider == WorkSearchProvider::Browser {
+            return self.validate_results();
+        }
+        if self.answer.trim().is_empty()
             || self.answer.len() > 32768
             || self
                 .answer
@@ -176,7 +256,46 @@ impl WorkProviderSearchEvidenceV1 {
                 || citation.title.chars().any(char::is_control)
                 || citation.start_index >= citation.end_index
                 || citation.end_index as usize > characters
+                || citation.snippet.is_some()
                 || self.citations[..index].contains(citation)
+            {
+                return Err(WorkError::Invalid);
+            }
+        }
+        Ok(())
+    }
+
+    /// A browser search: no answer and no model usage, only the engine's
+    /// distinct results, each with the engine's own text where it gave one.
+    fn validate_results(&self) -> Result<(), WorkError> {
+        if !self.answer.is_empty()
+            || self.citations.is_empty()
+            || self.citations.len() > BROWSER_SEARCH_MAX_RESULTS
+            || self.actual_input_tokens != 0
+            || self.actual_output_tokens != 0
+        {
+            return Err(WorkError::Invalid);
+        }
+        for (index, result) in self.citations.iter().enumerate() {
+            let url = url::Url::parse(&result.url).map_err(|_| WorkError::Invalid)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || result.url.len() > 2048
+                || result.title.trim().is_empty()
+                || result.title.len() > 512
+                || result.title.chars().any(char::is_control)
+                || result.start_index != 0
+                || result.end_index != 0
+                || result.snippet.as_ref().is_some_and(|snippet| {
+                    snippet.trim().is_empty()
+                        || snippet.len() > BROWSER_SEARCH_SNIPPET_BYTES
+                        || snippet.chars().any(char::is_control)
+                })
+                || self.citations[..index]
+                    .iter()
+                    .any(|earlier| earlier.url == result.url)
             {
                 return Err(WorkError::Invalid);
             }
@@ -187,6 +306,58 @@ impl WorkProviderSearchEvidenceV1 {
 pub struct WorkPublicSearchResult {
     pub evidence: WorkProviderSearchEvidenceV1,
     pub usage: WorkUsage,
+}
+
+/// The results page a browser search opens in the agent browser: the
+/// person's engine and its address for the query.
+#[derive(Clone, PartialEq, Eq)]
+pub struct WorkResultsPage {
+    pub engine: crate::search::SearchEngine,
+    pub url: url::Url,
+}
+impl std::fmt::Debug for WorkResultsPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkResultsPage")
+            .field("engine", &self.engine)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a results page showed, read by Rust from the page itself.
+#[derive(Clone, PartialEq, Eq)]
+pub enum WorkSearchPage {
+    /// The engine's results in its order, without ads or its own links.
+    Results(Vec<WorkSearchHit>),
+    /// The page stood in the way of its results.
+    Wall(WorkSearchWall),
+}
+impl std::fmt::Debug for WorkSearchPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Results(hits) => write!(f, "Results({})", hits.len()),
+            Self::Wall(wall) => write!(f, "Wall({wall:?})"),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct WorkSearchHit {
+    pub title: String,
+    /// The destination itself, never the engine's tracking redirect.
+    pub url: String,
+    pub snippet: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkSearchWall {
+    /// A CAPTCHA, a "sorry" or an unusual-traffic page.
+    Challenge,
+    /// A consent page that must be answered before any results.
+    Consent,
+    /// The engine found nothing for the query.
+    NoResults,
+    /// The page loaded but showed no result this reader recognises.
+    Unreadable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkPublicSearchError {
@@ -232,6 +403,35 @@ pub type WorkPublicSearchRankingFuture<'a> = Pin<
 >;
 
 pub trait WorkPublicSearchProvider: Send + Sync {
+    /// The provider and model a run's grant records for this backend's
+    /// searches; `None` keeps what the grant already names.
+    fn grant(&self) -> Option<(WorkSearchProvider, String)> {
+        None
+    }
+
+    /// The other search this backend may answer with, whose evidence the
+    /// grant then also admits.
+    fn fallback(&self) -> Option<WorkSearchFallbackV1> {
+        None
+    }
+
+    /// The results page a browser search opens for this scope; None for a
+    /// search a provider runs itself.
+    fn results_page(&self, _scope: &WorkPublicSearchScope) -> Option<WorkResultsPage> {
+        None
+    }
+
+    /// A browser search over what its results page showed, `None` when the
+    /// page could not be opened. Others search as usual.
+    fn search_page<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        _page: Option<WorkSearchPage>,
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        self.search(scope, &[], limits)
+    }
+
     /// Pure scheduling hint, with no dispatch or disclosure. Unknown providers
     /// may omit it; every search still enforces its supplied limits independently.
     fn minimum_reservation(
@@ -343,6 +543,7 @@ mod tests {
                 title: "Source".into(),
                 start_index: 2,
                 end_index: 8,
+                snippet: None,
             }],
             actual_input_tokens: 100,
             actual_output_tokens: 10,
@@ -378,5 +579,120 @@ mod tests {
         assert!(excerpt.contains("source"));
         assert_eq!(excerpt.chars().count(), 768);
         assert!(excerpt.len() < evidence.answer.len());
+    }
+    #[test]
+    fn browser_search_carries_ranked_results_and_no_answer() {
+        let result = |url: &str, snippet: Option<&str>| WorkProviderSearchCitation {
+            url: url.into(),
+            title: "Result".into(),
+            start_index: 0,
+            end_index: 0,
+            snippet: snippet.map(str::to_owned),
+        };
+        let mut evidence = WorkProviderSearchEvidenceV1 {
+            version: 1,
+            provider: WorkSearchProvider::Browser,
+            model: "duckduckgo".into(),
+            response_model: "duckduckgo".into(),
+            response_id: "zb_01J".into(),
+            search_call_id: "zq_01J".into(),
+            answer: String::new(),
+            citations: vec![
+                result("https://example.com/a", Some("The engine's own text")),
+                result("https://example.org/b", None),
+            ],
+            actual_input_tokens: 0,
+            actual_output_tokens: 0,
+        };
+        assert!(evidence.validate().is_ok());
+        assert_eq!(
+            evidence.citation_excerpt(0).unwrap(),
+            "The engine's own text"
+        );
+        assert_eq!(evidence.citation_excerpt(1).unwrap(), "Result");
+        let valid = evidence.clone();
+        let refused: [fn(&mut WorkProviderSearchEvidenceV1); 9] = [
+            |e| e.answer = "An answer the engine never gave".into(),
+            |e| e.citations.clear(),
+            |e| e.actual_input_tokens = 1,
+            |e| e.model = "yahoo".into(),
+            |e| e.response_id = "zr_01J".into(),
+            |e| e.citations[1].url = e.citations[0].url.clone(),
+            |e| e.citations[0].end_index = 4,
+            |e| e.citations[0].snippet = Some("line\rbreak".into()),
+            |e| e.citations[1].url = "javascript:alert(1)".into(),
+        ];
+        for refuse in refused {
+            evidence = valid.clone();
+            refuse(&mut evidence);
+            assert!(evidence.validate().is_err());
+        }
+        // A provider answer never carries a browser result's snippet.
+        let mut native = valid;
+        native.provider = WorkSearchProvider::Native;
+        native.model = "anthropic/claude-haiku-4-5-20251001".into();
+        native.response_model = native.model.clone();
+        native.response_id = "zr_01J".into();
+        native.search_call_id = "zs_01J".into();
+        native.answer = "A source".into();
+        native.actual_input_tokens = 10;
+        native.citations.truncate(1);
+        native.citations[0].end_index = 8;
+        assert!(native.validate().is_err());
+        native.citations[0].snippet = None;
+        assert!(native.validate().is_ok());
+        for engine in BROWSER_SEARCH_ENGINES {
+            assert!(supported_search_model(WorkSearchProvider::Browser, engine));
+        }
+        let fallback = WorkSearchFallbackV1 {
+            provider: WorkSearchProvider::Browser,
+            model: "google".into(),
+        };
+        assert!(fallback.validate().is_err());
+    }
+
+    #[test]
+    fn native_search_binds_the_chosen_model_and_rust_minted_ids() {
+        let scope = WorkPublicSearchScope {
+            provider: WorkSearchProvider::Native,
+            model: "anthropic/claude-haiku-4-5-20251001".into(),
+            query: "public query".into(),
+        };
+        assert!(scope.validate().is_ok());
+        for model in ["", "has space", "quote\"d"] {
+            assert!(!supported_search_model(WorkSearchProvider::Native, model));
+        }
+        assert!(!supported_search_model(
+            WorkSearchProvider::OpenAi,
+            "anthropic/claude"
+        ));
+        let mut evidence = WorkProviderSearchEvidenceV1 {
+            version: 1,
+            provider: WorkSearchProvider::Native,
+            model: scope.model.clone(),
+            response_model: scope.model.clone(),
+            response_id: "zr_01J".into(),
+            search_call_id: "zs_01J".into(),
+            answer: "A source".into(),
+            citations: vec![WorkProviderSearchCitation {
+                url: "https://example.com".into(),
+                title: "Source".into(),
+                start_index: 0,
+                end_index: 8,
+                snippet: None,
+            }],
+            actual_input_tokens: 100,
+            actual_output_tokens: 10,
+        };
+        assert!(evidence.validate().is_ok());
+        // Native evidence never passes as an OpenAI receipt, nor the reverse.
+        evidence.response_id = "resp_01J".into();
+        assert!(evidence.validate().is_err());
+        evidence.response_id = "zr_01J".into();
+        evidence.response_model = "zephium/other".into();
+        assert!(evidence.validate().is_err());
+        evidence.response_model = scope.model.clone();
+        evidence.provider = WorkSearchProvider::OpenAi;
+        assert!(evidence.validate().is_err());
     }
 }

@@ -5,7 +5,7 @@ export type SidebarMode = "default" | "compact";
 /** The rail width. Native admits it as a real sidebar width, not a mode flag. */
 export const COMPACT_WIDTH = 56;
 export const MIN_EXPANDED_WIDTH = 180;
-export const MAX_EXPANDED_WIDTH = 420;
+export const MAX_EXPANDED_WIDTH = 460;
 
 /**
  * Dragging the handle below this snaps to the rail, and dragging back out of
@@ -35,7 +35,7 @@ export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
 export const expanded = () => expandedWidth;
 /** The chrome gap between the rail and an open utility panel. */
-const PANEL_GAP = 8;
+export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>

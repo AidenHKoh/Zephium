@@ -33,6 +33,19 @@ pub(super) fn query_discovery_scope() -> AgentNavigationDiscovery {
     .unwrap()
 }
 
+/// The arrival's first look is an application shell of loading placeholders.
+static BOOTING_ARRIVAL: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn a_booting_arrival_fills_in_before_the_next_model_call() {
+    let _serial = lock(&SERIAL);
+    BOOTING_ARRIVAL.store(true, Ordering::Relaxed);
+    // The fixture provider asserts the post-navigation call carries the
+    // arrival's own heading, not its loading shell.
+    provider_fixture(ProviderFault::Navigation(NavigationFault::Discovery));
+    BOOTING_ARRIVAL.store(false, Ordering::Relaxed);
+}
+
 #[test]
 fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls() {
     let _serial = lock(&SERIAL);
@@ -44,16 +57,41 @@ fn discovered_link_workflow_uses_original_controller_and_refuses_unobserved_urls
     }
 }
 
+pub(super) static FILL_THEN_SCROLL: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn scrolling_after_a_field_fill_never_submits_the_form_implicitly() {
+    let _serial = lock(&SERIAL);
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FILL_THEN_SCROLL.store(false, Ordering::Relaxed);
+        }
+    }
+    let _reset = Reset;
+    FILL_THEN_SCROLL.store(true, Ordering::Relaxed);
+    provider_fixture(ProviderFault::Navigation(NavigationFault::DiscoveryAction(
+        true,
+    )));
+}
+
 pub(super) struct LocalActionPolicy;
 impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
     fn model_action_effect(&self) -> Option<SemanticEffectClass> {
-        Some(SemanticEffectClass::LocalWrite)
+        (!FILL_THEN_SCROLL.load(Ordering::Relaxed)).then_some(SemanticEffectClass::LocalWrite)
+    }
+    fn rewritable_field(&self, action: &SemanticPreparedAction, _: &SemanticObservation) -> bool {
+        action.kind() == SemanticActionKind::Fill
     }
     fn model_action_operations(
         &self,
         node: &SemanticNode,
         _: &SemanticObservation,
     ) -> Result<SemanticOperations, AgentWorkFailure> {
+        if FILL_THEN_SCROLL.load(Ordering::Relaxed) && node.role() == SemanticRole::Document {
+            return SemanticOperations::try_new(&[SemanticOperationClass::Scroll])
+                .map_err(|_| AgentWorkFailure::Contract);
+        }
         if node.name().is_some_and(|name| name.as_str() == "Field") {
             SemanticOperations::try_new(&[SemanticOperationClass::Fill])
                 .map_err(|_| AgentWorkFailure::Contract)
@@ -70,6 +108,18 @@ impl crate::AgentWorkLocalActionPolicy for LocalActionPolicy {
         // This adapter knows the synthetic field has no remote effects. Its
         // approved intent is one exact fill; the model selects the fresh ref.
         assert_eq!(action.source_observation(), observation.request().id());
+        if FILL_THEN_SCROLL.load(Ordering::Relaxed)
+            && matches!(
+                action.kind(),
+                SemanticActionKind::Scroll | SemanticActionKind::Press
+            )
+        {
+            return Ok(AgentEffectAssessment::new(
+                action,
+                action.frame().origin().clone(),
+                SemanticEffectClass::Read,
+            ));
+        }
         if action.kind() != SemanticActionKind::Fill
             || action.fill_text().map(SemanticActionText::as_str) != Some("fixture value")
             || action.verification() != SemanticVerification::TargetValueMatchesInput
@@ -102,7 +152,11 @@ fn open_objective_corrects_unissued_action_and_bounds_repeated_invalid_proposals
             ActionRefusal::OperationDenied,
             ActionRefusal::EffectMismatch,
             ActionRefusal::UnsupportedWait,
+            ActionRefusal::Rewritten,
         ] {
+            if repeat && refusal == ActionRefusal::Rewritten {
+                continue;
+            }
             provider_fixture(ProviderFault::Navigation(
                 NavigationFault::DiscoveryActionRefusal(repeat, refusal),
             ));
@@ -306,6 +360,9 @@ pub(super) enum ActionRefusal {
     EffectMismatch,
     /// A wait this host cannot evidence; the model is told and continues.
     UnsupportedWait,
+    /// The fill ran, but the page did not keep its value as typed (an
+    /// autocomplete rewrote it): the model sees the field as it is now.
+    Rewritten,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NavigationFault {
@@ -376,16 +433,12 @@ impl NavigationFault {
                 }
             }
             Self::DiscoveryMissingLink => 6,
+            Self::DiscoveryAction(_) if FILL_THEN_SCROLL.load(Ordering::Relaxed) => 12,
             Self::DiscoveryAction(_) => 8,
-            Self::DiscoveryActionRefusal(repeat, _) => {
-                if repeat {
-                    4
-                } else {
-                    10
-                }
-            }
+            Self::DiscoveryActionRefusal(..) => 10,
             Self::DiscoveryScopeRefusal(_) => 10,
-            Self::DiscoveryEvidence(_) => 8,
+            // The foreign mapping is refused and mapped once more, told why.
+            Self::DiscoveryEvidence(foreign) => 8 + 2 * u8::from(foreign),
             Self::DiscoveryBudget(limit, refusal, operations) => {
                 2 * (limit.min((operations - 1) as u8) - u8::from(refusal))
             }
@@ -398,10 +451,10 @@ impl NavigationFault {
             Self::DepartureMissing | Self::TargetMutation | Self::AccountMutation => 0,
             Self::None
             | Self::Discovery
-            | Self::ForeignSource
             | Self::OldCitation
             | Self::ResultMutation
             | Self::AuditLost => 6,
+            Self::ForeignSource => 8,
             Self::Repeat => 4,
             Self::CancelMapCount => 5,
             _ => 2,
@@ -414,6 +467,26 @@ impl NavigationFault {
         self == Self::CancelMapCount && turns == 2 && count
     }
     pub(super) fn stream(self, turn: u8) -> String {
+        if self == Self::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+            if turn == 1 {
+                return tool_stream(turn, true).replace("@a2", "@a3");
+            }
+            if turn == 2 || turn == 3 {
+                return named_tool_stream(
+                    turn,
+                    "act",
+                    r#"{\"actions\":[{\"kind\":\"scroll\",\"target\":\"@a1\",\"direction\":\"down\",\"amount\":\"page\",\"effect\":\"read\",\"wait\":{\"kind\":\"immediate\"},\"verification\":{\"kind\":\"scroll_position_changed\"},\"settle_millis\":2000}]}"#,
+                );
+            }
+            let phase = turn - 3;
+            return Self::Discovery
+                .stream(phase)
+                .replace(&format!("resp_{phase}"), &format!("resp_{turn}"))
+                .replace(&format!("msg_{phase}"), &format!("msg_{turn}"))
+                .replace(&format!("fc_{phase}"), &format!("fc_{turn}"))
+                .replace(&format!("call_{phase}"), &format!("call_{turn}"));
+        }
+
         if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
         {
             let case = match self {
@@ -469,6 +542,7 @@ impl NavigationFault {
                             r#"\"wait\":{\"kind\":\"immediate\"}"#,
                             r#"\"wait\":{\"kind\":\"target_state\",\"state\":\"focused\",\"present\":true}"#,
                         ),
+                    ActionRefusal::Rewritten => tool_stream(turn, true).replace("@a2", "@a3"),
                 };
             }
             let phase = turn - 1;
@@ -558,7 +632,7 @@ impl NavigationFault {
                 return named_tool_stream(
                     turn,
                     "locate",
-                    r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                    &r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#.replace("missing specifications", &format!("missing specifications {turn}")),
                 );
             }
             if turn == limit - 1 {
@@ -567,7 +641,7 @@ impl NavigationFault {
                         named_tool_stream(
                             turn,
                             "locate",
-                            r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#,
+                            &r#"{\"semantic_query\":\"missing specifications\",\"scope\":{\"kind\":\"initial\"}}"#.replace("missing specifications", &format!("missing specifications {turn}")),
                         )
                     } else {
                         named_tool_stream(turn, "snapshot", r#"{\"scope\":{\"kind\":\"initial\"}}"#)
@@ -641,6 +715,10 @@ impl NavigationFault {
         }
     }
     pub(super) fn check_request(self, bytes: &[u8], turns: u8) {
+        if self == Self::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+            return;
+        }
+
         if self == Self::DiscoveryMissingLink || matches!(self, Self::DiscoveryNavigationRefusal(_))
         {
             let case = match self {
@@ -697,6 +775,21 @@ impl NavigationFault {
         }
 
         if let Self::DiscoveryActionRefusal(repeat, refusal) = self {
+            if turns == 1 && refusal == ActionRefusal::Rewritten {
+                // The fill ran: the model gets a fresh look at the field as
+                // it is now, told why.
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert!(text.contains("field_rewritten"));
+                assert!(text.contains("Field"));
+                return;
+            }
+            if repeat && turns >= 3 {
+                // The third identical refused proposal in a row is shown the
+                // page anew, told why, instead of the same refusal.
+                let text = std::str::from_utf8(bytes).unwrap();
+                assert!(text.contains("repeated_proposal"));
+                return;
+            }
             if turns == 1 || (repeat && turns > 0) {
                 let body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
                 let result = body["input"]
@@ -714,6 +807,7 @@ impl NavigationFault {
                         ActionRefusal::EffectMismatch => "task_effect_mismatch",
                         ActionRefusal::OperationDenied => "operation_not_supported",
                         ActionRefusal::UnsupportedWait => "verification_not_supported",
+                        ActionRefusal::Rewritten => unreachable!(),
                     }
                 );
                 if refusal == ActionRefusal::EffectMismatch {
@@ -763,7 +857,15 @@ impl NavigationFault {
                 assert_eq!(result["call_id"], format!("call_{turns}"));
                 let error: serde_json::Value =
                     serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
-                assert_eq!(error["code"], "invalid_snapshot_scope");
+                // A third look in a row is no longer offered: refused as such.
+                assert_eq!(
+                    error["code"],
+                    if turns == 4 {
+                        "snapshot_unavailable"
+                    } else {
+                        "invalid_snapshot_scope"
+                    }
+                );
                 assert_eq!(error["executed"], false);
                 assert_eq!(error["observation_unchanged"], true);
                 assert!(error.get("observation").is_none());
@@ -776,9 +878,9 @@ impl NavigationFault {
                 assert!(observation.contains("r=heading"));
                 assert!(observation.contains("Arrival certificate"));
                 if case == 4 {
-                    assert!(observation.contains("truncated_model_projection"));
-                    assert!(observation.len() <= 16 * 1024);
-                    assert!(!observation.contains("public.example.test/71/"));
+                    // A whole filtered capture now fits the model's look.
+                    assert!(observation.len() <= 32 * 1024);
+                    assert!(observation.contains("public.example.test/71/"));
                 }
                 assert_eq!(
                     std::str::from_utf8(bytes).unwrap().matches("ZSEM3").count(),
@@ -1139,13 +1241,16 @@ pub(super) fn capture(
     }
     let arrived = lock(&port.calls).contains(&9);
     let correlation = invocation.correlation();
-    if !matches!(
-        fault,
-        NavigationFault::DiscoveryEvidence(_)
-            | NavigationFault::DiscoveryScopeRefusal(_)
-            | NavigationFault::DiscoveryAction(_)
-            | NavigationFault::DiscoveryActionRefusal(_, _)
-    ) {
+    let booting = arrived && BOOTING_ARRIVAL.load(Ordering::Relaxed);
+    if !booting
+        && !matches!(
+            fault,
+            NavigationFault::DiscoveryEvidence(_)
+                | NavigationFault::DiscoveryScopeRefusal(_)
+                | NavigationFault::DiscoveryAction(_)
+                | NavigationFault::DiscoveryActionRefusal(_, _)
+        )
+    {
         assert_eq!(
             correlation.snapshot_generation().get(),
             1,
@@ -1190,6 +1295,15 @@ pub(super) fn capture(
             correlation.invocation().get(),
             correlation.snapshot_generation().get()
         )
+    } else {
+        wire
+    };
+    let wire = if FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+        wire.replace(
+            r#""r":"document","o":16"#,
+            r#""r":"document","o":16,"b":{"x":0,"y":0,"w":800,"h":600}"#,
+        )
+        .replace(r#""s":64,"o":3"#, r#""s":64,"o":11"#)
     } else {
         wire
     };
@@ -1248,6 +1362,18 @@ pub(super) fn capture(
                 "u": format!("https://public.example.test/{index}/{}", "a".repeat(170))
             }));
         }
+        serde_json::to_string(&value).unwrap()
+    } else {
+        wire
+    };
+    let wire = if booting && correlation.snapshot_generation().get() == 1 {
+        let mut value: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        value["n"] = serde_json::json!([
+            {"k": 1, "r": "document", "o": 16},
+            {"k": 2, "p": 0, "r": "progress"},
+            {"k": 3, "p": 0, "r": "progress"},
+            {"k": 4, "p": 0, "r": "progress"},
+        ]);
         serde_json::to_string(&value).unwrap()
     } else {
         wire
@@ -1383,19 +1509,43 @@ pub(super) fn assert_outcome(
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
     }
-    if let NavigationFault::DiscoveryActionRefusal(repeat, _) = fault {
+    if let NavigationFault::DiscoveryActionRefusal(repeat, refusal) = fault {
         if repeat {
             let AgentWorkOutcome::ClosedUnsuccessfully(closed) = outcome else {
                 panic!("{outcome:?}");
             };
-            assert_eq!(
+            // Every repeat reaches the model as feedback: the page ends on its
+            // own budget, or on a long run of refusals with nothing done.
+            assert!(matches!(
                 closed.failure(),
-                AgentWorkFailure::Browser(AgentBrowserProviderError::ActionProposalLoop)
-            );
-            assert_eq!(closed.policy_settlement().closure().model_calls(), 2);
+                AgentWorkFailure::Browser(
+                    AgentBrowserProviderError::ActionProposalLoop
+                        | AgentBrowserProviderError::TurnLimit
+                )
+            ));
+            assert!(closed.policy_settlement().closure().model_calls() > 2);
             assert_eq!(closed.policy_settlement().closure().effects(), 0);
             assert!(!calls.contains(&7), "invalid actions never dispatch");
             assert!(!calls.contains(&9), "invalid actions never navigate");
+        } else if refusal == ActionRefusal::Rewritten {
+            let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+                panic!("a rewritten fill is the model's to follow up: {outcome:?}");
+            };
+            // The rewritten fill ran and is charged; the model saw the field
+            // as it was, filled it again and went on.
+            assert_eq!(success.closure().model_calls(), 5);
+            assert_eq!(success.closure().navigations(), 1);
+            assert!(success.take_extraction().is_some());
+            // The fresh look showed the field holding the value, so the
+            // model's second fill was already satisfied and never dispatched.
+            assert_eq!(calls.iter().filter(|call| **call == 7).count(), 1);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event.kind(), AgentWorkEventKind::NeedsHuman(_))));
+            assert!(events.iter().any(|event| event.kind()
+                == AgentWorkEventKind::ActionProposalRefused(
+                    SemanticActionBindingError::Unverified
+                )));
         } else {
             let AgentWorkOutcome::Succeeded(mut success) = outcome else {
                 panic!("{outcome:?}");
@@ -1415,7 +1565,26 @@ pub(super) fn assert_outcome(
                     AgentWorkEventKind::ActionProposalRefused(_)
                 ))
                 .count(),
-            if repeat { 2 } else { 1 }
+            match (repeat, refusal) {
+                (true, _) => 4,
+                (false, ActionRefusal::Rewritten) => 2,
+                (false, _) => 1,
+            }
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        return;
+    }
+    if fault == NavigationFault::DiscoveryAction(true) && FILL_THEN_SCROLL.load(Ordering::Relaxed) {
+        let AgentWorkOutcome::Succeeded(mut success) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(success.closure().model_calls(), 6);
+        assert!(success.take_extraction().is_some());
+        assert_eq!(
+            calls.iter().filter(|&&call| call == 7).count(),
+            2,
+            "one fill and one requested scroll must reach the native adapter; no implicit Enter: {:?}",
+            events.iter().map(|event| event.kind()).collect::<Vec<_>>()
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
         return;
@@ -1597,7 +1766,12 @@ pub(super) fn assert_outcome(
             matches!(&result.sources(value.source_span()).unwrap().next().unwrap().content, SemanticOwnedReadContent::Text(text) if text == "Arrival certificate")
         );
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-        assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        if BOOTING_ARRIVAL.load(Ordering::Relaxed) {
+            // One more look at the arrival while its shell filled in.
+            assert_eq!(calls, [1, 2, 3, 2, 9, 3, 3, 4, 5, 6]);
+        } else {
+            assert_eq!(calls, [1, 2, 3, 2, 9, 3, 4, 5, 6]);
+        }
     } else if matches!(
         fault,
         NavigationFault::Redirect
@@ -1619,7 +1793,7 @@ pub(super) fn assert_outcome(
             .iter()
             .any(|event| event.kind() == AgentWorkEventKind::Terminal));
         if let Some(session) = &recovery.state.session {
-            assert!(session.credential.is_none());
+            assert!(session.access.is_none());
             assert_eq!(session.policy.pending_effects(), 0);
             assert_eq!(session.policy.pending_model_calls(), 0);
             if matches!(

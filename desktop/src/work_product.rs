@@ -19,7 +19,33 @@ impl WorkProductState {
     ) -> Option<std::sync::Arc<Vec<u8>>> {
         self.providers.activity.frame(attempt, step)
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn clear_website_data(&self, profile: ProfileId) -> std::sync::mpsc::Receiver<bool> {
+        self.providers.clear_website_data(profile)
+    }
 }
+/// Admits a Work run that Rust itself starts (the Ask panel's "Run in
+/// Work"), through the same operation owner as the panel's own runs.
+#[cfg(feature = "work-product")]
+pub(crate) fn admit_run(
+    app: &tauri::AppHandle,
+    profile: ProfileId,
+    operation: WorkCommandId,
+    input: WorkOperationV1,
+) -> Result<WorkOperationStateV1, WorkError> {
+    let owner = app
+        .try_state::<WorkProductState>()
+        .ok_or(WorkError::Unavailable)?;
+    let provider = owner.providers.clone();
+    let shell = app.state::<zephium_app::Handle>().inner().clone();
+    let task_input = input.clone();
+    owner
+        .operations
+        .admit((profile, operation), input, async move {
+            provider.run(shell, profile, task_input).await
+        })
+}
+
 /// Durable last frames of pages the agent read, managed beside the media blobs.
 pub(crate) struct WorkFrames(pub(crate) std::sync::Arc<zephium_store::WorkFrameStore>);
 
@@ -35,6 +61,7 @@ pub(crate) fn install(
     super::work_diagnostics::install(app);
     #[cfg(feature = "work-integration-qa")]
     super::work_captures::install(app);
+    zephium_app::work_screenshots::initialize(store.app_setting_readback("work.screenshots"));
     let ai_enabled = store.app_setting("ai.enabled").as_deref() != Some("false");
     let work_enabled = store.app_setting("work.enabled").as_deref() != Some("false");
     let providers = std::sync::Arc::new(super::work_provider::WorkProviders::new(
@@ -62,6 +89,7 @@ pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let app = app.clone();
+        let alerts = alerts::WorkAlerts::default();
         providers
             .browser
             .set_human_page_observer(std::sync::Arc::new(move |change| {
@@ -71,6 +99,7 @@ pub(crate) fn install(
                     "zephium:work-human-changed",
                     &change,
                 );
+                alerts.refresh(&app);
             }));
     }
     app.manage(WorkProductState {
@@ -116,6 +145,49 @@ async fn selected_work(
         return Err(WorkError::ProfileUnavailable);
     }
     Ok(profile)
+}
+
+/// Saves a plan's calendar where the person chooses. Only a calendar: the
+/// text must be one, and the name stays a plain file name.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_save_calendar(caller: WebviewWindow, name: String, text: String) -> bool {
+    use tauri_plugin_dialog::DialogExt;
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_save_calendar")
+        || !calendar_file(&name, &text)
+    {
+        return false;
+    }
+    let app = caller.app_handle().clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name(&name)
+            .add_filter("Calendar", &["ics"])
+            .blocking_save_file()
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(path) = picked.and_then(|picked| picked.into_path().ok()) else {
+        return false;
+    };
+    matches!(
+        tokio::task::spawn_blocking(move || std::fs::write(path, text)).await,
+        Ok(Ok(()))
+    )
+}
+
+fn calendar_file(name: &str, text: &str) -> bool {
+    name.len() <= 120
+        && name.ends_with(".ics")
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        && text.len() <= 1024 * 1024
+        && text.starts_with("BEGIN:VCALENDAR\r\n")
+        && text.trim_end().ends_with("END:VCALENDAR")
 }
 
 #[tauri::command]
@@ -222,6 +294,102 @@ pub(crate) async fn work_operation(
     }
 }
 
+/// Persist only the user's draft body. The original agent artifact and a live
+/// execution remain unchanged; the returned user revision can be preserved.
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn work_edit_draft(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    expected_revision: zephium_core::work::WorkRevision,
+    command: WorkCommandId,
+    execution: zephium_core::work::WorkExecutionId,
+    artifact: zephium_core::work::WorkArtifactId,
+    body: String,
+) -> WorkResponseV1 {
+    use zephium_core::work::{
+        artifact::WorkArtifactDataV1, port::WorkReply, runtime::WorkRuntimeIntent,
+    };
+    let result = async {
+        if !super::authorize(&caller, super::CallerPolicy::Main, "work_edit_draft")
+            || super::shutdown_started(&app)
+            || body.len() > 16_000
+        {
+            return Err(WorkError::Invalid);
+        }
+        let profile = ProfileId::parse(&expected_profile)
+            .filter(|id| id.to_string() == expected_profile)
+            .ok_or(WorkError::Invalid)?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            app.state::<zephium_app::Handle>()
+                .work_projection(profile, work)?,
+        )
+        .await
+        .map_err(|_| WorkError::Unavailable)??;
+        if response.profile != profile {
+            return Err(WorkError::ProfileUnavailable);
+        }
+        let WorkReply::Runtime(projection) = response.reply else {
+            return Err(WorkError::Invalid);
+        };
+        if projection.work.revision != expected_revision {
+            return Err(WorkError::Conflict);
+        }
+        let execution = projection
+            .executions
+            .iter()
+            .find(|e| e.id == execution)
+            .ok_or(WorkError::NotFound)?;
+        let original = execution
+            .artifacts
+            .iter()
+            .find(|a| a.id == artifact)
+            .ok_or(WorkError::NotFound)?;
+        let edited = execution
+            .user_artifacts
+            .iter()
+            .find(|u| u.artifact == artifact && u.edited_data.is_some());
+        let mut data = edited
+            .and_then(|u| u.edited_data.clone())
+            .unwrap_or_else(|| original.data.clone());
+        let WorkArtifactDataV1::Draft { body: current, .. } = &mut data else {
+            return Err(WorkError::Invalid);
+        };
+        *current = body;
+        let evidence = edited.map_or_else(|| original.evidence.clone(), |u| u.evidence.clone());
+        data.validate(evidence.len())?;
+        Ok(WorkCallV1::Execute {
+            command: zephium_ipc::work::WorkCommandV1 {
+                version: 1,
+                work,
+                expected_revision,
+                command,
+                intent: WorkRuntimeIntent::EditArtifact {
+                    execution: execution.id,
+                    artifact,
+                    data,
+                    evidence,
+                },
+            },
+        })
+    }
+    .await;
+    match result {
+        Ok(call) => work_call(caller, app, expected_profile, call).await,
+        Err(error) => WorkResponseV1 {
+            version: 1,
+            profile: expected_profile,
+            reply: zephium_ipc::work::WorkReplyV1::Error {
+                error: error.into(),
+            },
+        },
+    }
+}
+
 /// Manifest preview for the composer. Bodies never cross this boundary.
 #[tauri::command]
 #[specta::specta]
@@ -266,6 +434,25 @@ pub(crate) async fn work_context_preview(
         Err(error) => WorkContextPreviewV1::Refused {
             error: error.into(),
         },
+    }
+}
+
+/// Whether turning Work off would stop work that is running now.
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn work_running(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "work_running") {
+        return false;
+    }
+    #[cfg(feature = "work-product")]
+    {
+        app.try_state::<WorkProductState>()
+            .is_some_and(|owner| owner.operations.running())
+    }
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = app;
+        false
     }
 }
 
@@ -453,6 +640,12 @@ fn call_name(call: &WorkCallV1) -> &'static str {
     }
 }
 
+#[cfg(all(
+    feature = "work-product",
+    any(target_os = "macos", target_os = "windows")
+))]
+#[path = "work_alerts.rs"]
+mod alerts;
 #[path = "work_human.rs"]
 pub(crate) mod human;
 
@@ -527,5 +720,18 @@ mod admission_tests {
             refusal("environment:checkpoint", WorkError::Conflict, fault, zero),
             "work: phase=call call=environment:checkpoint refused=Conflict waited_ms=0"
         );
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    #[test]
+    fn only_a_calendar_under_a_plain_name_is_saved() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        assert!(super::calendar_file("CS exam plan.ics", ics));
+        assert!(!super::calendar_file("../plan.ics", ics));
+        assert!(!super::calendar_file(".plan.ics", ics));
+        assert!(!super::calendar_file("plan.sh", ics));
+        assert!(!super::calendar_file("plan.ics", "#!/bin/sh\n"));
     }
 }

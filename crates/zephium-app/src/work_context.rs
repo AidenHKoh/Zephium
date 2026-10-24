@@ -174,10 +174,12 @@ impl WorkContextAdmission {
         // Decisions are durable user context for reviewed work. They never ride
         // a public search query.
         let mut implicit = Vec::new();
-        if matches!(
-            purpose,
-            WorkContextPurpose::Planning | WorkContextPurpose::Agent
-        ) {
+        if !selection.blocks
+            && matches!(
+                purpose,
+                WorkContextPurpose::Planning | WorkContextPurpose::Agent
+            )
+        {
             let mut decisions: Vec<_> = environment.decisions.iter().collect();
             decisions.sort_by_key(|decision| decision.element);
             for decision in decisions {
@@ -207,6 +209,16 @@ impl WorkContextAdmission {
         } else {
             Vec::new()
         };
+        for source in sources.iter().chain(&implicit) {
+            for text in [&source.title, &source.revision, &source.text] {
+                require_model_safe_text(text)?;
+            }
+        }
+        for tab in &tabs {
+            for text in [&tab.title, &tab.host, &tab.path] {
+                require_model_safe_text(text)?;
+            }
+        }
         WorkAdmittedContext::admit_with_tabs(
             environment.id,
             environment.revision,
@@ -238,7 +250,7 @@ impl WorkContextAdmission {
         Ok(tabs)
     }
 
-    async fn environment(
+    pub(crate) async fn environment(
         &self,
         profile: ProfileId,
         id: WorkEnvironmentId,
@@ -471,8 +483,8 @@ impl WorkContextAdmission {
                     if *completed { "completed" } else { "open" }
                 ),
             ),
-            ResourceContent::Object { object } => {
-                (WorkContextItemKind::Object, object.data.plain_text())
+            ResourceContent::Object { .. } => {
+                (WorkContextItemKind::Object, block_context_body(&record))
             }
             ResourceContent::Media { asset } => {
                 let text = if asset.kind == zephium_core::resources::MediaKind::Image {
@@ -572,5 +584,73 @@ impl WorkContextAdmission {
             found.data = edited;
         }
         Ok((found, visibility))
+    }
+}
+
+/// Structured identity is never inferred from lossy text. Large blocks are read
+/// in bounded pages by the context-bound tools before any edit is accepted.
+fn block_context_body(record: &zephium_core::resources::ResourceRecord) -> String {
+    let ResourceContent::Object { object } = &record.draft.content else {
+        return String::new();
+    };
+    let mut visible = object.data.clone();
+    visible.clear_record_media();
+    let data = serde_json::to_value(&visible).unwrap_or_default();
+    if let Some(rows) = data
+        .get("rows")
+        .or_else(|| data.get("items"))
+        .or_else(|| data.get("steps"))
+        .and_then(serde_json::Value::as_array)
+    {
+        return serde_json::json!({"resource":record.id,"revision":record.revision,"kind":data["kind"],"count":rows.len(),"read_required":true}).to_string();
+    }
+    let body = serde_json::json!({"resource":record.id,"revision":record.revision,"data":data})
+        .to_string();
+    if body.len() <= MAX_CONTEXT_ITEM_BYTES {
+        body
+    } else {
+        serde_json::json!({"resource":record.id,"revision":record.revision,"kind":data["kind"],"read_required":true}).to_string()
+    }
+}
+
+/// Context consent is not authority to disclose recognizable credentials.
+/// Check materialized context before its final byte limit; return no matched content.
+pub(crate) fn require_model_safe_text(text: &str) -> Result<(), WorkError> {
+    if zephium_agentic::contains_recognized_secret(text) {
+        Err(WorkError::Unavailable)
+    } else {
+        Ok(())
+    }
+}
+#[cfg(test)]
+mod credential_disclosure_tests {
+    use super::*;
+    #[test]
+    fn selected_context_withholds_credentials_before_clipping() {
+        for secret in [
+            "ghp_inertFixtureToken",
+            "Bearer inertFixtureValue",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+        ] {
+            let text = format!(
+                "{}\n{secret}",
+                "Ordinary note. ".repeat(MAX_CONTEXT_ITEM_BYTES)
+            );
+            assert_eq!(require_model_safe_text(&text), Err(WorkError::Unavailable));
+        }
+        assert!(require_model_safe_text("Confidential client budget:71329 EUR").is_ok());
+    }
+    #[test]
+    fn structured_block_replies_and_metadata_use_the_same_boundary() {
+        for field in ["title", "column", "value"] {
+            let mut data = serde_json::json!({});
+            data[field] = serde_json::json!("sk-inertFixtureToken");
+            let body = data.to_string();
+            assert_eq!(require_model_safe_text(&body), Err(WorkError::Unavailable));
+        }
+        let body =
+            serde_json::json!({"title":"My calendar","rows":[{"title":"Lunch","done":false}]})
+                .to_string();
+        assert!(require_model_safe_text(&body).is_ok());
     }
 }

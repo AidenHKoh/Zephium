@@ -11,6 +11,10 @@ pub const MAX_DECISION_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_TITLE_BYTES: usize = 512;
 pub const MAX_ENVIRONMENT_BODY_BYTES: usize = 262_144;
 
+pub const WORK_PLACEMENT_LEGACY: u8 = 0;
+pub const WORK_PLACEMENT_LANE: u8 = 2;
+pub const WORK_PLACEMENT_PIN: u8 = 3;
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -137,11 +141,12 @@ pub struct WorkElementPlacement {
     pub height: u16,
     /// 0: an absolute position from before lanes, which the canvas re-derives;
     /// 2: `x, y` are the card's offset from its lane-derived position.
+    /// 3: the person pinned the block relative to its result's corner.
     #[serde(default, skip_serializing_if = "is_legacy_placement")]
     pub revision: u8,
 }
 fn is_legacy_placement(revision: &u8) -> bool {
-    *revision == 0
+    *revision == WORK_PLACEMENT_LEGACY
 }
 
 /// Area geometry is presentation; membership stays on the element.
@@ -242,7 +247,10 @@ impl WorkEnvironmentView {
             if !(120..=4096).contains(&p.width) || !(80..=4096).contains(&p.height) {
                 return Some(F::PlacementSize);
             }
-            if !matches!(p.revision, 0 | 2) {
+            if !matches!(
+                p.revision,
+                WORK_PLACEMENT_LEGACY | WORK_PLACEMENT_LANE | WORK_PLACEMENT_PIN
+            ) {
                 return Some(F::PlacementRevision);
             }
         }
@@ -418,6 +426,20 @@ impl WorkEnvironmentSnapshot {
                     next.decisions.push(WorkDecision { element, choice });
                 }
             }
+            WorkEnvironmentEdit::NameLink {
+                element,
+                title: named,
+            } => {
+                let Some(WorkEnvironmentReference::Link { title, .. }) = next
+                    .elements
+                    .iter_mut()
+                    .find(|e| e.id == element)
+                    .map(|e| &mut e.reference)
+                else {
+                    return Err(WorkError::NotFound);
+                };
+                *title = named;
+            }
             WorkEnvironmentEdit::Undecide { element } => {
                 let count = next.decisions.len();
                 next.decisions.retain(|d| d.element != element);
@@ -541,6 +563,12 @@ pub enum WorkEnvironmentEdit {
     Undecide {
         element: WorkElementId,
     },
+    /// Names a placed link by what its page says it is; a video's title is
+    /// followed by its channel on the next line.
+    NameLink {
+        element: WorkElementId,
+        title: String,
+    },
 }
 impl WorkEnvironmentEdit {
     pub fn validate(&self) -> Result<(), WorkError> {
@@ -549,6 +577,7 @@ impl WorkEnvironmentEdit {
             | Self::CreateArea { title }
             | Self::RenameArea { title, .. } => validate_text(title, MAX_ENVIRONMENT_TITLE_BYTES),
             Self::Decide { choice, .. } => validate_text(choice, MAX_DECISION_BYTES),
+            Self::NameLink { title, .. } => validate_text(title, 512),
             Self::Relate { from, to, .. } if from == to => Err(WorkError::Invalid),
             Self::Add {
                 reference: WorkEnvironmentReference::Folder { path, name },

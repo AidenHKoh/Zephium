@@ -12,7 +12,7 @@ pub(crate) async fn work_choose_folder(
     caller: WebviewWindow,
     app: AppHandle,
     expected_profile: String,
-    start: String,
+    start: Option<String>,
 ) -> Result<Option<zephium_ipc::WorkFolderAdmitV1>, ()> {
     if !super::authorize(&caller, super::CallerPolicy::Main, "work_choose_folder")
         || super::shutdown_started(&app)
@@ -21,11 +21,12 @@ pub(crate) async fn work_choose_folder(
     {
         return Ok(None);
     }
-    let start = std::path::PathBuf::from(start);
-    let at = start
-        .ancestors()
-        .find(|dir| dir.is_dir())
-        .map(std::path::Path::to_path_buf);
+    let at = start.map(std::path::PathBuf::from).and_then(|start| {
+        start
+            .ancestors()
+            .find(|dir| dir.is_dir())
+            .map(std::path::Path::to_path_buf)
+    });
     let picker = app.clone();
     let picked = tokio::task::spawn_blocking(move || {
         let panel = picker.dialog().file().set_title("Choose a folder for Work");

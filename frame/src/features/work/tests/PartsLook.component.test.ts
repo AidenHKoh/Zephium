@@ -3,7 +3,7 @@ import { test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import PartsCanvas from "./PartsCanvas.svelte";
-import { fixScene } from "./parts-look";
+import { fixScene, searchScene } from "./parts-look";
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
@@ -34,6 +34,24 @@ for (const { stage, view, zoom } of cases)
       document.documentElement.dataset.theme = theme;
       await new Promise((done) => setTimeout(done, 800));
       await page.screenshot({ path: `${shots}/fix-${stage}-${view}-${theme}.png` });
+    }
+    document.documentElement.dataset.theme = "dark";
+    await screen.unmount();
+  });
+
+for (const stage of ["searching", "done"] as const)
+  test(`Lead web search, ${stage}`, async () => {
+    await page.viewport(1500, 640);
+    const screen = await render(PartsCanvas, {
+      scene: searchScene(stage),
+      viewport: { x: 30, y: 30, zoom: 1 },
+    });
+    screen.container.style.width = "1500px";
+    screen.container.style.height = "640px";
+    for (const theme of ["dark", "light"]) {
+      document.documentElement.dataset.theme = theme;
+      await new Promise((done) => setTimeout(done, 800));
+      await page.screenshot({ path: `${shots}/search-${stage}-${theme}.png` });
     }
     document.documentElement.dataset.theme = "dark";
     await screen.unmount();

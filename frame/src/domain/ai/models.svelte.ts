@@ -2,6 +2,7 @@ import { commands } from "$shared/ipc/bindings";
 import type {
   WorkModelEntry,
   WorkModelProvider,
+  WorkModelReasoning,
   WorkModelRole,
   WorkModelsFaultV1,
   WorkModelsV1,
@@ -29,9 +30,11 @@ export class ModelsSession {
   endpoint = $state.raw<WorkModelEntry[]>([]);
   more = $state.raw<WorkModelEntry[]>([]);
   listingMore = $state(false);
-  private listing = false;
+  /** The server address last asked for its models; each is asked once. */
+  private listed: string | null = null;
   private readSequence = 0;
   private readPending = false;
+  private reading = false;
   private active = false;
   private generation = 0;
   private stop: (() => void) | null = null;
@@ -54,10 +57,11 @@ export class ModelsSession {
   }
 
   private async read() {
-    if (this.busy) {
+    if (this.busy || this.reading) {
       this.readPending = true;
       return;
     }
+    this.reading = true;
     const sequence = ++this.readSequence;
     const generation = this.generation;
     const response = await observe(
@@ -65,12 +69,17 @@ export class ModelsSession {
       TIMEOUT,
       this.lifetime.signal,
     );
-    if (generation !== this.generation || sequence !== this.readSequence) return;
-    if (response.state !== "received") {
-      this.unavailable = true;
-      return;
+    if (generation !== this.generation) return;
+    this.reading = false;
+    if (sequence === this.readSequence) {
+      if (response.state !== "received") this.unavailable = true;
+      else this.adopt(response.value);
     }
-    this.adopt(response.value);
+    // Changes that arrived during the read are answered by one more, not one each.
+    if (this.readPending && !this.busy) {
+      this.readPending = false;
+      void this.read();
+    }
   }
 
   private adopt(response: WorkModelsV1) {
@@ -86,6 +95,8 @@ export class ModelsSession {
     const previousBase = this.models?.providers.find((row) => row.provider === "compatible")?.base;
     const nextBase = response.providers.find((row) => row.provider === "compatible")?.base;
     if (previousBase !== nextBase) this.endpoint = [];
+    // An identical answer is not a change: dependants would ask again for nothing.
+    if (this.models && JSON.stringify(this.models) === JSON.stringify(response)) return;
     this.models = response;
   }
 
@@ -120,6 +131,11 @@ export class ModelsSession {
     return this.act(`choose:${role}`, () => commands.workChooseModel(this.profile, role, id));
   }
 
+  /** The lead's effort for this profile; null returns it to each model's default. */
+  setEffort(effort: WorkModelReasoning | null) {
+    return this.act("effort", () => commands.workSetModelEffort(this.profile, effort));
+  }
+
   /** The key goes straight to Rust, which checks it with the provider first. */
   setKey(provider: WorkModelProvider, key: string) {
     return this.act(
@@ -147,18 +163,21 @@ export class ModelsSession {
     return this.act("endpoint", () => commands.workSetModelEndpoint(this.profile, base));
   }
 
-  /** The person's own server's models, asked once per session. */
+  /** The person's own server's models, asked once per address it is set to.
+   *  An empty answer or a fault settles it; a new address asks again. */
   async listEndpoint() {
-    if (this.listing || this.endpoint.length) return;
-    this.listing = true;
+    const base =
+      this.models?.providers.find((provider) => provider.provider === "compatible")?.base ?? null;
+    if (base === null || base === this.listed) return;
+    this.listed = base;
+    this.endpoint = [];
     const generation = this.generation;
     const response = await observe(
       Promise.resolve().then(() => commands.workMoreModels(this.profile, "compatible")),
       KEY_TIMEOUT,
       this.lifetime.signal,
     );
-    if (generation !== this.generation) return;
-    this.listing = false;
+    if (generation !== this.generation || base !== this.listed) return;
     if (response.state === "received" && !response.value.fault)
       this.endpoint = response.value.entries;
   }
@@ -202,8 +221,9 @@ export class ModelsSession {
     this.endpoint = [];
     this.more = [];
     this.listingMore = false;
-    this.listing = false;
+    this.listed = null;
     this.readPending = false;
+    this.reading = false;
     this.readSequence++;
   }
 }

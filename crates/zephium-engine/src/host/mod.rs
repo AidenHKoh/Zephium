@@ -2,7 +2,11 @@
 mod agent_context;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
 mod agent_cookie_source;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod automatic_pip;
 mod blocker_statistics;
+#[cfg(all(test, target_os = "windows"))]
+mod browser_windows_qualification;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -32,6 +36,11 @@ mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
 mod page_permissions;
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
+pub(crate) mod page_reader;
 mod permits;
 mod profiles;
 mod resources;
@@ -52,6 +61,8 @@ pub(crate) mod work_frames;
     any(target_os = "macos", target_os = "windows")
 ))]
 mod work_resource;
+#[cfg(feature = "agentic-browser")]
+pub(crate) use work_resource::visual_store::{FreshNativeStore, FreshStoreLoss};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_session_presence;
 #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
@@ -143,6 +154,8 @@ struct Spare {
 // Keep native observer registrations adjacent to their WebView and drop them
 // first. Platform observers never strongly capture this wrapper or WebView.
 struct ObservedView {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    automatic_pip_sequence: Rc<Cell<u64>>,
     #[cfg(target_os = "macos")]
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
@@ -226,6 +239,13 @@ struct ObservedView {
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     // Before `view`, so a running search is stopped while its view lives.
     find: Option<crate::platform::imp::FindSession>,
+    // Before `view`: the Ask panel's reader removes its scripts and
+    // handlers from the view's controller while the view lives.
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    page_reader: page_reader::ReaderSlot,
     view: WebView,
     // Keep this after `view`: fields drop in declaration order, so the native
     // WebView wrapper completes its teardown path before capacity can be
@@ -513,6 +533,8 @@ pub(crate) struct EngineHost {
     /// views already open without touching them.
     focus_gate: focus::SharedFocusGate,
     blocker_sites: HashMap<ProfileId, content_styles::SitePreferencesSlot>,
+    /// Ask panel page styles: validated CSS per registrable site.
+    page_styles: HashMap<ProfileId, HashMap<String, Arc<str>>>,
     picker: Option<Arc<element_picker::PickerSession>>,
     next_picker: u64,
     // Declarative native objects are content-addressed by the SHA-256 of the
@@ -593,6 +615,11 @@ pub(crate) struct EngineHost {
     #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
     anonymous_work_stores:
         HashMap<zephium_agentic::ContextRunId, work_resource::AnonymousWorkStore>,
+    /// Work's own persistent store per durable profile, shared by every Work
+    /// page that opens without the person's session. Never removed on page
+    /// teardown; profile erasure and clearing own its data.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+    work_data_stores: HashMap<ProfileId, crate::platform::imp::WebsiteDataStore>,
     /// Finished page loads per profile and host in ordinary tabs: a count,
     /// never a URL, path or page fact.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -637,6 +664,11 @@ pub(crate) struct EngineHost {
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     work_site_stores:
         HashMap<(ProfileId, String), std::rc::Rc<crate::platform::windows::WorkStoreSeed>>,
+    /// The person's own profile, borrowed by a Work site page's cookie sync
+    /// while no tab of that profile is open; released when the sync ends.
+    #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+    work_profile_cookie_sources:
+        HashMap<zephium_agentic::ContextId, construction::WindowsWorkEnvironmentBootstrap>,
     #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
     anonymous_work_environments:
         HashMap<zephium_agentic::ContextRunId, work_windows::AnonymousWorkEnvironment>,

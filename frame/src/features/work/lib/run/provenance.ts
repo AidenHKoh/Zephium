@@ -36,6 +36,12 @@ function readOf(runs: readonly WorkExecutionFact[], extraction: string): string 
 }
 
 /**
+ * The most things a set stands under their pages: one row of cards. More
+ * would stand pages between rows of cards, so the part keeps them stacked.
+ */
+const SOURCED_MOST = 3;
+
+/**
  * Where each thing a part found was taken from, among the part's own pages:
  * its own page when the part read it, else the page its cited extraction was
  * read on, else the page its citation names. Only told when it tells something: two things or more, from two
@@ -48,7 +54,7 @@ export function provenance(
   runs: readonly WorkExecutionFact[],
   recorded: readonly WorkPageV1[],
 ): { view: PicksView; used: Set<string> } | null {
-  if (picks.items.length < 2 || !pages.length) return null;
+  if (picks.items.length < 2 || picks.items.length > SOURCED_MOST || !pages.length) return null;
   const byStep = new Map(pages.flatMap((group) => group.steps.map((step) => [step.id, group])));
   const byUrl = new Map(pages.map((group) => [samePage(group.url), group]));
   const found = picks.items.map((item) => {

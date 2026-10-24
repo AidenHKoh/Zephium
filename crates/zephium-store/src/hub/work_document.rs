@@ -74,6 +74,52 @@ fn site_access(
     Ok(entries)
 }
 
+const SCREENSHOT_ACCESS_KEY: &str = "work.screenshot_access";
+fn screenshot_access(
+    conn: &mut Connection,
+    set: Option<(String, bool)>,
+) -> Result<Vec<screenshots::WorkScreenshotSiteV1>, WorkError> {
+    let tx = conn.transaction().map_err(|_| WorkError::Unavailable)?;
+    let stored: Option<String> = tx.query_row(
+        "SELECT CASE WHEN length(CAST(value AS BLOB)) <= 262144 THEN value END FROM settings WHERE key = ?1",
+        [SCREENSHOT_ACCESS_KEY], |row| row.get(0),
+    ).optional().map_err(|_| WorkError::Unavailable)?;
+    let mut entries: Vec<screenshots::WorkScreenshotSiteV1> = match stored {
+        Some(value) => serde_json::from_str(&value).map_err(|_| WorkError::Invalid)?,
+        None => Vec::new(),
+    };
+    if entries.len() > screenshots::MAX_SCREENSHOT_SITES
+        || entries
+            .iter()
+            .any(|entry| screenshots::validate_origin(&entry.origin).is_err())
+        || entries
+            .windows(2)
+            .any(|pair| pair[0].origin >= pair[1].origin)
+    {
+        return Err(WorkError::Invalid);
+    }
+    let Some((origin, allow)) = set else {
+        return Ok(entries);
+    };
+    screenshots::validate_origin(&origin)?;
+    entries.retain(|entry| entry.origin != origin);
+    if allow {
+        if entries.len() >= screenshots::MAX_SCREENSHOT_SITES {
+            return Err(WorkError::Capacity);
+        }
+        entries.push(screenshots::WorkScreenshotSiteV1 { origin });
+        entries.sort_by(|a, b| a.origin.cmp(&b.origin));
+    }
+    let value = serde_json::to_string(&entries).map_err(|_| WorkError::Invalid)?;
+    tx.execute(
+        "INSERT INTO settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2",
+        params![SCREENSHOT_ACCESS_KEY, value],
+    )
+    .map_err(|_| WorkError::Unavailable)?;
+    tx.commit().map_err(|_| WorkError::Unavailable)?;
+    Ok(entries)
+}
+
 impl Hub {
     pub(crate) fn work_document(
         &mut self,
@@ -140,6 +186,12 @@ impl Hub {
                 .map_err(|_| WorkError::Unavailable)?;
             return site_access(conn, set).map(WorkReply::SiteAccess);
         }
+        if let WorkRequest::ScreenshotAccess { set } = request {
+            let conn = self
+                .profile_conn(profile)
+                .map_err(|_| WorkError::Unavailable)?;
+            return screenshot_access(conn, set).map(WorkReply::ScreenshotAccess);
+        }
         if let WorkRequest::ReadMediaContext { resource, revision } = &request {
             use sha2::{Digest, Sha256};
             use zephium_core::resources::{
@@ -179,6 +231,53 @@ impl Hub {
             tick_ms: i64::try_from(self.work_runtime_epoch.elapsed().as_millis())
                 .map_err(|_| WorkError::Unavailable)?,
         };
+        if let WorkRequest::PutRecordMedia { media, .. } | WorkRequest::ReadRecordMedia { media } =
+            &request
+        {
+            #[cfg(not(feature = "work-execution"))]
+            return Err(WorkError::Unavailable);
+            #[cfg(feature = "work-execution")]
+            {
+                let conn = self
+                    .profile_conn(profile)
+                    .map_err(|_| WorkError::Unavailable)?;
+                let projection =
+                    runtime_store::projection(conn, profile, media.work, runtime_session)?;
+                let execution = projection
+                    .executions
+                    .iter()
+                    .find(|e| e.id == media.execution)
+                    .ok_or(WorkError::NotFound)?;
+                let attempt = execution
+                    .attempts
+                    .iter()
+                    .find(|a| a.id == media.attempt)
+                    .ok_or(WorkError::NotFound)?;
+                let step = execution
+                    .steps
+                    .iter()
+                    .find(|s| s.id == media.step)
+                    .ok_or(WorkError::NotFound)?;
+                if !matches!(step.kind, runtime::WorkStepKindV1::Read { .. }) {
+                    return Err(WorkError::Invalid);
+                }
+                if let WorkRequest::PutRecordMedia { png, .. } = &request {
+                    if execution.status != runtime::WorkExecutionStatus::Running
+                        || attempt.status != runtime::WorkAttemptStatus::Running
+                        || step.status != runtime::WorkStepStatus::Running
+                        || projection.interrupted.contains(&execution.id)
+                    {
+                        return Err(WorkError::Conflict);
+                    }
+                    self.record_media(profile, media, Some(png))?;
+                    return Ok(WorkReply::RecordMediaStored(media.clone()));
+                }
+                return self
+                    .record_media(profile, media, None)?
+                    .map(WorkReply::RecordMedia)
+                    .ok_or(WorkError::NotFound);
+            }
+        }
         if let WorkRequest::ReadEvidence { id, link } = &request {
             // Both databases are owned by this actor. Validate the selected
             // Work/profile first; no mutation can interleave the archive read.
@@ -318,6 +417,10 @@ impl Hub {
                 WorkError::Unavailable
             }
         })?;
+        #[cfg(feature = "work-execution")]
+        if let WorkReply::Deleted { id } = &reply {
+            self.remove_record_media(profile, *id);
+        }
         #[cfg(test)]
         if write && tests::LOSE_COMMIT_ACK.with(|fault| fault.replace(false)) {
             return Err(WorkError::OutcomeUnknown);
@@ -352,29 +455,40 @@ fn apply(
             authoring_store::command(tx, profile, runtime_session, command, intent)?
         }
         WorkRequest::ReadEvidence { .. }
+        | WorkRequest::PutRecordMedia { .. }
+        | WorkRequest::ReadRecordMedia { .. }
         | WorkRequest::ReadMediaContext { .. }
         | WorkRequest::SiteAccess { .. }
+        | WorkRequest::ScreenshotAccess { .. }
         | WorkRequest::Personal(_) => return Err(WorkError::Invalid),
+        WorkRequest::AcknowledgeOrphan {
+            id,
+            expected,
+            command,
+            execution,
+        } => runtime_store::acknowledge_orphan(
+            tx,
+            profile,
+            runtime_session,
+            id,
+            expected,
+            command,
+            execution,
+        )?,
         WorkRequest::RuntimeAbandon {
             id,
             execution,
             attempt,
         } => {
             let expected = read(tx, profile, id)?.revision;
-            runtime_store::update(
+            runtime_store::abandon(
                 tx,
                 profile,
                 runtime_session,
                 id,
                 expected,
-                runtime::WorkRuntimeUpdate::Settle {
-                    execution,
-                    attempt,
-                    intervention: None,
-                    status: runtime::WorkAttemptStatus::OutcomeUnknown,
-                    usage: None,
-                    artifacts: vec![],
-                },
+                execution,
+                attempt,
             )?
         }
         WorkRequest::RuntimeRead { id } => (

@@ -1,7 +1,7 @@
 //! Model production consumes the original admitted attempt. Provider output is
 //! data; Rust joins evidence, enforces completion, and persists actual outcomes.
 use crate::work_runtime::*;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use zephium_core::work::{artifact::*, runtime::*, synthesis::*, *};
 
 impl WorkNodeAttempt {
@@ -99,9 +99,10 @@ impl WorkNodeAttempt {
         }
         self.record_activity(zephium_ipc::work::WorkActivityV1::ProducingArtifact);
         let result = {
+            let mut changes = self.changes();
             let cancelled = async {
                 loop {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    changes.next(crate::work_changes::FALLBACK).await;
                     if self.cancellation_requested().await.unwrap_or(true) {
                         break;
                     }

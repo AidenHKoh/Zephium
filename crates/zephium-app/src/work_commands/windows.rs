@@ -7,12 +7,13 @@ use ::windows::{
             SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
             WAIT_TIMEOUT,
         },
-        Security::SECURITY_ATTRIBUTES,
+        Security::{SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES},
         System::{
             JobObjects::{
                 CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
                 TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOB_OBJECT_LIMIT_PROCESS_MEMORY,
             },
             Pipes::CreatePipe,
             SystemInformation::GetSystemDirectoryW,
@@ -22,6 +23,7 @@ use ::windows::{
 };
 use base64::Engine;
 use std::{
+    ffi::OsStr,
     fs::File,
     io::Read,
     mem::{size_of, size_of_val},
@@ -57,12 +59,15 @@ impl Drop for Job {
     }
 }
 
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
 fn jobs() -> &'static Mutex<Vec<Weak<Job>>> {
     static JOBS: OnceLock<Mutex<Vec<Weak<Job>>>> = OnceLock::new();
     JOBS.get_or_init(Default::default)
 }
 pub(super) fn shutdown() {
     let mut jobs = jobs().lock().unwrap_or_else(|e| e.into_inner());
+    CLOSING.store(true, Ordering::Release);
     jobs.retain(|entry| {
         if let Some(job) = entry.upgrade() {
             job.quitting.store(true, Ordering::Release);
@@ -107,11 +112,11 @@ struct Attributes {
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
 }
 impl Attributes {
-    fn new() -> Result<Self, &'static str> {
+    fn new(count: u32) -> Result<Self, &'static str> {
         let mut bytes = 0;
         // SAFETY: the first call asks only for the required allocation size.
         unsafe {
-            let _ = InitializeProcThreadAttributeList(None, 2, None, &mut bytes);
+            let _ = InitializeProcThreadAttributeList(None, count, None, &mut bytes);
         }
         if bytes == 0 || bytes > 64 * 1024 {
             return Err("Process attributes are unavailable");
@@ -119,7 +124,7 @@ impl Attributes {
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
         // SAFETY: stable, aligned backing allocation is at least `bytes` long.
-        unsafe { InitializeProcThreadAttributeList(Some(list), 2, None, &mut bytes) }
+        unsafe { InitializeProcThreadAttributeList(Some(list), count, None, &mut bytes) }
             .map_err(|_| "Process attributes are unavailable")?;
         Ok(Self {
             _storage: storage,
@@ -136,10 +141,10 @@ impl Drop for Attributes {
     }
 }
 
-struct Process {
+pub(super) struct Process {
     process: OwnedHandle,
     job: Arc<Job>,
-    output: tokio::sync::mpsc::Receiver<Result<Vec<u8>, ()>>,
+    pub(super) output: tokio::sync::mpsc::Receiver<Result<Vec<u8>, ()>>,
 }
 impl Drop for Process {
     fn drop(&mut self) {
@@ -147,7 +152,13 @@ impl Drop for Process {
     }
 }
 impl Process {
-    fn status(&self) -> Result<Option<i32>, &'static str> {
+    pub(super) fn stop(&self) {
+        self.job.stop();
+    }
+    pub(super) fn quitting(&self) -> bool {
+        self.job.quitting.load(Ordering::Acquire)
+    }
+    pub(super) fn status(&self) -> Result<Option<i32>, &'static str> {
         // SAFETY: this process handle is live and never supplied by model input.
         match unsafe { WaitForSingleObject(handle(&self.process), 0) } {
             WAIT_TIMEOUT => Ok(None),
@@ -170,19 +181,30 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
         return Err("The command shell is unavailable");
     }
     use std::os::windows::ffi::OsStringExt;
-    let shell = std::path::PathBuf::from(OsString::from_wide(&system[..length]))
-        .join("WindowsPowerShell/v1.0/powershell.exe");
-    let application = wide(shell.as_os_str())?;
+    let system_directory = std::path::PathBuf::from(OsString::from_wide(&system[..length]));
+    let shell = system_directory.join("WindowsPowerShell/v1.0/powershell.exe");
     let script = format!("$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; & {{\n{command}\n}}; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}");
     let script: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = base64::engine::general_purpose::STANDARD.encode(script);
-    let line = format!("\"{}\" -NoLogo -NoProfile -NonInteractive -InputFormat Text -OutputFormat Text -EncodedCommand {encoded}", shell.display());
-    let mut line = wide(OsStr::new(&line))?;
-    if line.len() > 32767 {
-        return Err("The command is too long");
-    }
-    let cwd = wide(cwd.as_os_str())?;
+    let arguments: Vec<OsString> = [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-InputFormat",
+        "Text",
+        "-OutputFormat",
+        "Text",
+        "-EncodedCommand",
+        &encoded,
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
     let mut env = environment();
+    env.push(("PATH".into(), system_directory.as_os_str().to_owned()));
+    if let Some(root) = system_directory.parent() {
+        env.push(("SystemRoot".into(), root.as_os_str().to_owned()));
+    }
     env.retain(|(key, _)| {
         !["NO_COLOR", "CI", "GIT_TERMINAL_PROMPT", "GIT_PAGER"]
             .iter()
@@ -194,6 +216,20 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
         ("GIT_TERMINAL_PROMPT".into(), "0".into()),
         ("GIT_PAGER".into(), "cat".into()),
     ]);
+    spawn_program(cwd, &shell, &arguments, env, None)
+}
+
+/// Shared native lifecycle; only the typed runner supplies a confinement token.
+pub(super) fn spawn_program(
+    cwd: &Path,
+    program: &Path,
+    arguments: &[OsString],
+    mut env: Vec<(OsString, OsString)>,
+    confinement: Option<&SECURITY_CAPABILITIES>,
+) -> Result<Process, &'static str> {
+    let application = wide(program.as_os_str())?;
+    let mut line = command_line(program.as_os_str(), arguments)?;
+    let cwd = wide(cwd.as_os_str())?;
     env.sort_by_key(|(key, _)| key.to_string_lossy().to_ascii_uppercase());
     env.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
     let mut environment = Vec::<u16>::new();
@@ -214,6 +250,12 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     });
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if confinement.is_some() {
+        limits.BasicLimitInformation.LimitFlags |=
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        limits.ProcessMemoryLimit = 256 * 1024 * 1024;
+    }
     unsafe {
         SetInformationJobObject(
             raw_job,
@@ -228,7 +270,7 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     drop(stdin_write);
     unsafe { SetHandleInformation(handle(&read), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
         .map_err(|_| "The command pipe could not be protected")?;
-    let attributes = Attributes::new()?;
+    let attributes = Attributes::new(if confinement.is_some() { 4 } else { 2 })?;
     let inherited = [handle(&write), handle(&stdin)];
     let assigned = [raw_job];
     // SAFETY: both arrays and the attribute allocation live through CreateProcessW.
@@ -255,6 +297,31 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
         )
         .map_err(|_| "The command job could not be assigned")?;
     }
+    let opt_out: u32 = 1; // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
+    if let Some(capabilities) = confinement {
+        unsafe {
+            UpdateProcThreadAttribute(
+                attributes.list,
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                Some((capabilities as *const SECURITY_CAPABILITIES).cast()),
+                size_of::<SECURITY_CAPABILITIES>(),
+                None,
+                None,
+            )
+            .map_err(|_| "The confined token could not be configured")?;
+            UpdateProcThreadAttribute(
+                attributes.list,
+                0,
+                PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
+                Some((&raw const opt_out).cast()),
+                size_of::<u32>(),
+                None,
+                None,
+            )
+            .map_err(|_| "The less-privileged token could not be configured")?;
+        }
+    }
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -266,6 +333,9 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     // Admission and registration linearize with shutdown, which must see
     // every process admitted before it acquired this same lock.
     let mut registry = jobs().lock().unwrap_or_else(|e| e.into_inner());
+    if confinement.is_some() && CLOSING.load(Ordering::Acquire) {
+        return Err("The application is shutting down");
+    }
     unsafe {
         CreateProcessW(
             PCWSTR(application.as_ptr()),
@@ -273,7 +343,10 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
             None,
             None,
             true,
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_NO_WINDOW
+                | CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_SUSPENDED,
             Some(environment.as_ptr().cast()),
             PCWSTR(cwd.as_ptr()),
             &startup.StartupInfo,
@@ -283,6 +356,12 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     }
     let process_handle = unsafe { OwnedHandle::from_raw_handle(process.hProcess.0) };
     let thread = unsafe { OwnedHandle::from_raw_handle(process.hThread.0) };
+    if let Some(capabilities) = confinement {
+        verify_confined_token(handle(&process_handle), capabilities)?;
+    }
+    if unsafe { ResumeThread(handle(&thread)) } == u32::MAX {
+        return Err("The command could not be resumed");
+    }
     registry.retain(|entry| entry.strong_count() != 0);
     registry.push(Arc::downgrade(&job));
     drop(registry);
@@ -318,7 +397,112 @@ fn spawn(cwd: &Path, command: &str) -> Result<Process, &'static str> {
     })
 }
 
+fn command_line(program: &OsStr, arguments: &[OsString]) -> Result<Vec<u16>, &'static str> {
+    let mut line = Vec::new();
+    for value in std::iter::once(program).chain(arguments.iter().map(OsString::as_os_str)) {
+        if !line.is_empty() {
+            line.push(b' ' as u16);
+        }
+        line.push(b'"' as u16);
+        let mut slashes = 0;
+        for unit in value.encode_wide() {
+            if unit == 0 {
+                return Err("The command contains an invalid argument");
+            }
+            if unit == b'\\' as u16 {
+                slashes += 1;
+                continue;
+            }
+            line.extend(std::iter::repeat_n(
+                b'\\' as u16,
+                if unit == b'"' as u16 {
+                    slashes * 2 + 1
+                } else {
+                    slashes
+                },
+            ));
+            slashes = 0;
+            line.push(unit);
+        }
+        line.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+        line.push(b'"' as u16);
+    }
+    if line.len() >= 32767 {
+        return Err("The command is too long");
+    }
+    line.push(0);
+    Ok(line)
+}
+
+fn verify_confined_token(
+    process: HANDLE,
+    capabilities: &SECURITY_CAPABILITIES,
+) -> Result<(), &'static str> {
+    use ::windows::Win32::Security::{
+        EqualSid, GetTokenInformation, TokenAppContainerSid, TokenIsAppContainer,
+        TokenIsLessPrivilegedAppContainer, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
+    };
+    let mut raw = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) }
+        .map_err(|_| "The confined token could not be verified")?;
+    let token = unsafe { OwnedHandle::from_raw_handle(raw.0) };
+    for class in [TokenIsAppContainer, TokenIsLessPrivilegedAppContainer] {
+        let mut value = 0u32;
+        let mut length = 0;
+        unsafe {
+            GetTokenInformation(
+                handle(&token),
+                class,
+                Some((&raw mut value).cast()),
+                size_of::<u32>() as u32,
+                &mut length,
+            )
+        }
+        .map_err(|_| "The confined token could not be verified")?;
+        if length != size_of::<u32>() as u32 || value != 1 {
+            return Err("The confined token was not applied");
+        }
+    }
+    let mut buffer = [0usize; 128];
+    let mut length = 0;
+    unsafe {
+        GetTokenInformation(
+            handle(&token),
+            TokenAppContainerSid,
+            Some(buffer.as_mut_ptr().cast()),
+            size_of_val(&buffer) as u32,
+            &mut length,
+        )
+    }
+    .map_err(|_| "The confined identity could not be verified")?;
+    if length < size_of::<TOKEN_APPCONTAINER_INFORMATION>() as u32
+        || length as usize > size_of_val(&buffer)
+    {
+        return Err("The confined identity was invalid");
+    }
+    let info = unsafe { &*buffer.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>() };
+    unsafe { EqualSid(info.TokenAppContainer, capabilities.AppContainerSid) }
+        .map_err(|_| "The confined identity did not match")
+}
+
 pub async fn run<C, CF, P, PF>(
+    cwd: &Path,
+    command: &str,
+    timeout_secs: u32,
+    cancelled: C,
+    progress: P,
+) -> Result<CommandResult, &'static str>
+where
+    C: Fn() -> CF,
+    CF: Future<Output = bool>,
+    P: Fn(WorkCommandOutputV1) -> PF,
+    PF: Future<Output = ()>,
+{
+    super::ensure_available()?;
+    run_unconfined(cwd, command, timeout_secs, cancelled, progress).await
+}
+
+async fn run_unconfined<C, CF, P, PF>(
     cwd: &Path,
     command: &str,
     timeout_secs: u32,
@@ -402,10 +586,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
 
+    #[test]
+    fn fixed_arguments_round_trip_through_windows_parser() {
+        use ::windows::Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            UI::Shell::CommandLineToArgvW,
+        };
+        let program = OsStr::new(r"C:\Program Files\tool.exe");
+        let args: Vec<OsString> = ["", "plain", "space here", r"ends\", "quote\"and\\", "żółć"]
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let line = command_line(program, &args).unwrap();
+        let mut count = 0;
+        let parsed = unsafe { CommandLineToArgvW(PCWSTR(line.as_ptr()), &mut count) };
+        assert!(!parsed.is_null());
+        let values: Vec<String> = unsafe { std::slice::from_raw_parts(parsed, count as usize) }
+            .iter()
+            .map(|value| unsafe { value.to_string().unwrap() })
+            .collect();
+        unsafe { LocalFree(Some(HLOCAL(parsed.cast()))) };
+        assert_eq!(
+            values,
+            std::iter::once(program.to_string_lossy().into_owned())
+                .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[tokio::test]
     async fn windows_command_preserves_unicode_output_and_exit_status() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "[Console]::Write('hello żółć'); [Console]::Error.Write('error'); exit 7",
             10,
@@ -423,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn windows_command_timeout_and_stop_end_the_owned_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let result = run(
+        let result = run_unconfined(
             dir.path(),
             "Write-Output started; Start-Sleep -Seconds 30",
             1,
@@ -435,7 +647,7 @@ mod tests {
         assert_eq!(result.note, "Stopped after 1 s");
         assert!(result.evidence.elapsed_ms < 5000);
         let pid = AtomicU32::new(0);
-        let result = run(dir.path(), "$p=Start-Process -FilePath ($PSHOME+'\\powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [Console]::WriteLine($p.Id); Start-Sleep -Seconds 30", 10,
+        let result = run_unconfined(dir.path(), "$p=Start-Process -FilePath ($PSHOME+'\\powershell.exe') -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -WindowStyle Hidden -PassThru; [Console]::WriteLine($p.Id); Start-Sleep -Seconds 30", 10,
             || async { pid.load(Ordering::Acquire) != 0 },
             |view| { if let Some(value) = view.text.lines().find_map(|line| line.trim().parse::<u32>().ok()) { pid.store(value, Ordering::Release); } async {} }
         ).await.unwrap();

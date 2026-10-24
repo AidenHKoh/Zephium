@@ -273,13 +273,25 @@ native surface boundaries and meet the visual/performance guidance above.
 ## Work presentation foundation
 
 Use `features/work` through its lazy loaders. Shared semantic renderers live in
-`shared/ui/data`; their display types are not Work IPC contracts. XYFlow, SVG
-LayerChart and the constrained Tiptap editor load on demand. Tables remain lightweight.
+`shared/ui/data`; their display types are not Work IPC contracts. XYFlow, the
+in-house SVG charts and the constrained Tiptap editor load on demand. Tables remain lightweight.
 
 Open Work using the browser sidebar mode switch. Rust admits the internal surface
 and suppresses native page WebViews; returning to Browse uses the existing verified
 chrome-restoration handshake. `app/browser/WorkWorkspace.svelte` mounts only an empty canvas foundation. It loads
 no Notes/Tasks stores and makes no decisions about the final Work product layout.
+
+An item opens in the centre as a lift (`features/work/components/Lift.svelte`): it
+grows out of its card, stands only as tall as what it holds (pictures, notes and files
+fill it), keeps keyboard focus inside while open, gives focus back when it closes and
+folds into its card on Escape. Every opened view shares one header (`LiftHeader`: the
+kind's mark, its kind, a title or a single eyebrow line over an object that names
+itself, where it came from, and its actions) and the row kit in `components/lift/`. A
+request opens as what its runs did, made and read, with the full step log folded under
+Step by step; sources open as the pages read and those that would not open; an object
+opens as its own reading view under the header. The frontend never generates, edits,
+prepares or approves a plan: plans reach the canvas from the conversation.
+
 There is no standalone Work demo or production fixture transport. Agent execution
 is unavailable until runtime integration. Deterministic scenarios remain tests only.
 The copied runtime contract was removed; the frontend does not depend on a local

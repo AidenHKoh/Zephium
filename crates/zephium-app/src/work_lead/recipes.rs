@@ -1,7 +1,8 @@
 //! Site recipes: a site's own results page for a search, built from the
 //! lead's typed search fields, so a page agent starts on the results instead
-//! of a date picker. Templates are data, each checked by hand against the
-//! live site (2026-09-29); form filling stays the fallback.
+//! of a date picker. Templates are data, each the address the site's own
+//! search form opens (stays and flights checked by hand 2026-09-29, stores
+//! 2026-10-09); form filling stays the fallback.
 use serde_json::Value;
 
 /// What the lead searches for, as typed fields. Dates are `YYYY-MM-DD`,
@@ -41,6 +42,8 @@ enum Kind {
 /// when every field inside it is present. Field names may carry an encoding:
 /// `{place:slug}` (Airbnb's path form), `{place:q}` (a query value).
 struct Recipe {
+    /// The registrable site, or a store's bare name (`amazon`) for every
+    /// country site it runs, whose host fills `{site}`.
     site: &'static str,
     name: &'static str,
     kind: Kind,
@@ -99,25 +102,57 @@ const RECIPES: &[Recipe] = &[
         leads: false,
         template: "https://www.google.com/travel/flights?q=Flights%20from%20{from:q}%20to%20{to:q}%20on%20{depart}{trip:q}{party:q}{cabin_class:q}&hl=en[&curr={currency}]",
     },
-    Recipe {
-        site: "amazon.com",
-        name: "Amazon",
-        kind: Kind::Products,
-        min_nights: 0,
-        max_nights: u16::MAX,
-        leads: true,
-        template: "https://www.amazon.com/s?k={query:q}",
-    },
-    Recipe {
-        site: "lego.com",
-        name: "LEGO",
-        kind: Kind::Products,
-        min_nights: 0,
-        max_nights: u16::MAX,
-        leads: true,
-        template: "https://www.lego.com/en-us/search?q={query:q}",
-    },
+    store("amazon", "Amazon", "https://www.{site}/s?k={query:q}"),
+    store("lego.com", "LEGO", "https://www.lego.com/en-us/search?q={query:q}"),
+    store("allegro.pl", "Allegro", "https://allegro.pl/listing?string={query:q}"),
+    store("x-kom.pl", "x-kom", "https://www.x-kom.pl/szukaj?q={query:q}"),
+    store(
+        "mediamarkt.pl",
+        "MediaMarkt",
+        "https://mediamarkt.pl/pl/search.html?query={query:q}",
+    ),
+    store(
+        "mediamarkt.de",
+        "MediaMarkt",
+        "https://www.mediamarkt.de/de/search.html?query={query:q}",
+    ),
+    store("empik.com", "Empik", "https://www.empik.com/szukaj/produkt?q={query:q}"),
+    store(
+        "idealo.de",
+        "idealo",
+        "https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={query:q}",
+    ),
+    store("ebay", "eBay", "https://www.{site}/sch/i.html?_nkw={query:q}"),
+    store(
+        "bestbuy.com",
+        "Best Buy",
+        "https://www.bestbuy.com/site/searchpage.jsp?st={query:q}",
+    ),
+    store("walmart.com", "Walmart", "https://www.walmart.com/search?q={query:q}"),
+    store("target.com", "Target", "https://www.target.com/s?searchTerm={query:q}"),
 ];
+
+const fn store(site: &'static str, name: &'static str, template: &'static str) -> Recipe {
+    Recipe {
+        site,
+        name,
+        kind: Kind::Products,
+        min_nights: 0,
+        max_nights: u16::MAX,
+        leads: true,
+        template,
+    }
+}
+
+/// Whether a recipe is for this host: its site, or for a store named bare
+/// (`amazon`), any of its country sites.
+fn serves(recipe: &Recipe, host: &str) -> bool {
+    if recipe.site.contains('.') {
+        host == recipe.site || host.ends_with(&format!(".{}", recipe.site))
+    } else {
+        host.split('.').next() == Some(recipe.site) && host.contains('.')
+    }
+}
 
 fn text(args: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
     match args.get(key) {
@@ -286,7 +321,7 @@ impl SiteSearch {
     }
 
     /// One field's value in the template's encoding; None when absent.
-    fn field(&self, name: &str) -> Option<String> {
+    fn field(&self, name: &str, site: Option<&str>) -> Option<String> {
         let (name, encoding) = name.split_once(':').unwrap_or((name, ""));
         let value = match name {
             "place" => self.place.clone()?,
@@ -303,6 +338,7 @@ impl SiteSearch {
             "back" => self.back.clone()?,
             "query" => self.query.clone()?,
             "currency" => self.currency.clone()?,
+            "site" => site?.to_owned(),
             "trip" => match &self.back {
                 Some(back) => format!(" through {back}"),
                 None => " oneway".into(),
@@ -350,7 +386,7 @@ impl SiteSearch {
 }
 
 /// Fills a template, or None when a required field is missing.
-fn fill(template: &str, search: &SiteSearch) -> Option<String> {
+fn fill(template: &str, search: &SiteSearch, site: Option<&str>) -> Option<String> {
     let mut out = String::new();
     let mut rest = template;
     while let Some(at) = rest.find(['{', '[']) {
@@ -358,13 +394,13 @@ fn fill(template: &str, search: &SiteSearch) -> Option<String> {
         rest = &rest[at..];
         if rest.starts_with('[') {
             let end = rest.find(']')?;
-            if let Some(section) = fill(&rest[1..end], search) {
+            if let Some(section) = fill(&rest[1..end], search, site) {
                 out.push_str(&section);
             }
             rest = &rest[end + 1..];
         } else {
             let end = rest.find('}')?;
-            out.push_str(&search.field(&rest[1..end])?);
+            out.push_str(&search.field(&rest[1..end], site)?);
             rest = &rest[end + 1..];
         }
     }
@@ -373,25 +409,40 @@ fn fill(template: &str, search: &SiteSearch) -> Option<String> {
 }
 
 /// The results pages this search opens: the part's own site first when the
-/// table knows it and it can lead, then the same search on the other known
-/// sites of its kind, for when that site will not load.
+/// table knows it and it can lead, then, for stays and flights, the same
+/// search on the other known sites of its kind, for when that site will not
+/// load. A store is never another store: a part on a store the table does
+/// not know gets no results page and searches the store itself.
 pub(crate) fn pages(search: &SiteSearch, site: Option<&str>) -> Vec<(&'static str, String)> {
     let Some(kind) = search.kind() else {
         return Vec::new();
     };
     let nights = search.nights().unwrap_or(0);
+    let site = site.map(|site| site.trim_start_matches("www.").to_ascii_lowercase());
+    let own = |recipe: &Recipe| site.as_deref().is_some_and(|site| serves(recipe, site));
     let fits = |recipe: &&Recipe| {
         recipe.kind == kind
             && (kind != Kind::Stays
                 || (i64::from(recipe.min_nights) <= nights
                     && nights <= i64::from(recipe.max_nights)))
+            && (kind != Kind::Products
+                || match &site {
+                    Some(_) => own(recipe),
+                    None => recipe.site == "amazon",
+                })
     };
-    let site = site.map(|site| site.trim_start_matches("www.").to_ascii_lowercase());
     let mut recipes: Vec<&Recipe> = RECIPES.iter().filter(fits).collect();
-    recipes.sort_by_key(|recipe| (!recipe.leads, Some(recipe.site) != site.as_deref()));
+    recipes.sort_by_key(|recipe| (!recipe.leads, !own(recipe)));
     recipes
         .into_iter()
-        .filter_map(|recipe| Some((recipe.name, fill(recipe.template, search)?)))
+        .filter_map(|recipe| {
+            let host = match (own(recipe), &site) {
+                (true, Some(site)) => site.clone(),
+                _ if recipe.site.contains('.') => recipe.site.to_owned(),
+                _ => format!("{}.com", recipe.site),
+            };
+            Some((recipe.name, fill(recipe.template, search, Some(&host))?))
+        })
         .collect()
 }
 
@@ -478,7 +529,35 @@ mod tests {
                 "https://www.lego.com/en-us/search?q=star%20wars".to_owned()
             )
         );
-        assert!(pages(&lego, Some("unknown.shop")).len() == 2);
+        // A store is searched on its own site, never on another store's.
+        assert!(pages(&lego, Some("unknown.shop")).is_empty());
+        let lambo = search(json!({"query": "LEGO 42115"}));
+        assert_eq!(
+            pages(&lambo, Some("amazon.de")),
+            [(
+                "Amazon",
+                "https://www.amazon.de/s?k=LEGO%2042115".to_owned()
+            )]
+        );
+        assert_eq!(
+            pages(&lambo, Some("www.x-kom.pl"))[0].1,
+            "https://www.x-kom.pl/szukaj?q=LEGO%2042115"
+        );
+        assert_eq!(
+            pages(&lambo, Some("allegro.pl"))[0].1,
+            "https://allegro.pl/listing?string=LEGO%2042115"
+        );
+        assert_eq!(
+            pages(&lambo, Some("ebay.co.uk"))[0].1,
+            "https://www.ebay.co.uk/sch/i.html?_nkw=LEGO%2042115"
+        );
+        assert_eq!(
+            pages(&lambo, None),
+            [(
+                "Amazon",
+                "https://www.amazon.com/s?k=LEGO%2042115".to_owned()
+            )]
+        );
         for (bad, rule) in [
             (json!({"checkin": "2027-02-30"}), "search.checkin"),
             (json!({"from": "Warsaw"}), "search.from"),

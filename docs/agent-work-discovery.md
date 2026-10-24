@@ -16,6 +16,13 @@ observation and fall inside the approved slash-delimited path subtree.
 Queries, fragments, encoded path substitutions, repeats and redirects are
 excluded. Page data never changes the approved origin, account or path scope.
 
+A site session (a page task on one site) is the exception to "occur on a
+link": the model may open any address on the session's own site that its
+document policy admits, such as the site's search results for a query
+(`amazon.com/s?k=lego+technic`), within the same hop and per-destination
+limits. A site's search box that is covered or refused otherwise left no way
+forward. Public reads still follow only observed links.
+
 The semantic runtime reads link URLs through its captured native anchor getter.
 Canonical credential-free HTTP(S) destinations have a 2-KiB per-link ceiling
 and share the original total text, wire and provider payload limits. Rust

@@ -467,6 +467,7 @@ fn restart_with_native_proof_skips_engine_and_finishes_local_purge() {
             id: default_space,
             profile: default_profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         active_space: Some(default_space),
         ..SessionState::default()
@@ -511,6 +512,7 @@ fn recovered_finalize_not_authorized_is_a_terminal_invariant() {
             id: default_space,
             profile: default_profile,
             name: "Space".into(),
+            look: Default::default(),
         }],
         active_space: Some(default_space),
         ..SessionState::default()

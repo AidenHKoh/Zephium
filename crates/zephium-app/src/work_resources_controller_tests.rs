@@ -24,6 +24,9 @@ mod navigation_tests;
 #[path = "work_resources_action_tests.rs"]
 mod action_tests;
 
+#[path = "work_resources_wall_tests.rs"]
+mod wall_tests;
+
 struct Clock(AtomicU64);
 impl TerraControllerClock for Clock {
     fn now(&self) -> Result<AgentPolicyInstant, TerraControllerClockError> {
@@ -48,6 +51,7 @@ impl AgentAuditPort for Audit {
 }
 #[derive(Default)]
 struct Native {
+    screenshots: AtomicUsize,
     hold_human: AtomicBool,
     human: Mutex<
         Option<(
@@ -97,6 +101,8 @@ struct Native {
     before_publication: Mutex<Option<mpsc::Receiver<()>>>,
     final_document: Mutex<Option<ContextNavigationTarget>>,
     discovery: AtomicBool,
+    /// Reads from this one on (counting the first as 1) show a bot check; 0 never.
+    check_from_read: AtomicUsize,
     form_actions: AtomicBool,
     form_applied: AtomicBool,
     actions: AtomicUsize,
@@ -242,6 +248,7 @@ impl AgentBrowserPort for Native {
             };
         }
         let outcome = match request.operation() {
+            WorkBrowserResourceOperation::ReadMedia => WorkBrowserResourceNativeOutcome::Refused,
             WorkBrowserResourceOperation::PresentHuman
             | WorkBrowserResourceOperation::ContinueAfterHuman => unreachable!("handled above"),
             WorkBrowserResourceOperation::Construct => {
@@ -344,7 +351,10 @@ impl AgentBrowserPort for Native {
         {
             *self.read.lock().unwrap() = Some((request, callback));
         } else {
-            if self.form_actions.load(Ordering::Acquire) {
+            let check_from = self.check_from_read.load(Ordering::Acquire);
+            if check_from != 0 && self.reads.load(Ordering::Acquire) >= check_from {
+                wall_tests::check_result(request, callback);
+            } else if self.form_actions.load(Ordering::Acquire) {
                 action_tests::read_result(self, request, callback);
             } else if self.discovery.load(Ordering::Acquire) {
                 navigation_tests::read_result(self, request, callback);
@@ -447,7 +457,11 @@ impl AgentBrowserPort for Native {
         _: SemanticScreenshotNativeRequest,
         _: SemanticScreenshotNativeCompletion,
     ) -> ContextDispatch {
-        panic!("no retained screenshot authority")
+        // A sparse look's mapping asks for one best-effort viewport image
+        // (c509850a). The fixture has no pixels: it refuses, and mapping
+        // runs on text alone.
+        self.screenshots.fetch_add(1, Ordering::AcqRel);
+        ContextDispatch::Rejected(ContextPortFailure::NativeRefused)
     }
     fn seal_for_shutdown(&self, audit: ContextResourceAuditId) -> ContextShutdownDispatch {
         if self.allow_global_shutdown.load(Ordering::Acquire)
@@ -2112,16 +2126,22 @@ fn common_mapping_refuses_foreign_source_and_preserves_original_owner_on_audit_l
         .unwrap_or_else(|e| e.into_inner());
     for audit_lost in [false, true] {
         let (owner, native, resource, browser) = setup();
-        let mapping = if audit_lost {
-            response_stream(2)
-        } else {
-            response_stream(2).replace("@r1", "@r999")
+        // A miscited value the page shows verbatim is cited where it shows
+        // (820dba49); one it does not show has no source, even after the one
+        // corrective mapping call that refusal earns.
+        let foreign = |turn| {
+            response_stream(turn)
+                .replace("@r1", "@r999")
+                .replace("Fixture result", "Not on the page")
         };
-        let (controller, mut result, scope, server) = prepared(
-            Box::new(browser),
-            vec![response_stream(1), mapping],
-            audit_lost,
-        );
+        let responses = if audit_lost {
+            vec![response_stream(1), response_stream(2)]
+        } else {
+            vec![response_stream(1), foreign(2), foreign(3)]
+        };
+        let calls = responses.len();
+        let (controller, mut result, scope, server) =
+            prepared(Box::new(browser), responses, audit_lost);
         let (handle, lifecycle) = start(controller, scope);
         let mut outcome = None;
         if audit_lost {
@@ -2158,7 +2178,7 @@ fn common_mapping_refuses_foreign_source_and_preserves_original_owner_on_audit_l
         ));
         owner.seal_resources().unwrap();
         assert!(owner.locally_retired());
-        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(server.join().unwrap(), calls);
     }
 }
 
@@ -2340,6 +2360,9 @@ fn finish_human_fixture(
     callback: WorkBrowserResourceCompletionCallback,
 ) {
     let completion = match request.operation() {
+        WorkBrowserResourceOperation::ReadMedia => {
+            request.complete(WorkBrowserResourceNativeOutcome::Refused)
+        }
         WorkBrowserResourceOperation::PresentHuman => {
             request.human_progress().unwrap().record_ready(true);
             request.complete(WorkBrowserResourceNativeOutcome::HumanPresented)

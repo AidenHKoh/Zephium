@@ -127,6 +127,8 @@ pub(crate) struct AgentOwnedViewCallbacks<
     browser_lost: BrowserLost,
     invariant: Invariant,
     panic: Panic,
+    redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    credential_denied: Option<Rc<dyn Fn()>>,
 }
 
 impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
@@ -147,7 +149,23 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
             browser_lost,
             invariant,
             panic,
+            redirect: None,
+            credential_denied: None,
         }
+    }
+    /// Removal-only native signal, bound to this exact owned view cohort.
+    pub(crate) fn with_credential_denied(mut self, callback: impl Fn() + 'static) -> Self {
+        self.credential_denied = Some(Rc::new(callback));
+        self
+    }
+    /// Ends a public document whose first load the Work gate refused as a
+    /// redirect. Without it, that refusal is an invariant failure.
+    pub(crate) fn with_redirect(
+        mut self,
+        redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
+    ) -> Self {
+        self.redirect = Some(Rc::new(redirect));
+        self
     }
 }
 
@@ -158,6 +176,10 @@ pub(crate) struct WorkStoreSeed {
     busy: Cell<bool>,
     active_pages: Cell<usize>,
     origins: RefCell<std::collections::HashSet<String>>,
+    /// A sign-in handoff ran on a page of this store and its cookies have
+    /// not been added to the person's profile yet.
+    return_pending: Cell<bool>,
+    return_refusals: Cell<u8>,
     waiters: RefCell<Vec<Weak<dyn Fn()>>>,
 }
 impl WorkStoreSeed {
@@ -171,11 +193,34 @@ impl WorkStoreSeed {
             busy: Cell::new(false),
             active_pages: Cell::new(0),
             origins: RefCell::new(Default::default()),
+            return_pending: Cell::new(false),
+            return_refusals: Cell::new(0),
             waiters: RefCell::new(Vec::new()),
         }
     }
     pub(crate) fn quiescent(&self) -> bool {
         !self.busy.get() && self.active_pages.get() == 0
+    }
+    /// The host keeps a store with a pending return so the next page of the
+    /// site can still carry that sign-in to the person's profile.
+    pub(crate) fn return_pending(&self) -> bool {
+        self.return_pending.get()
+    }
+    /// Records how a return ended and whether it is still pending.
+    fn settle_return(&self, result: crate::work_site_session::SyncResult) -> bool {
+        use crate::work_site_session::{after_return, AfterReturn, SyncResult};
+        let refusals = if result == SyncResult::Refused {
+            self.return_refusals.get().saturating_add(1)
+        } else {
+            0
+        };
+        self.return_refusals.set(refusals);
+        let pending = after_return(result, refusals) != AfterReturn::Refresh;
+        self.return_pending.set(pending);
+        if !pending {
+            self.return_refusals.set(0);
+        }
+        pending
     }
     fn notify(&self) {
         let callbacks: Vec<_> = self
@@ -193,12 +238,22 @@ impl WorkStoreSeed {
     }
 }
 struct WorkSeedJob {
-    source: Option<ICoreWebView2CookieManager>,
+    /// The person's own profile cookies for this site, read and written.
+    profile: Option<ICoreWebView2CookieManager>,
     scope: zephium_agentic::ContextCookieScope,
     origin: String,
     deadline: Instant,
     completion: Box<dyn FnOnce(bool, bool)>,
     panic: Rc<dyn Fn()>,
+}
+
+/// One admission's view of its store, shared by the native callbacks that
+/// carry it through return, refresh and opening.
+struct WorkStorageAdmission {
+    store: Rc<WorkStoreSeed>,
+    ready: Rc<Cell<bool>>,
+    transfer: Rc<RefCell<Option<super::cookie_transfer::WindowsAgentCookieTransfer>>>,
+    work_store: ICoreWebView2CookieManager,
 }
 
 /// Exact native page and its one-at-a-time navigation policy.
@@ -214,6 +269,7 @@ pub(crate) struct AgentOwnedView {
     work_native_profile: Option<ProfileId>,
     work_storage_ready: Rc<Cell<bool>>,
     work_cookie_transfer: Rc<RefCell<Option<super::cookie_transfer::WindowsAgentCookieTransfer>>>,
+    work_return_transfer: RefCell<Option<super::cookie_transfer::WindowsAgentCookieTransfer>>,
     work_store: Option<Rc<WorkStoreSeed>>,
     work_seed_job: Rc<RefCell<Option<WorkSeedJob>>>,
     work_seed_query: Rc<Cell<bool>>,
@@ -249,6 +305,20 @@ impl AgentOwnedView {
     pub(crate) fn work_native_profile(&self) -> Option<ProfileId> {
         self.work_native_profile
     }
+    /// Clears every kind of browsing data of this view's WebView2 profile and
+    /// replies whether WebView2 reported success. False if it could not start.
+    pub(crate) fn clear_profile_browsing_data(&self, reply: std::sync::mpsc::Sender<bool>) -> bool {
+        let Ok(profile) = super::profile_for_erasure(&self.view) else {
+            return false;
+        };
+        let handler =
+            webview2_com::ClearBrowsingDataCompletedHandler::create(Box::new(move |result| {
+                let _ = reply.send(result.is_ok());
+                Ok(())
+            }));
+        // SAFETY: the STA-owned live profile and handler are reference counted.
+        unsafe { profile.ClearBrowsingDataAll(&handler) }.is_ok()
+    }
 
     #[expect(
         clippy::too_many_arguments,
@@ -256,7 +326,7 @@ impl AgentOwnedView {
     )]
     pub(crate) fn seed_work_session(
         &mut self,
-        source: Option<ICoreWebView2CookieManager>,
+        profile: Option<ICoreWebView2CookieManager>,
         scope: zephium_agentic::ContextCookieScope,
         origin: String,
         store: Rc<WorkStoreSeed>,
@@ -271,7 +341,7 @@ impl AgentOwnedView {
         self.work_store = Some(store);
         self.work_storage_ready.set(false);
         *self.work_seed_job.borrow_mut() = Some(WorkSeedJob {
-            source,
+            profile,
             scope,
             origin,
             deadline,
@@ -299,161 +369,84 @@ impl AgentOwnedView {
             (job.completion)(false, false);
             return;
         }
-        match store.metadata.is_initialized(&store.site_name, &job.origin) {
-            Ok(true) => {
-                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
-                super::cookie_storage_diagnostic::seed_initialized();
-                if Instant::now() >= job.deadline {
-                    (job.completion)(false, false);
-                    return;
-                }
-                store.origins.borrow_mut().insert(job.origin);
-                self.work_storage_ready.set(true);
-                (job.completion)(true, false);
-                store.notify();
-                return;
-            }
+        let initialized = match store.metadata.is_initialized(&store.site_name, &job.origin) {
+            Ok(stamped) => stamped || store.origins.borrow().contains(&job.origin),
             Err(()) => {
                 (job.completion)(false, false);
                 return;
             }
-            Ok(false) => {}
-        }
-        let Ok((destination, profile)) = self.cookie_destination(&self.view.environment()) else {
+        };
+        let Ok((work_store, _)) = self.cookie_destination(&self.view.environment()) else {
             (job.completion)(false, false);
             return;
         };
         store.busy.set(true);
         self.work_seed_query.set(true);
         let query = self.work_seed_query.clone();
-        let ready = self.work_storage_ready.clone();
         let cancelled = self.work_seed_cancelled.clone();
-        let transfer = self.work_cookie_transfer.clone();
         let origin = job.origin.clone();
         let callback_panic = job.panic.clone();
         let pending = Rc::new(RefCell::new(Some(job)));
         let deferred_job = self.work_seed_job.clone();
         let callback_pending = pending.clone();
-        let callback_store = store.clone();
-        let callback_destination = destination.clone();
+        let admission = Rc::new(WorkStorageAdmission {
+            store: store.clone(),
+            ready: self.work_storage_ready.clone(),
+            transfer: self.work_cookie_transfer.clone(),
+            work_store: work_store.clone(),
+        });
+        let panic_admission = admission.clone();
         let handler =
             webview2_com::GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
-                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                    || -> windows_core::Result<()> {
-                        query.set(false);
-                        let Some(job) = callback_pending.borrow_mut().take() else {
-                            return Ok(());
-                        };
-                        let mut count = 0;
-                        let observed = result.is_ok()
-                            && cookies.is_some_and(|cookies| {
-                                // SAFETY: WebView2 supplies a live list on this STA; initialized output remains writable.
-                                (unsafe { cookies.Count(&mut count).is_ok() })
-                                    && (0..=8192).contains(&count)
-                            });
-                        if !observed || cancelled.get() {
-                            callback_store.busy.set(false);
-                            (job.completion)(false, false);
-                            callback_store.notify();
-                            return Ok(());
-                        }
-                        if count > 0
-                            || callback_store.origins.borrow().contains(&job.origin)
-                            || job.source.is_none()
-                        {
-                            // The decision precedes every Human exposure, including a successful
-                            // empty/no-source admission. Cookie absence must not undo a later logout.
-                            if Instant::now() >= job.deadline
-                                || callback_store
-                                    .metadata
-                                    .initialize(&callback_store.site_name, &job.origin)
-                                    .is_err()
-                                || Instant::now() >= job.deadline
-                            {
-                                callback_store.busy.set(false);
-                                (job.completion)(false, false);
-                                callback_store.notify();
-                                return Ok(());
-                            }
-                            callback_store.origins.borrow_mut().insert(job.origin);
-                            ready.set(true);
-                            callback_store.busy.set(false);
-                            (job.completion)(true, false);
-                            callback_store.notify();
-                            return Ok(());
-                        }
-                        if callback_store.active_pages.get() != 0 {
-                            // No cookie CAS exists. Do not overwrite a page's concurrent
-                            // human authentication while seeding an untouched origin.
-                            callback_store.busy.set(false);
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    query.set(false);
+                    let Some(job) = callback_pending.borrow_mut().take() else {
+                        return;
+                    };
+                    let mut count = 0;
+                    let observed = result.is_ok()
+                        && cookies.is_some_and(|cookies| {
+                            // SAFETY: WebView2 supplies a live list on this STA; initialized output remains writable.
+                            (unsafe { cookies.Count(&mut count).is_ok() })
+                                && (0..=8192).contains(&count)
+                        });
+                    if !observed || cancelled.get() {
+                        admission.store.busy.set(false);
+                        (job.completion)(false, false);
+                        admission.store.notify();
+                        return;
+                    }
+                    use crate::work_site_session::{
+                        admission as decide, Admission, AdmissionFacts,
+                    };
+                    let step = decide(AdmissionFacts {
+                        pages_open: admission.store.active_pages.get() != 0,
+                        initialized,
+                        store_has_cookies: count > 0,
+                        profile_available: job.profile.is_some(),
+                        return_pending: admission.store.return_pending.get(),
+                    });
+                    match step {
+                        Admission::Wait => {
+                            admission.store.busy.set(false);
                             *deferred_job.borrow_mut() = Some(job);
-
-                            return Ok(());
                         }
-                        let Some(source) = job.source else {
-                            return Ok(());
-                        };
-                        let done = Rc::new(RefCell::new(Some(job.completion)));
-                        let callback_done = done.clone();
-                        let seeded_store = callback_store.clone();
-                        let seeded_ready = ready.clone();
-                        let seeded_origin = job.origin;
-                        let seed_deadline = job.deadline;
-                        let attempt =
-                            super::cookie_transfer::WindowsAgentCookieTransfer::start_work_scoped(
-                                source,
-                                callback_destination.clone(),
-                                profile.clone(),
-                                job.scope,
-                                job.deadline,
-                                move |terminal| {
-                                    let applied = matches!(
-                                        terminal.outcome(),
-                                        zephium_agentic::ContextCookieTransferOutcome::Applied(_)
-                                    );
-                                    let success = applied
-                                        && Instant::now() < seed_deadline
-                                        && seeded_store
-                                            .metadata
-                                            .initialize(&seeded_store.site_name, &seeded_origin)
-                                            .is_ok()
-                                        && Instant::now() < seed_deadline;
-                                    let unproven = terminal.cleanup()
-                            == super::cookie_transfer::WindowsAgentCookieCleanup::Unproven;
-                                    if success {
-                                        seeded_store.origins.borrow_mut().insert(seeded_origin);
-                                    }
-                                    seeded_ready.set(success);
-                                    seeded_store.busy.set(false);
-                                    if let Some(done) = callback_done.borrow_mut().take() {
-                                        done(success, unproven);
-                                    }
-                                    seeded_store.notify();
-                                },
-                                move || (job.panic)(),
-                            );
-                        match attempt {
-                            Ok(attempt) => {
-                                *transfer.borrow_mut() = Some(attempt);
-                            }
-                            Err(_) => {
-                                callback_store.busy.set(false);
-                                if let Some(done) = done.borrow_mut().take() {
-                                    done(false, false);
-                                }
-                                callback_store.notify();
-                            }
-                        }
-                        Ok(())
-                    },
-                ));
+                        Admission::Open { stamp } => open_work_store(&admission, job, stamp),
+                        Admission::Refresh => refresh_work_store(&admission, job),
+                        Admission::ReturnThenRefresh => return_then_refresh(&admission, job),
+                    }
+                }));
                 if outcome.is_err() {
                     query.set(false);
-                    ready.set(false);
+                    panic_admission.ready.set(false);
                     // A handed-off transfer keeps the store closed until its
                     // own native terminal; a pre-write panic cannot mint debt.
-                    if transfer.try_borrow().is_ok_and(|attempt| attempt.is_none()) {
-                        callback_store.busy.set(false);
+                    if panic_admission
+                        .transfer
+                        .try_borrow()
+                        .is_ok_and(|attempt| attempt.as_ref().is_none_or(|t| t.is_terminal()))
+                    {
+                        panic_admission.store.busy.set(false);
                     }
                     invoke_unit_callback(callback_panic.as_ref(), callback_panic.as_ref());
                 }
@@ -461,8 +454,7 @@ impl AgentOwnedView {
             }));
         let value = windows_core::HSTRING::from(origin);
         // SAFETY: attested profile manager and retained native callback on its owning STA; URL is valid through call.
-        if unsafe { destination.GetCookies(windows_core::PCWSTR(value.as_ptr()), &handler) }
-            .is_err()
+        if unsafe { work_store.GetCookies(windows_core::PCWSTR(value.as_ptr()), &handler) }.is_err()
         {
             self.work_seed_query.set(false);
             store.busy.set(false);
@@ -470,6 +462,77 @@ impl AgentOwnedView {
                 (job.completion)(false, false);
             }
             store.notify();
+        }
+    }
+
+    /// Marks that a sign-in handoff runs on this page, so its store's cookies
+    /// go to the person's profile when it resolves or on the site's next page.
+    pub(crate) fn note_work_sign_in(&self) {
+        if let Some(store) = &self.work_store {
+            store.return_pending.set(true);
+        }
+    }
+
+    pub(crate) fn work_session_return_pending(&self) -> bool {
+        self.work_store
+            .as_ref()
+            .is_some_and(|store| store.return_pending.get())
+    }
+
+    /// Adds this page's site cookies to the person's profile after a sign-in
+    /// handoff. False when it could not start; the return then stays pending
+    /// for the site's next page.
+    pub(crate) fn return_work_session(
+        &self,
+        profile: ICoreWebView2CookieManager,
+        scope: zephium_agentic::ContextCookieScope,
+        deadline: Instant,
+        completion: impl FnOnce(crate::work_site_session::SyncResult) + 'static,
+        callback_panicked: impl Fn() + 'static,
+    ) -> bool {
+        let Some(store) = self.work_store.clone() else {
+            return false;
+        };
+        if store.busy.get()
+            || !store.return_pending.get()
+            || self.work_seed_cancelled.get()
+            || self
+                .work_return_transfer
+                .borrow()
+                .as_ref()
+                .is_some_and(|transfer| !transfer.is_terminal())
+        {
+            return false;
+        }
+        let Ok(work_store) = self.work_presence_cookie_manager() else {
+            return false;
+        };
+        store.busy.set(true);
+        let finished = store.clone();
+        let attempt = super::cookie_transfer::WindowsAgentCookieTransfer::start_work_sync(
+            work_store,
+            profile,
+            scope,
+            deadline,
+            move |terminal| {
+                let result = sync_result(terminal);
+                finished.settle_return(result);
+                finished.busy.set(false);
+                completion(result);
+                finished.notify();
+            },
+            callback_panicked,
+        );
+        match attempt {
+            Ok(attempt) => {
+                retain_transfer(&self.work_return_transfer, attempt);
+                true
+            }
+            Err(_) => {
+                store.busy.set(false);
+                store.notify();
+                false
+            }
         }
     }
 
@@ -537,17 +600,20 @@ impl AgentOwnedView {
         if self.work_seed_query.get() {
             return false;
         }
-        self.work_cookie_transfer
-            .borrow()
-            .as_ref()
-            .is_none_or(|transfer| {
-                if transfer.is_terminal() {
-                    true
-                } else {
-                    transfer.cancel(zephium_agentic::ContextCookieTransferFailure::Shutdown);
-                    false
-                }
-            })
+        let settled =
+            |slot: &RefCell<Option<super::cookie_transfer::WindowsAgentCookieTransfer>>| {
+                slot.borrow().as_ref().is_none_or(|transfer| {
+                    if transfer.is_terminal() {
+                        true
+                    } else {
+                        transfer.cancel(zephium_agentic::ContextCookieTransferFailure::Shutdown);
+                        false
+                    }
+                })
+            };
+        let seeded = settled(&self.work_cookie_transfer);
+        let returned = settled(&self.work_return_transfer);
+        seeded && returned
     }
     pub(crate) fn park_semantic_runtime(
         &mut self,
@@ -766,6 +832,18 @@ impl AgentOwnedView {
         self.work_navigation.as_ref()
     }
 
+    pub(crate) fn sample_work_human_wall(
+        &self,
+        completion: impl FnOnce(String) + 'static,
+    ) -> Result<(), ()> {
+        // Only the original, live human-owned navigation phase may evaluate
+        // this fixed survey. It is never an automated or hidden-decision tool.
+        self.work_navigation()
+            .and_then(|gate| gate.human_wall_probe())
+            .ok_or(())?;
+        self.semantic().ok_or(())?.sample_human_wall(completion);
+        Ok(())
+    }
     pub(crate) fn semantic(
         &self,
     ) -> Option<&super::semantic_runtime::AgentSemanticRuntimeController> {
@@ -812,13 +890,53 @@ impl AgentOwnedView {
     // The legacy screenshot port remains unadmitted on Windows. Retained Work
     // frames use capture_work_frame with their own exact resource/document fence.
     #[allow(dead_code)]
+    pub(crate) fn record_media_ports(
+        &self,
+    ) -> Option<(
+        crate::platform::record_media::MediaDispatch,
+        crate::platform::record_media::FrameCapture,
+        crate::platform::record_media::PrivacyDispatch,
+    )> {
+        let semantic = self.semantic()?.clone();
+        let native = self.view.webview();
+        let controller = self.view.controller();
+        let capture = Rc::new(
+            move |crop, completion: crate::platform::record_media::FrameCompletion| {
+                super::semantic_screenshot::capture_record_frame_native(
+                    &native,
+                    &controller,
+                    crop,
+                    completion,
+                )
+            },
+        );
+        let privacy_runtime = semantic.clone();
+        let privacy = Rc::new(move |reply| privacy_runtime.dispatch_privacy(reply));
+        let dispatch = Rc::new(
+            move |plan: &zephium_agentic::SemanticRecordMediaPlan,
+                  validate: bool,
+                  fetch: crate::platform::record_media::MediaFetchAttempt,
+                  completion: crate::platform::record_media::MediaCompletion| {
+                semantic.dispatch_media(plan, validate, fetch, completion)
+            },
+        );
+        Some((dispatch, capture, privacy))
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn dispatch_screenshot(
         &self,
         request: SemanticScreenshotNativeRequest,
         admitted_at: Instant,
         cancelled: Arc<AtomicBool>,
-        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
-            + 'static,
+        completion: impl FnOnce(
+                Result<
+                    crate::platform::semantic_pixel_privacy::ModelCapture<
+                        SemanticScreenshotNativeCapture,
+                    >,
+                    SemanticScreenshotNativeFailure,
+                >,
+            ) + 'static,
         callback_panicked: impl Fn() + 'static,
     ) -> Result<(), SemanticScreenshotNativeFailure> {
         if self
@@ -829,14 +947,35 @@ impl AgentOwnedView {
         {
             return Err(SemanticScreenshotNativeFailure::NotReady);
         }
-        super::semantic_screenshot::capture_viewport(
-            &self.view,
-            request,
-            admitted_at,
+        let Some(semantic) = self.semantic().cloned() else {
+            return Err(SemanticScreenshotNativeFailure::NotReady);
+        };
+        let native = self.view.webview();
+        let capture_cancelled = cancelled.clone();
+        let public = request.requires_public_page();
+        crate::platform::semantic_pixel_privacy::guarded_model_capture(
+            public,
+            Rc::new(move |completion| {
+                if public {
+                    semantic.dispatch_public_privacy(completion)
+                } else {
+                    semantic.dispatch_privacy(completion)
+                }
+            }),
+            move |completion| {
+                super::semantic_screenshot::capture_viewport(
+                    &native,
+                    request,
+                    admitted_at,
+                    capture_cancelled,
+                    completion,
+                    callback_panicked,
+                )
+            },
             cancelled,
             completion,
-            callback_panicked,
-        )
+        );
+        Ok(())
     }
 
     pub(crate) fn dispatch_retained_semantic_action(
@@ -862,7 +1001,11 @@ impl AgentOwnedView {
     }
 
     pub(crate) fn semantic_pending_for_audit(&self) -> Option<bool> {
-        self.semantic()?.pending_for_audit()
+        // Logical cancellation cannot erase an original CDP callback or its
+        // context-reporting cleanup obligation before physical return.
+        self.semantic()?
+            .work_drained_for_audit()
+            .map(|drained| !drained)
     }
 
     #[cfg(feature = "native-agentic-semantic-probe")]
@@ -1016,6 +1159,140 @@ impl AgentOwnedView {
         }
         result
     }
+}
+
+fn open_work_store(admission: &WorkStorageAdmission, job: WorkSeedJob, stamp: bool) {
+    let store = &admission.store;
+    let opened = Instant::now() < job.deadline
+        && (!stamp
+            || store
+                .metadata
+                .initialize(&store.site_name, &job.origin)
+                .is_ok())
+        && Instant::now() < job.deadline;
+    if opened {
+        if stamp {
+            store.origins.borrow_mut().insert(job.origin);
+        }
+        admission.ready.set(true);
+    }
+    store.busy.set(false);
+    (job.completion)(opened, false);
+    store.notify();
+}
+
+fn fail_work_store(admission: &WorkStorageAdmission, job: WorkSeedJob, unproven: bool) {
+    admission.ready.set(false);
+    admission.store.busy.set(false);
+    (job.completion)(false, unproven);
+    admission.store.notify();
+}
+
+fn refresh_work_store(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
+    let Some(profile) = job.profile.clone() else {
+        open_work_store(admission, job, false);
+        return;
+    };
+    let scope = job.scope.clone();
+    let deadline = job.deadline;
+    let panic = job.panic.clone();
+    let pending = Rc::new(RefCell::new(Some(job)));
+    let finished = pending.clone();
+    let owner = admission.clone();
+    let attempt = super::cookie_transfer::WindowsAgentCookieTransfer::start_work_sync(
+        profile,
+        admission.work_store.clone(),
+        scope,
+        deadline,
+        move |terminal| {
+            use crate::work_site_session::{after_refresh, AfterRefresh};
+            let result = sync_result(terminal);
+            let Some(job) = finished.borrow_mut().take() else {
+                return;
+            };
+            match after_refresh(result) {
+                AfterRefresh::Open { stamp } => open_work_store(&owner, job, stamp),
+                AfterRefresh::Fail => fail_work_store(&owner, job, true),
+            }
+        },
+        move || panic(),
+    );
+    match attempt {
+        Ok(attempt) => retain_transfer(&admission.transfer, attempt),
+        Err(_) => {
+            if let Some(job) = pending.borrow_mut().take() {
+                open_work_store(admission, job, false);
+            }
+        }
+    }
+}
+
+fn return_then_refresh(admission: &Rc<WorkStorageAdmission>, job: WorkSeedJob) {
+    let Some(profile) = job.profile.clone() else {
+        open_work_store(admission, job, false);
+        return;
+    };
+    let scope = job.scope.clone();
+    let deadline = job.deadline;
+    let panic = job.panic.clone();
+    let pending = Rc::new(RefCell::new(Some(job)));
+    let finished = pending.clone();
+    let owner = admission.clone();
+    let attempt = super::cookie_transfer::WindowsAgentCookieTransfer::start_work_sync(
+        admission.work_store.clone(),
+        profile,
+        scope,
+        deadline,
+        move |terminal| {
+            use crate::work_site_session::SyncResult;
+            let result = sync_result(terminal);
+            let Some(job) = finished.borrow_mut().take() else {
+                return;
+            };
+            let pending = owner.store.settle_return(result);
+            if result == SyncResult::Unproven {
+                fail_work_store(&owner, job, true);
+            } else if pending {
+                open_work_store(&owner, job, false);
+            } else {
+                refresh_work_store(&owner, job);
+            }
+        },
+        move || panic(),
+    );
+    match attempt {
+        Ok(attempt) => retain_transfer(&admission.transfer, attempt),
+        Err(_) => {
+            if let Some(job) = pending.borrow_mut().take() {
+                open_work_store(admission, job, false);
+            }
+        }
+    }
+}
+
+/// A transfer that settled synchronously needs no owner; keeping it would
+/// replace the live one its terminal callback may already have started.
+fn retain_transfer(
+    slot: &RefCell<Option<super::cookie_transfer::WindowsAgentCookieTransfer>>,
+    attempt: super::cookie_transfer::WindowsAgentCookieTransfer,
+) {
+    if !attempt.is_terminal() {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(attempt);
+        }
+    }
+}
+
+fn sync_result(
+    terminal: super::cookie_transfer::WindowsAgentCookieTerminal,
+) -> crate::work_site_session::SyncResult {
+    crate::work_site_session::SyncResult::new(
+        matches!(
+            terminal.outcome(),
+            zephium_agentic::ContextCookieTransferOutcome::Applied(_)
+        ),
+        terminal.cleanup() == super::cookie_transfer::WindowsAgentCookieCleanup::Unproven,
+    )
 }
 
 type WorkIdleCompletion = Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>;
@@ -1430,6 +1707,8 @@ where
         browser_lost: on_browser_lost,
         invariant: on_invariant_failure,
         panic: on_callback_panic,
+        redirect: on_redirect,
+        credential_denied: on_credential_denied,
     } = callbacks;
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
@@ -1446,6 +1725,21 @@ where
     let browser_lost_callback = Rc::new(on_browser_lost);
     let invariant_callback = Rc::new(on_invariant_failure);
     let panic_callback = Rc::new(on_callback_panic);
+    let redirect_invariant = invariant_callback.clone();
+    let redirect_panic = panic_callback.clone();
+    // A refused redirect ends the document like any refused load, but its
+    // owner reads it as a redirect, never as a broken invariant.
+    let on_redirect: Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)> = match on_redirect {
+        Some(redirect) => Rc::new(move |destination| {
+            invoke_unit_callback(&|| redirect(destination.clone()), redirect_panic.as_ref());
+        }),
+        None => Rc::new(move |_| {
+            invoke_unit_callback(redirect_invariant.as_ref(), redirect_panic.as_ref())
+        }),
+    };
+    let policy_redirect = on_redirect.clone();
+    let event_redirect = on_redirect.clone();
+    let location_redirect = on_redirect;
     let work_activity_panic: Rc<dyn Fn()> = invariant_callback.clone();
     let navigation_invariant = invariant_callback.clone();
     let renderer_invariant = invariant_callback.clone();
@@ -1482,8 +1776,12 @@ where
             let Some(gate) = work_policy.as_ref() else {
                 return navigation_policy.allows(&target);
             };
-            let human_prepare = gate.human_load_preparation_needed(Some(true));
+            let human_prepare = gate.human_load_preparation_needed(Some(true))
+                && !gate.human_fragment_move(&target);
             let allowed = gate.allows(&target);
+            if let Some(destination) = gate.take_redirect_report().filter(|_| !allowed) {
+                policy_redirect(destination);
+            }
             let prepare = allowed && (human_prepare || gate.take_hand_on());
             let prepared = !prepare || semantic_policy.begin_document_load().is_ok();
             if !prepared {
@@ -1503,7 +1801,14 @@ where
                             );
                             return;
                         }
-                        if gate.failed() {
+                        if let Some(destination) = gate.redirected() {
+                            event_redirect(destination);
+                        } else if gate.owned_refusal() {
+                            invoke_unit_callback(
+                                navigation_event_location_callback.as_ref(),
+                                location_panic.as_ref(),
+                            );
+                        } else if gate.failed() {
                             invoke_unit_callback(
                                 navigation_invariant.as_ref(),
                                 navigation_panic.as_ref(),
@@ -1628,11 +1933,17 @@ where
     if !semantic.controller().attest(&view.webview()) {
         return Err(AgentOwnedViewConstructionError::ExtensionIsolation);
     }
-    let security_policy = super::configure(
+    let credential_panic = panic_callback.clone();
+    let credential_denied = on_credential_denied.map(|notify| {
+        Rc::new(move || invoke_unit_callback(notify.as_ref(), credential_panic.as_ref()))
+            as Rc<dyn Fn()>
+    });
+    let security_policy = super::configure_with_credential_denied(
         &view,
         0.0,
         storage_class == ContextProfileStorageClass::Ephemeral,
         expected_user_data_folder,
+        credential_denied,
     )
     .map_err(|_| AgentOwnedViewConstructionError::Native)?;
     attest_hidden_owner(&view, expected_parent, viewport)?;
@@ -1666,7 +1977,10 @@ where
         if let Some(gate) = &work_location {
             match gate.location_changed(super::current_url_core(&location_core).as_deref()) {
                 Ok(changed) => {
-                    if gate.failed() {
+                    if let Some(destination) = gate.redirected() {
+                        location_semantic.revoke_document_authority();
+                        location_redirect(destination);
+                    } else if gate.failed() {
                         location_semantic.revoke_document_authority();
                         invoke_unit_callback(location_invariant.as_ref(), location_panic.as_ref());
                     }
@@ -1701,6 +2015,7 @@ where
             work_native_profile: None,
             work_storage_ready: Rc::new(Cell::new(true)),
             work_cookie_transfer: Rc::new(RefCell::new(None)),
+            work_return_transfer: RefCell::new(None),
             work_store: None,
             work_seed_job: Rc::new(RefCell::new(None)),
             work_seed_query: Rc::new(Cell::new(false)),

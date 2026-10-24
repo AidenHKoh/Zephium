@@ -37,7 +37,7 @@ pub const INITIAL_SEMANTIC_MODEL_TOKEN_TARGET: u32 = 2_000;
 /// objective while allowing a bounded 16 KiB local preflight for complete
 /// native-select option sets; the complete immutable request is counted by the
 /// authenticated provider endpoint before generation begins.
-pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 16 * 1_024;
+pub const INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING: u32 = 32 * 1_024;
 /// Normal action-diff token target from the product qualification contract.
 pub const ACTION_SEMANTIC_DIFF_TOKEN_TARGET: u32 = 200;
 /// Conservative byte ceiling for an action diff before provider-exact counting.
@@ -91,23 +91,31 @@ impl SemanticModelEncodingBudget {
     };
 
     /// Terminal extraction has a different representation contract from an
-    /// initial observation. Preserve the full STANDARD read: up to 64 KiB for
-    /// escaped values (2 * 32 KiB), 16 KiB for its 128 rows, the original 16-KiB
-    /// admitted frame-provenance envelope, and 16 KiB for the bounded schema /
-    /// framing. This changes no capture/read/request/run limit. Actual encoded
-    /// bytes are only a conservative preflight to whole-request exact counting,
-    /// never an allocation, charge or token-count claim for the ceiling itself.
-    pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self = Self {
-        max_bytes: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
-            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
+    /// initial observation. Preserve the full EXTRACTION read: its escaped
+    /// values (twice its content bytes), 128 bytes for each of its rows, the
+    /// original 16-KiB admitted frame-provenance envelope, and 16 KiB for the
+    /// bounded schema / framing. This changes no capture/request/run limit.
+    /// Actual encoded bytes are only a conservative preflight to whole-request
+    /// exact counting, never an allocation, charge or token-count claim for
+    /// the ceiling itself.
+    pub const EXTRACTION_PROVIDER_EXACT_CONSERVATIVE: Self =
+        Self::extraction_ceiling(crate::SemanticReadBudget::EXTRACTION);
+
+    /// The same representation contract for a multi-record listing read.
+    pub const LISTING_PROVIDER_EXACT_CONSERVATIVE: Self =
+        Self::extraction_ceiling(crate::SemanticReadBudget::LISTING);
+
+    const fn extraction_ceiling(read: crate::SemanticReadBudget) -> Self {
+        let ceiling = 2 * read.max_bytes()
+            + 128 * read.max_items() as u32
             + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
-            + 16 * 1024,
-        max_tokens: 2 * crate::SemanticReadBudget::STANDARD.max_bytes()
-            + 128 * crate::SemanticReadBudget::STANDARD.max_items() as u32
-            + INITIAL_PROVIDER_EXACT_CONSERVATIVE_TOKEN_CEILING
-            + 16 * 1024,
-        token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
-    };
+            + 16 * 1024;
+        Self {
+            max_bytes: ceiling,
+            max_tokens: ceiling,
+            token_requirement: SemanticTokenCountRequirement::ConservativeAllowed,
+        }
+    }
 
     /// Initial snapshot budget for a provider with an exact counting path.
     pub const INITIAL_EXACT: Self = Self {
@@ -1350,6 +1358,51 @@ mod tests {
             .expect("observation")
     }
 
+    #[test]
+    fn approval_seals_never_enter_model_projection_or_debug_output() {
+        let source = observation();
+        let nonce = "102132435465768798a9bacbdcedfe0f";
+        let make = |sealed: bool| {
+            let mut wire = json!({"v":1,"i":12,"g":12,"c":"complete","n":[{"k":1,"r":"button","n":"Save","o":9}]});
+            if sealed {
+                wire["ap"] = nonce.into();
+                wire["n"][0]["ai"] = 1.into();
+            }
+            let snapshot = decode_semantic_snapshot(
+                SemanticDecodeContext::new(
+                    SemanticInvocationId::new(12).unwrap(),
+                    source.frames()[0].frame().clone(),
+                    SemanticSnapshotGeneration::new(12).unwrap(),
+                ),
+                &serde_json::to_vec(&wire).unwrap(),
+            )
+            .unwrap();
+            assert!(!format!("{snapshot:?}").contains(nonce));
+            let request = SemanticObservationRequest::initial(
+                SemanticObservationId::new(2).unwrap(),
+                source.request().context(),
+                SemanticObservationBudget::try_new(8, 4096, 1).unwrap(),
+            );
+            SemanticObservationAssembler::new(request, snapshot)
+                .unwrap()
+                .finish()
+                .unwrap()
+        };
+        let plain = encode_semantic_observation(
+            &make(false),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap();
+        let sealed = encode_semantic_observation(
+            &make(true),
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap();
+        assert_eq!(plain.content, sealed.content);
+        assert!(!sealed.content.contains(nonce));
+        assert!(!sealed.content.contains("approval"));
+    }
+
     fn observation_with_text_value(value: &str) -> SemanticObservation {
         observation_with_fill_support(value, None)
     }
@@ -1786,8 +1839,8 @@ mod tests {
     #[test]
     fn provider_exact_preflight_keeps_target_and_conservative_ceiling_distinct() {
         let budget = SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE;
-        assert_eq!(budget.max_bytes(), 16 * 1_024);
-        assert_eq!(budget.max_tokens(), 16 * 1_024);
+        assert_eq!(budget.max_bytes(), 32 * 1_024);
+        assert_eq!(budget.max_tokens(), 32 * 1_024);
         assert_eq!(
             budget.token_requirement(),
             SemanticTokenCountRequirement::ConservativeAllowed

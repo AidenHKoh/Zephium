@@ -75,7 +75,7 @@
     <IconButton
       icon={ArrowLeft02Icon}
       label={m.settings_back()}
-      onclick={() => void browser.open(null)}
+      onclick={() => void browser.close()}
     /><span class="toolbar-current">{m.browser_history_title()}</span>
   </header>
 

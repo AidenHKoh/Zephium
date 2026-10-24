@@ -14,7 +14,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { characterMask, leadLookHere, type CharacterKind, type LeadLook } from "./shapes";
-  import { watchStill } from "./still";
+  import { watchStill } from "$shared/lib/still";
 
   let {
     kind = "lead",
@@ -349,8 +349,8 @@
     background: radial-gradient(closest-side, var(--color-agent-ground), transparent);
   }
 
-  /* Only a live character moves: a slow float, a glance, a blink. Waiting asks
-     twice, then keeps still until the person answers. */
+  /* Only a live character moves: a slow float, a glance, a blink. Waiting is
+     a pose, not motion: it keeps perfectly still until the person answers. */
   .live {
     --beat: 3.4s;
     --beats: infinite;
@@ -358,15 +358,16 @@
 
   .waiting {
     --beat: 1.6s;
-    --beats: 2;
+    --beats: 0;
+    --float-beats: 0;
   }
 
   .live .figure {
-    animation: float var(--beat) var(--ease-in-out) var(--beats);
+    animation: float var(--beat) var(--ease-in-out) var(--float-beats, var(--beats));
   }
 
   .live .ground {
-    animation: ground var(--beat) var(--ease-in-out) var(--beats);
+    animation: ground var(--beat) var(--ease-in-out) var(--float-beats, var(--beats));
   }
 
   .live .eyes {

@@ -197,6 +197,8 @@ pub enum WorkBrowserResourceError {
 /// Closed operation classes; none grants page-level or model authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserResourceOperation {
+    /// Optional bounded native media read on the drained same page.
+    ReadMedia,
     /// Construct one extension-free resource under its selected profile.
     Construct,
     /// Bind one run lease to the existing exact page.
@@ -241,6 +243,8 @@ impl WorkBrowserConstructionAttempt {
 #[derive(Debug, Default)]
 struct ConstructionSettings {
     anonymous_session: Option<crate::WorkBrowserSession>,
+    work_website_data: bool,
+    redirect: Option<crate::WorkBrowserRedirect>,
     window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
 }
 
@@ -249,7 +253,8 @@ struct ConstructionSettings {
 #[derive(Debug)]
 pub struct WorkBrowserResourceRequest {
     construction: Option<Box<ConstructionSettings>>,
-    operation: OperationJoin,
+    media: Option<Box<media::MediaRead>>,
+    operation: Box<OperationJoin>,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
     document: Option<Arc<ContextNavigationTarget>>,
@@ -295,6 +300,7 @@ impl WorkBrowserResourceRequest {
         if self.operation() != WorkBrowserResourceOperation::Construct
             || !self.isolated_public
             || self.anonymous_session().is_some()
+            || self.work_website_data()
             || !session.admits(identity.profile(), identity.work())
         {
             return Err(Box::new(self));
@@ -309,6 +315,53 @@ impl WorkBrowserResourceRequest {
         self.construction
             .as_ref()
             .and_then(|settings| settings.anonymous_session.as_ref())
+    }
+
+    /// Opens the page in Work's own persistent website data for its profile:
+    /// separate from the profile's store and from every run's anonymous one.
+    pub fn with_work_website_data(mut self) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || self.anonymous_session().is_some()
+            || self.work_website_data()
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .work_website_data = true;
+        Ok(self)
+    }
+    /// Whether construction uses Work's own persistent website data.
+    pub fn work_website_data(&self) -> bool {
+        self.construction
+            .as_ref()
+            .is_some_and(|settings| settings.work_website_data)
+    }
+
+    /// Where the native gate keeps a public document's refused redirect,
+    /// for exact public construction only.
+    pub fn with_redirect(
+        mut self,
+        redirect: crate::WorkBrowserRedirect,
+    ) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || !self.isolated_public
+            || !self.document_policy.is_public()
+            || self.redirect().is_some()
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .redirect = Some(redirect);
+        Ok(self)
+    }
+    /// The refused-redirect slot of a public construction, if one was bound.
+    pub fn redirect(&self) -> Option<&crate::WorkBrowserRedirect> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.redirect.as_ref())
     }
 
     /// Attaches one stable resource-health observer to original construction.
@@ -342,7 +395,8 @@ impl WorkBrowserResourceRequest {
     pub const fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
-    /// Anonymous nonpersistent storage, separate from profile cookies.
+    /// Storage separate from the profile's cookies: a run's anonymous store,
+    /// a fresh one, or Work's own (`work_website_data`).
     pub const fn isolated_public(&self) -> bool {
         self.isolated_public
     }
@@ -408,7 +462,7 @@ impl WorkBrowserResourceRequest {
         outcome: WorkBrowserResourceNativeOutcome,
     ) -> WorkBrowserResourceCompletion {
         WorkBrowserResourceCompletion {
-            operation: self.operation,
+            operation: *self.operation,
             outcome,
             delivery: self.delivery.map(|delivery| delivery.binding),
             effective_document: None,
@@ -455,6 +509,8 @@ impl WorkBrowserLeaseNativeDebt {
 /// Unsupported/refused/unknown facts must never be represented as success.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkBrowserResourceNativeOutcome {
+    /// Optional media terminal arrived; original resource remains owned.
+    MediaRead,
     /// Exact page/profile/channel construction and ownership were attested.
     Constructed,
     /// Same exact page was bound to the requested lease, without recreation.
@@ -544,6 +600,8 @@ struct Resource {
     join: WorkBrowserResourceJoin,
     storage: ContextProfileStorageClass,
     isolated_public: bool,
+    anonymous_read_authority: Option<WorkBrowserAnonymousReadAuthority>,
+    anonymous_read_generation: Option<u64>,
     phase: WorkBrowserResourcePhase,
     pending: Option<OperationJoin>,
     destruction: Option<OperationJoin>,
@@ -567,8 +625,18 @@ struct Resource {
     observation: Option<observation::ObservationJoin>,
     human: Option<Box<human::HumanWindow>>,
 }
+impl Drop for Resource {
+    fn drop(&mut self) {
+        if let Some(proof) = &self.anonymous_read_authority {
+            proof.revoke(WorkBrowserAnonymousReadStatus::Closed);
+        }
+    }
+}
 impl Resource {
     fn quarantine(&mut self, failure: WorkBrowserResourceFailure) {
+        if let Some(proof) = &self.anonymous_read_authority {
+            proof.revoke(WorkBrowserAnonymousReadStatus::Closed);
+        }
         self.failure.get_or_insert(failure);
         self.phase = WorkBrowserResourcePhase::Quarantined;
         // Keep both callback and execution-capacity debt. Quarantine is not
@@ -648,6 +716,7 @@ impl WorkBrowserResources {
             crate::WorkBrowserDocumentPolicy::Exact,
             now,
             false,
+            None,
         )
     }
     /// Reserve one exact initial document at the trusted application edge.
@@ -711,7 +780,57 @@ impl WorkBrowserResources {
             policy,
             now,
             isolated_public,
+            None,
         )
+    }
+    /// Freezes an original anonymous read proof exactly once, before native
+    /// construction. This does not attest signed-out storage or pixel authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_document_with_original_read(
+        &mut self,
+        resource: WorkBrowserResourceId,
+        context: ContextId,
+        storage: ContextProfileStorageClass,
+        document: ContextNavigationTarget,
+        policy: crate::WorkBrowserDocumentPolicy,
+        isolated_public: bool,
+        authority: WorkBrowserAnonymousReadAuthority,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
+        crate::SemanticOrigin::parse(document.as_url().as_str())
+            .map_err(|_| WorkBrowserResourceError::Source)?;
+        if !isolated_public || !policy.admits_request(&document) {
+            return Err(WorkBrowserResourceError::Source);
+        }
+        self.construct_source(
+            resource,
+            context,
+            storage,
+            Some(Arc::new(document)),
+            policy,
+            now,
+            isolated_public,
+            Some(authority),
+        )
+    }
+    /// Closed current status of the original resource proof. This is not
+    /// account state, a screenshot grant, or permission to replace the proof.
+    pub fn anonymous_read_status(
+        &self,
+        resource: &WorkBrowserResourceJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<WorkBrowserAnonymousReadStatus, WorkBrowserResourceError> {
+        let row = self
+            .rows
+            .get(&resource.identity.resource)
+            .filter(|row| row.join == *resource)
+            .ok_or(WorkBrowserResourceError::Stale)?;
+        Ok(row
+            .anonymous_read_authority
+            .as_ref()
+            .map_or(WorkBrowserAnonymousReadStatus::Absent, |proof| {
+                proof.status(now)
+            }))
     }
     #[allow(clippy::too_many_arguments)]
     fn construct_source(
@@ -723,6 +842,7 @@ impl WorkBrowserResources {
         document_policy: crate::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
         isolated_public: bool,
+        anonymous_read_authority: Option<WorkBrowserAnonymousReadAuthority>,
     ) -> Result<WorkBrowserResourceRequest, WorkBrowserResourceError> {
         if self.sealed {
             return Err(WorkBrowserResourceError::Sealed);
@@ -739,6 +859,14 @@ impl WorkBrowserResources {
             return Err(WorkBrowserResourceError::Capacity);
         }
         let sequence = self.next()?;
+        if let Some(proof) = &anonymous_read_authority {
+            if !document
+                .as_ref()
+                .is_some_and(|document| proof.claim_resource(context, self.profile, document, now))
+            {
+                return Err(WorkBrowserResourceError::Source);
+            }
+        }
         let join = WorkBrowserResourceJoin {
             identity: WorkBrowserResourceIdentity {
                 work: self.work,
@@ -761,6 +889,8 @@ impl WorkBrowserResources {
                 join,
                 storage,
                 isolated_public,
+                anonymous_read_authority,
+                anonymous_read_generation: None,
                 phase: WorkBrowserResourcePhase::Constructing,
                 pending: Some(operation.clone()),
                 destruction: None,
@@ -787,7 +917,8 @@ impl WorkBrowserResources {
         );
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage,
             isolated_public,
             document,
@@ -842,13 +973,17 @@ impl WorkBrowserResources {
             kind: WorkBrowserResourceOperation::Acquire,
             lease: Some(lease.clone()),
         };
+        if let Some(proof) = &row.anonymous_read_authority {
+            row.anonymous_read_generation = proof.acquire(run, now).then_some(sequence);
+        }
         row.lease = Some(lease);
         row.observed = false;
         row.phase = WorkBrowserResourcePhase::Acquiring;
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -911,7 +1046,8 @@ impl WorkBrowserResources {
         row.pending = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -977,12 +1113,16 @@ impl WorkBrowserResources {
             kind: WorkBrowserResourceOperation::Destroy,
             lease: row.lease.clone(),
         };
+        if let Some(proof) = &row.anonymous_read_authority {
+            proof.revoke(WorkBrowserAnonymousReadStatus::Closed);
+        }
         row.phase = WorkBrowserResourcePhase::Destroying;
         row.destruction_attempted = true;
         row.destruction = Some(operation.clone());
         Ok(WorkBrowserResourceRequest {
             construction: None,
-            operation,
+            media: None,
+            operation: Box::new(operation),
             storage: row.storage,
             isolated_public: row.isolated_public,
             document: row.document.clone(),
@@ -1057,6 +1197,13 @@ impl WorkBrowserResources {
             return Ok(human::settle(row, completion, now, sealed));
         }
         let failure = match (completion.operation.kind, completion.outcome) {
+            (
+                WorkBrowserResourceOperation::ReadMedia,
+                WorkBrowserResourceNativeOutcome::MediaRead,
+            ) => {
+                row.phase = WorkBrowserResourcePhase::Retained;
+                return Ok(WorkBrowserResourceEvent::Retained(row.join.clone()));
+            }
             (
                 WorkBrowserResourceOperation::Construct,
                 WorkBrowserResourceNativeOutcome::Constructed,
@@ -1139,11 +1286,11 @@ impl WorkBrowserResources {
     ) -> Result<WorkBrowserResourceEvent, WorkBrowserResourceError> {
         let row = self.row_mut(&request.operation.resource)?;
         let operation = request.operation.kind;
-        if row.destruction.as_ref() == Some(&request.operation) {
+        if row.destruction.as_ref() == Some(request.operation.as_ref()) {
             row.destruction = None;
             row.quarantine(WorkBrowserResourceFailure::NativeRefused);
         } else {
-            if row.pending.as_ref() != Some(&request.operation) {
+            if row.pending.as_ref() != Some(request.operation.as_ref()) {
                 return Err(WorkBrowserResourceError::Stale);
             }
             row.pending = None;
@@ -1159,6 +1306,9 @@ impl WorkBrowserResources {
             ) {
                 // Cleanup already owns/retired the resource; settle only debt.
             } else if operation == WorkBrowserResourceOperation::Construct {
+                if let Some(proof) = &row.anonymous_read_authority {
+                    proof.revoke(WorkBrowserAnonymousReadStatus::Closed);
+                }
                 // Exact non-admission proves absence without pretending the
                 // prior clock/control ambiguity or task failure disappeared.
                 row.phase = WorkBrowserResourcePhase::Destroyed;
@@ -1169,7 +1319,8 @@ impl WorkBrowserResources {
                     WorkBrowserResourceOperation::Construct => {
                         row.phase = WorkBrowserResourcePhase::Destroyed
                     }
-                    WorkBrowserResourceOperation::Acquire => {
+                    WorkBrowserResourceOperation::Acquire
+                    | WorkBrowserResourceOperation::ReadMedia => {
                         row.phase = WorkBrowserResourcePhase::Retained;
                     }
                     WorkBrowserResourceOperation::Revoke
@@ -1201,6 +1352,11 @@ impl WorkBrowserResources {
     /// Permanently forbid new construction/acquisition. Existing native leases
     /// still require explicit revocation/drain and every resource destruction.
     pub fn seal(&mut self) {
+        for row in self.rows.values() {
+            if let Some(proof) = &row.anonymous_read_authority {
+                proof.revoke(WorkBrowserAnonymousReadStatus::Closed);
+            }
+        }
         self.sealed = true;
     }
     /// True only after sealing and exact destruction of every retained resource.
@@ -1268,7 +1424,8 @@ impl WorkBrowserResources {
 #[path = "work_browser_human.rs"]
 mod human;
 pub use human::{
-    brand_family, same_work_human_site, WorkBrowserHumanProgress, WorkBrowserHumanRegion,
+    brand_family, same_work_human_site, WorkBrowserHumanCheck, WorkBrowserHumanCheckState,
+    WorkBrowserHumanProgress, WorkBrowserHumanRegion, WorkBrowserHumanTime,
     MAX_WORK_HUMAN_WAIT_MILLIS,
 };
 
@@ -1337,3 +1494,17 @@ pub enum WorkBrowserResourceDispatch {
 #[cfg(test)]
 #[path = "work_browser_resource_tests.rs"]
 mod tests;
+
+#[path = "work_browser_media.rs"]
+mod media;
+pub use media::{
+    WorkBrowserCropGeometry, WorkBrowserMediaFetchMode, WorkBrowserMediaProgress,
+    WorkBrowserPublicAssetReply, WorkBrowserPublicAssetRequest, WorkBrowserRecordImage,
+    WorkBrowserRecordImageOrigin, MAX_PUBLIC_RECORD_IMAGE_BYTES,
+};
+
+#[path = "work_browser_anonymous.rs"]
+mod anonymous;
+pub use anonymous::{
+    WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadLoss, WorkBrowserAnonymousReadStatus,
+};

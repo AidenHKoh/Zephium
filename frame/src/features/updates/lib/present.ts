@@ -26,6 +26,8 @@ export type CardView = {
   icon: IconSvgElement;
   actions: SidebarCardAction[];
   dismiss: () => void;
+  /** A passing notice leaves on its own; one that asks for action stays. */
+  expires?: number;
 };
 
 export function cardView(card: UpdateCard): CardView {
@@ -60,6 +62,7 @@ export function cardView(card: UpdateCard): CardView {
         },
       ],
       dismiss: notices.acknowledgeUpdate,
+      expires: 12_000,
     };
   }
   if (card.target === "browser_runtime") {

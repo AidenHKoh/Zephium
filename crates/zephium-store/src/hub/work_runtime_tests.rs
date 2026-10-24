@@ -497,7 +497,9 @@ fn approved_deadline_uses_original_monotonic_store_incarnation() {
     let (approved, receipt) = approve(&mut hub, &planned, 100.into());
     // Wall time has not elapsed. Only the original process's monotonic clock
     // decides admission; absolute timestamps remain descriptive history.
-    let Some(epoch) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(301))
+    let Some(epoch) = hub
+        .work_runtime_epoch
+        .checked_sub(std::time::Duration::from_secs(301))
     else {
         return;
     };
@@ -729,10 +731,7 @@ fn takeover_persists_its_reason_and_success_cannot_carry_one() {
     )
     .unwrap();
     let taken = read_runtime(&mut hub, &planned);
-    assert_eq!(
-        taken.executions[0].status,
-        WorkExecutionStatus::CancelRequested
-    );
+    assert_eq!(taken.executions[0].status, WorkExecutionStatus::Cancelled);
     assert_eq!(
         taken.executions[0].intervention,
         Some(WorkInterventionV1 {
@@ -767,9 +766,12 @@ fn takeover_persists_its_reason_and_success_cannot_carry_one() {
                 origin: None,
             })
         ),
-        Err(WorkError::Invalid)
+        Err(WorkError::Conflict)
     ));
-    settle(&mut hub, WorkAttemptStatus::Cancelled, None).unwrap();
+    assert!(matches!(
+        settle(&mut hub, WorkAttemptStatus::Cancelled, None),
+        Err(WorkError::Conflict)
+    ));
     let settled = read_runtime(&mut hub, &planned);
     assert_eq!(
         settled.executions[0].intervention.as_ref().map(|i| i.kind),
@@ -784,6 +786,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -794,6 +797,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 600_000,
@@ -854,6 +858,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
         )
     };
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn,
@@ -989,6 +994,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                 title: "Svelte Flow".into(),
                 start_index: 0,
                 end_index: 11,
+                snippet: None,
             }],
             actual_input_tokens: 1000,
             actual_output_tokens: 200,
@@ -1315,6 +1321,7 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
                 88,
                 2,
                 WorkStepKindV1::Read {
+                    verbatim: None,
                     url: "https://example.com/page".into(),
                     collection: None,
                     goal: None,
@@ -1440,6 +1447,82 @@ fn agent_admission_mints_the_plan_and_steps_commit_while_the_attempt_runs() {
 }
 
 #[test]
+fn screenshot_records_never_inherit_or_modify_account_access_and_bind_exact_origins() {
+    use zephium_core::work::sites::WorkSiteAccessV1;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&session()).unwrap();
+    let initial = create(&mut hub);
+    hub.work_document(
+        initial.profile,
+        WorkRequest::SiteAccess {
+            set: Some(("slack.com".into(), Some(WorkSiteAccessV1::Always))),
+        },
+    )
+    .unwrap();
+    let WorkReply::ScreenshotAccess(empty) = hub
+        .work_document(initial.profile, WorkRequest::ScreenshotAccess { set: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(
+        empty.is_empty(),
+        "legacy Always never becomes screenshot consent"
+    );
+    for origin in ["https://app.slack.com", "https://slack.com"] {
+        hub.work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some((origin.into(), true)),
+            },
+        )
+        .unwrap();
+    }
+    let WorkReply::SiteAccess(entries) = hub
+        .work_document(initial.profile, WorkRequest::SiteAccess { set: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].access, WorkSiteAccessV1::Always);
+    hub.work_document(
+        initial.profile,
+        WorkRequest::SiteAccess {
+            set: Some(("slack.com".into(), None)),
+        },
+    )
+    .unwrap();
+    let WorkReply::ScreenshotAccess(entries) = hub
+        .work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some(("https://app.slack.com".into(), false)),
+            },
+        )
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].origin, "https://slack.com");
+    assert!(hub
+        .work_document(
+            initial.profile,
+            WorkRequest::ScreenshotAccess {
+                set: Some(("https://slack.com/client?token=x".into(), true))
+            }
+        )
+        .is_err());
+    assert!(hub
+        .work_document(
+            ProfileId::from(999_u128),
+            WorkRequest::ScreenshotAccess { set: None }
+        )
+        .is_err());
+}
+
+#[test]
 fn site_access_is_a_bounded_sorted_profile_list() {
     use zephium_core::work::sites::*;
     let mut hub = Hub::in_memory().unwrap();
@@ -1474,6 +1557,417 @@ fn site_access_is_a_bounded_sorted_profile_list() {
         .is_err());
 }
 
+struct AgentSettlementFixture {
+    hub: Hub,
+    work: WorkSnapshot,
+    execution: WorkExecutionId,
+    attempt: WorkAttemptId,
+    node: WorkPlanNodeId,
+}
+impl AgentSettlementFixture {
+    fn new() -> Self {
+        use zephium_core::work::search::*;
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&session()).unwrap();
+        let work = create(&mut hub);
+        let WorkReply::AgentAdmitted {
+            projection,
+            receipt,
+            ..
+        } = hub
+            .work_document(
+                work.profile,
+                WorkRequest::RuntimeCommand {
+                    id: work.id,
+                    expected: work.revision,
+                    command: 100.into(),
+                    intent: WorkRuntimeIntent::BeginAgent {
+                        grant: WorkAgentGrantV1 {
+                            draft: None,
+                            lead: None,
+                            provider: WorkSearchProvider::OpenAi,
+                            model: PUBLIC_SEARCH_MODEL.into(),
+                            max_turns: 8,
+                            max_steps: 24,
+                            browse_hops: 4,
+                            folders: vec![],
+                            accounts: vec![],
+                            private: false,
+                            skill: None,
+                            search_fallback: None,
+                        },
+                        limits: WorkExecutionLimits {
+                            model_tokens: 100_000,
+                            cost_micro_usd: 100_000,
+                            operations: 32,
+                            timeout_seconds: 120,
+                            max_workers: 2,
+                        },
+                    },
+                },
+            )
+            .unwrap()
+        else {
+            panic!("admitted agent")
+        };
+        let mut fixture = Self {
+            hub,
+            work,
+            execution: receipt.execution,
+            attempt: 500.into(),
+            node: projection.work.plan.as_ref().unwrap().draft.nodes[0].id,
+        };
+        fixture
+            .update(WorkRuntimeUpdate::Begin {
+                execution: fixture.execution,
+                attempt: fixture.attempt,
+                node: fixture.node,
+            })
+            .unwrap();
+        fixture
+    }
+    fn update(&mut self, update: WorkRuntimeUpdate) -> Result<WorkReply, WorkError> {
+        let state = read_runtime(&mut self.hub, &self.work);
+        self.hub.work_document(
+            self.work.profile,
+            WorkRequest::RuntimeUpdate {
+                id: self.work.id,
+                expected: state.work.revision,
+                update,
+            },
+        )
+    }
+    fn step(
+        &mut self,
+        id: u128,
+        kind: WorkStepKindV1,
+        status: WorkStepStatus,
+        artifacts: Vec<artifact::WorkArtifactV1>,
+    ) -> Result<WorkReply, WorkError> {
+        self.update(WorkRuntimeUpdate::BeginStep {
+            execution: self.execution,
+            attempt: self.attempt,
+            step: WorkStepFact {
+                model_fault: None,
+                id: id.into(),
+                turn: 1,
+                kind,
+                status,
+                usage: None,
+                artifacts: artifacts.iter().map(|a| a.id).collect(),
+                evidence: None,
+                note: None,
+                measurements: None,
+                local: None,
+                account: None,
+                part: None,
+            },
+            artifacts,
+            evidence: None,
+            file: None,
+        })
+    }
+    fn publish(&mut self) {
+        let reply = artifact::WorkArtifactV1 {
+            version: 1,
+            id: 900.into(),
+            execution: self.execution,
+            attempt: self.attempt,
+            node: self.node,
+            output: "Result".into(),
+            title: "Exam plan".into(),
+            data: artifact::WorkArtifactDataV1::Reply {
+                headline: "Your study plan".into(),
+                text: "Review the collected course material.".into(),
+                figures: vec![],
+                points: vec![],
+            },
+            review: WorkOutputReview::SourceMappedNeedsReview,
+            presentation: artifact::WorkArtifactPresentationV1::Automatic,
+            evidence: vec![],
+            general_knowledge: true,
+            part: None,
+            revises: None,
+        };
+        self.step(
+            10,
+            WorkStepKindV1::Publish,
+            WorkStepStatus::Succeeded,
+            vec![reply],
+        )
+        .unwrap();
+    }
+    fn finish(&mut self) {
+        self.step(
+            11,
+            WorkStepKindV1::Finish {
+                followups: vec![],
+                title: None,
+            },
+            WorkStepStatus::Succeeded,
+            vec![],
+        )
+        .unwrap();
+    }
+    fn abandon(&mut self) {
+        self.hub
+            .work_document(
+                self.work.profile,
+                WorkRequest::RuntimeAbandon {
+                    id: self.work.id,
+                    execution: self.execution,
+                    attempt: self.attempt,
+                },
+            )
+            .unwrap();
+    }
+    fn fact(&mut self) -> WorkExecutionFact {
+        read_runtime(&mut self.hub, &self.work).executions.remove(0)
+    }
+}
+
+#[test]
+fn page_settlement_revisions_are_store_owned_and_follow_commit_order() {
+    let mut f = AgentSettlementFixture::new();
+    for id in [1, 2] {
+        f.step(
+            id,
+            WorkStepKindV1::Read {
+                verbatim: None,
+                url: "https://example.com/inbox".into(),
+                goal: None,
+                collection: None,
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+    }
+    let before = read_runtime(&mut f.hub, &f.work);
+    let mut forged = before.executions[0].steps[0].clone();
+    forged.id = 3.into();
+    forged.measurements = Some(WorkStepMeasurementsV1 {
+        settled_revision: WorkRevision::new(999_999),
+        ..Default::default()
+    });
+    assert!(
+        matches!(
+            f.update(WorkRuntimeUpdate::BeginStep {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: forged,
+                artifacts: vec![],
+                evidence: None,
+                file: None,
+            }),
+            Err(WorkError::Invalid)
+        ),
+        "Begin cannot invent a settlement receipt"
+    );
+    let mut assigned = Vec::new();
+    for id in [2u128, 1] {
+        let expected = read_runtime(&mut f.hub, &f.work)
+            .work
+            .revision
+            .next()
+            .unwrap();
+        f.update(WorkRuntimeUpdate::SettleStep {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: id.into(),
+            status: WorkStepStatus::Failed,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+            note: None,
+            measurements: Some(WorkStepMeasurementsV1 {
+                outcome: Some(WorkPageOutcomeV1::NeedsCheck),
+                settled_revision: WorkRevision::new(999_999),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+        let measured = f
+            .fact()
+            .steps
+            .into_iter()
+            .find(|step| step.id == id.into())
+            .unwrap()
+            .measurements
+            .unwrap();
+        assert_eq!(measured.settled_revision, Some(expected));
+        assigned.push(expected);
+    }
+    assert!(assigned[0] < assigned[1]);
+    let snapshot = read_runtime(&mut f.hub, &f.work);
+    let fact = &snapshot.executions[0];
+    assert_eq!(fact.steps[0].id, 1.into(), "Begin order remains unchanged");
+    assert!(
+        fact.steps[0].measurements.unwrap().settled_revision
+            > fact.steps[1].measurements.unwrap().settled_revision
+    );
+    for invalid in [
+        fact.approved_revision,
+        snapshot.work.revision.next().unwrap(),
+    ] {
+        let mut corrupted = fact.clone();
+        corrupted.steps[0]
+            .measurements
+            .as_mut()
+            .unwrap()
+            .settled_revision = Some(invalid);
+        assert_eq!(
+            corrupted.validate(snapshot.work.plan.as_ref().unwrap(), snapshot.work.revision),
+            Err(WorkError::Invalid)
+        );
+    }
+}
+
+#[test]
+fn worker_contention_is_capacity_and_does_not_leave_an_unsent_step() {
+    let mut f = AgentSettlementFixture::new();
+    for id in [1, 2] {
+        f.step(
+            id,
+            WorkStepKindV1::Search {
+                query: format!("CS exam topic {id}"),
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        f.step(
+            3,
+            WorkStepKindV1::Search {
+                query: "CS exam topic 3".into()
+            },
+            WorkStepStatus::Running,
+            vec![]
+        ),
+        Err(WorkError::Capacity)
+    ));
+    assert_eq!(f.fact().steps.len(), 2);
+    f.step(
+        4,
+        WorkStepKindV1::Ask {
+            prompt: "Which exam?".into(),
+            options: vec![],
+            answer: None,
+            purpose: Some(WorkAskPurposeV1::Question),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    f.abandon();
+    let fact = f.fact();
+    assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+    assert!(fact
+        .steps
+        .iter()
+        .all(|step| step.status != WorkStepStatus::Running));
+}
+
+#[test]
+fn every_persisted_lead_stage_recovers_without_losing_the_published_answer() {
+    for stage in 0..5 {
+        let mut f = AgentSettlementFixture::new();
+        if stage >= 1 {
+            f.step(
+                1,
+                WorkStepKindV1::Search {
+                    query: "CS exam topics".into(),
+                },
+                WorkStepStatus::Running,
+                vec![],
+            )
+            .unwrap();
+        }
+        if stage >= 2 {
+            f.publish();
+        }
+        if stage >= 3 {
+            f.finish();
+        }
+        if stage == 4 {
+            // A malformed final accounting write must not poison recovery.
+            assert!(f
+                .update(WorkRuntimeUpdate::Settle {
+                    execution: f.execution,
+                    attempt: f.attempt,
+                    status: WorkAttemptStatus::Succeeded,
+                    usage: None,
+                    artifacts: vec![],
+                    intervention: Some(WorkInterventionV1 {
+                        kind: WorkInterventionKindV1::SignIn,
+                        origin: None
+                    })
+                })
+                .is_err());
+        }
+        f.abandon();
+        let fact = f.fact();
+        assert!(fact.status.terminal(), "stage={stage}");
+        assert!(fact
+            .steps
+            .iter()
+            .all(|step| step.status != WorkStepStatus::Running));
+        assert_eq!(fact.artifacts.len(), usize::from(stage >= 2));
+        if stage >= 3 {
+            assert_eq!(fact.status, WorkExecutionStatus::NeedsReview);
+            assert_eq!(
+                fact.attempts[0].usage.unwrap().accounting,
+                WorkUsageAccounting::ConservativeReservation
+            );
+            assert!(fact.steps.last().unwrap().note.is_some());
+        } else {
+            assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+        }
+    }
+}
+
+#[test]
+fn a_published_reply_does_not_hide_an_unconfirmed_page_task() {
+    for abandon in [false, true] {
+        let mut f = AgentSettlementFixture::new();
+        f.step(
+            1,
+            WorkStepKindV1::Read {
+                verbatim: None,
+                url: "https://example.com/".into(),
+                goal: Some("Send the approved message".into()),
+                collection: None,
+            },
+            WorkStepStatus::Running,
+            vec![],
+        )
+        .unwrap();
+        f.publish();
+        f.finish();
+        if abandon {
+            f.abandon();
+        } else {
+            f.update(WorkRuntimeUpdate::Settle {
+                execution: f.execution,
+                attempt: f.attempt,
+                status: WorkAttemptStatus::Succeeded,
+                usage: Some(WorkUsage::default()),
+                artifacts: vec![],
+                intervention: None,
+            })
+            .unwrap();
+        }
+        let fact = f.fact();
+        assert_eq!(fact.status, WorkExecutionStatus::Interrupted);
+        assert_eq!(fact.steps[0].status, WorkStepStatus::OutcomeUnknown);
+        assert!(fact.attempts[0].usage.is_none());
+        assert_eq!(fact.artifacts.len(), 1);
+    }
+}
+
 #[test]
 fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     use zephium_core::work::{model::*, objects::*, parts::*, search::*};
@@ -1481,6 +1975,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     hub.save(&session()).unwrap();
     let initial = create(&mut hub);
     let grant = WorkAgentGrantV1 {
+        draft: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
         max_turns: 200,
@@ -1495,6 +1990,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
             model: "gpt-6".into(),
         }),
         skill: None,
+        search_fallback: None,
     };
     let limits = WorkExecutionLimits {
         model_tokens: 1_000_000,
@@ -1521,6 +2017,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         )
     };
     let step = |id: u128, kind, status, part: Option<WorkPartId>| WorkStepFact {
+        model_fault: None,
         id: id.into(),
         turn: 1,
         kind,
@@ -1776,6 +2273,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
     let plan = artifact::WorkArtifactDataV1::Plan {
         steps: vec![WorkPlanStepV1 {
             when: None,
+            date: None,
             title: "Fly".into(),
             detail: None,
             kind: WorkPlanStepKindV1::Travel,
@@ -1786,6 +2284,7 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         }],
         total: None,
         checkable: false,
+        calendar: false,
     };
     assert!(matches!(
         revise(&mut hub, 3, 20, plan, 10),
@@ -1807,4 +2306,324 @@ fn lead_runs_keep_parts_inputs_and_linear_revisions_across_runs() {
         run.artifacts.iter().map(|a| a.revises).collect::<Vec<_>>(),
         [Some(10.into()), Some(20.into())]
     );
+}
+
+#[test]
+fn live_draft_edit_preserves_running_agent_and_exact_user_copy() {
+    use zephium_core::resources::*;
+    let mut f = AgentSettlementFixture::new();
+    let draft_data = |body: &str| artifact::WorkArtifactDataV1::Draft {
+        destination: zephium_core::work::objects::WorkDraftDestinationV1::Email,
+        to: Some("Example colleague".into()),
+        subject: Some("Synthetic draft".into()),
+        body: body.into(),
+        target_url: None,
+    };
+    let original = artifact::WorkArtifactV1 {
+        version: 1,
+        id: 901.into(),
+        execution: f.execution,
+        attempt: f.attempt,
+        node: f.node,
+        output: "Result".into(),
+        title: "Synthetic draft".into(),
+        data: draft_data("Original agent body"),
+        review: WorkOutputReview::SourceMappedNeedsReview,
+        presentation: artifact::WorkArtifactPresentationV1::Automatic,
+        evidence: vec![],
+        general_knowledge: true,
+        part: None,
+        revises: None,
+    };
+    f.step(
+        10,
+        WorkStepKindV1::Publish,
+        WorkStepStatus::Succeeded,
+        vec![original.clone()],
+    )
+    .unwrap();
+    let before = read_runtime(&mut f.hub, &f.work);
+    let edited = f
+        .hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: before.work.revision,
+                command: 700.into(),
+                intent: WorkRuntimeIntent::EditArtifact {
+                    execution: f.execution,
+                    artifact: original.id,
+                    data: draft_data("User-edited body"),
+                    evidence: vec![],
+                },
+            },
+        )
+        .unwrap();
+    let WorkReply::RuntimeCommand { projection, .. } = edited else {
+        panic!("edited draft")
+    };
+    assert_eq!(
+        projection.executions[0].status,
+        WorkExecutionStatus::Running
+    );
+    assert_eq!(projection.executions[0].artifacts[0], original);
+    assert_eq!(
+        projection.executions[0].attempts,
+        before.executions[0].attempts
+    );
+    let user = &projection.executions[0].user_artifacts[0];
+    assert_eq!(user.edited_data, Some(draft_data("User-edited body")));
+    let revision = user.revision;
+    let copy = f.hub.resource_call(
+        f.work.profile,
+        ResourceCall::Mutate {
+            command: Box::new(ResourceCommand {
+                version: 1,
+                request_id: "copy-live-draft-0001".into(),
+                intent: ResourceIntent::PreserveArtifact {
+                    objective: f.work.id,
+                    execution: f.execution,
+                    artifact: original.id,
+                    basis: WorkObjectBasis::UserRevision { revision },
+                    title: None,
+                },
+            }),
+        },
+    );
+    let ResourceResponse::Applied { record, .. } = copy else {
+        panic!("preserved user revision: {copy:?}")
+    };
+    let ResourceContent::Object { object } = record.draft.content else {
+        panic!()
+    };
+    assert_eq!(object.data, draft_data("User-edited body"));
+    assert_eq!(
+        object.provenance.unwrap().basis,
+        WorkObjectBasis::UserRevision { revision }
+    );
+    // A later stop remains legal and does not erase the user's durable draft.
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: 701.into(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+    let stopped = read_runtime(&mut f.hub, &f.work);
+    assert_eq!(
+        stopped.executions[0].user_artifacts[0].edited_data,
+        Some(draft_data("User-edited body"))
+    );
+    assert_eq!(stopped.executions[0].artifacts[0], original);
+}
+
+#[test]
+fn an_interrupted_block_edit_remains_unknown_effect_debt() {
+    let mut f = AgentSettlementFixture::new();
+    f.step(
+        40,
+        WorkStepKindV1::EditBlock {
+            resource: "01M4K000000000000000000001".into(),
+            expected_revision: "1".into(),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: 800.into(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+    let stopped = read_runtime(&mut f.hub, &f.work);
+    let step = stopped.executions[0]
+        .steps
+        .iter()
+        .find(|s| s.id == WorkStepId::from(40))
+        .unwrap();
+    assert_eq!(step.status, WorkStepStatus::OutcomeUnknown);
+    assert!(step.has_unconfirmed_effect());
+}
+
+fn image_disclosure_read(f: &mut AgentSettlementFixture) {
+    f.step(
+        1,
+        WorkStepKindV1::Read {
+            verbatim: None,
+            url: "https://example.test/view".into(),
+            goal: None,
+            collection: None,
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+}
+fn stop_image_fixture(f: &mut AgentSettlementFixture) {
+    let current = read_runtime(&mut f.hub, &f.work);
+    f.hub
+        .work_document(
+            f.work.profile,
+            WorkRequest::RuntimeCommand {
+                id: f.work.id,
+                expected: current.work.revision,
+                command: WorkCommandId::generate(),
+                intent: WorkRuntimeIntent::Cancel {
+                    execution: f.execution,
+                    intervention: None,
+                },
+            },
+        )
+        .unwrap();
+}
+#[test]
+fn image_disclosure_mark_is_durable_before_dispatch_and_survives_stop() {
+    for mark_first in [false, true] {
+        let mut f = AgentSettlementFixture::new();
+        image_disclosure_read(&mut f);
+        let mark = WorkRuntimeUpdate::MarkImageDisclosure {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: 1.into(),
+            disclosure: WorkPageImageDisclosureV1::SiteConsent,
+        };
+        if mark_first {
+            f.update(mark.clone()).unwrap();
+        }
+        stop_image_fixture(&mut f);
+        assert!(matches!(f.update(mark), Err(WorkError::Conflict)));
+        let fact = f.fact();
+        let read = &fact.steps[0];
+        assert_ne!(read.status, WorkStepStatus::Running);
+        assert_eq!(
+            read.measurements.and_then(|m| m.image_disclosure),
+            mark_first.then_some(WorkPageImageDisclosureV1::SiteConsent)
+        );
+        assert!(
+            read.measurements
+                .is_none_or(|m| m.settled_revision.is_none()),
+            "privacy marking is not a settlement receipt"
+        );
+    }
+}
+#[test]
+fn image_disclosure_private_provenance_cannot_be_downgraded_by_public_or_missing_settlement() {
+    for measurement in [
+        None,
+        Some(WorkStepMeasurementsV1 {
+            image_disclosure: Some(WorkPageImageDisclosureV1::PublicIsolated),
+            model_tokens: 123,
+            ..Default::default()
+        }),
+    ] {
+        let mut f = AgentSettlementFixture::new();
+        image_disclosure_read(&mut f);
+        for disclosure in [
+            WorkPageImageDisclosureV1::SiteConsent,
+            WorkPageImageDisclosureV1::PublicIsolated,
+        ] {
+            f.update(WorkRuntimeUpdate::MarkImageDisclosure {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: 1.into(),
+                disclosure,
+            })
+            .unwrap();
+        }
+        f.update(WorkRuntimeUpdate::SettleStep {
+            execution: f.execution,
+            attempt: f.attempt,
+            step: 1.into(),
+            status: WorkStepStatus::Succeeded,
+            usage: Some(WorkUsage::default()),
+            artifacts: vec![],
+            evidence: None,
+            file: None,
+            note: None,
+            measurements: measurement,
+        })
+        .unwrap();
+        let fact = f.fact();
+        let measured = fact.steps[0].measurements.unwrap();
+        assert_eq!(
+            measured.image_disclosure,
+            Some(WorkPageImageDisclosureV1::SiteConsent)
+        );
+        assert_eq!(
+            measured.model_tokens,
+            measurement.map_or(0, |m| m.model_tokens)
+        );
+        assert!(measured.settled_revision.is_some());
+        assert!(matches!(
+            f.update(WorkRuntimeUpdate::MarkImageDisclosure {
+                execution: f.execution,
+                attempt: f.attempt,
+                step: 1.into(),
+                disclosure: WorkPageImageDisclosureV1::PublicIsolated
+            }),
+            Err(WorkError::Conflict)
+        ));
+    }
+}
+#[test]
+fn image_disclosure_mark_refuses_wrong_attempt_execution_profile_and_non_read() {
+    let mut f = AgentSettlementFixture::new();
+    image_disclosure_read(&mut f);
+    let mark = |execution, attempt, step| WorkRuntimeUpdate::MarkImageDisclosure {
+        execution,
+        attempt,
+        step,
+        disclosure: WorkPageImageDisclosureV1::SiteConsent,
+    };
+    assert!(f.update(mark(f.execution, 999.into(), 1.into())).is_err());
+    assert!(f.update(mark(999.into(), f.attempt, 1.into())).is_err());
+    let current = read_runtime(&mut f.hub, &f.work);
+    assert!(f
+        .hub
+        .work_document(
+            999.into(),
+            WorkRequest::RuntimeUpdate {
+                id: f.work.id,
+                expected: current.work.revision,
+                update: mark(f.execution, f.attempt, 1.into())
+            }
+        )
+        .is_err());
+    f.step(
+        2,
+        WorkStepKindV1::Search {
+            query: "public fact".into(),
+        },
+        WorkStepStatus::Running,
+        vec![],
+    )
+    .unwrap();
+    assert!(matches!(
+        f.update(mark(f.execution, f.attempt, 2.into())),
+        Err(WorkError::Invalid)
+    ));
+    assert!(f
+        .fact()
+        .steps
+        .iter()
+        .all(|step| step.measurements.is_none()));
 }

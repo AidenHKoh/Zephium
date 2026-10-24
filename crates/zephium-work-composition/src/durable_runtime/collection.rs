@@ -19,16 +19,9 @@ impl TryFrom<&WorkBrowseCollection> for WorkBrowseCollectionSchema {
 
     fn try_from(request: &WorkBrowseCollection) -> Result<Self, Self::Error> {
         request.validate()?;
-        let mut name = SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+        let name = SemanticExtractionFieldSchema::try_text("name".into(), true, 512)
+            .and_then(SemanticExtractionFieldSchema::with_verbatim_text)
             .map_err(|_| WorkError::Invalid)?;
-        if request.max_items == 1
-            && request
-                .columns
-                .iter()
-                .any(|column| column.extraction == WorkBrowseExtraction::Verbatim)
-        {
-            name = name.with_verbatim_text().map_err(|_| WorkError::Invalid)?;
-        }
         let mut fields = vec![name];
         // A single-subject read is on that subject's own page: its subject URL
         // column is the page's own address, which the read itself can cite.
@@ -215,7 +208,7 @@ impl WorkBrowseCollectionSchema {
                 SemanticExtractionValueKind::Boolean => "boolean",
                 SemanticExtractionValueKind::Unsigned => "unsigned",
                 SemanticExtractionValueKind::TextList | SemanticExtractionValueKind::Rows => {
-                    return Err(WorkError::Invalid)
+                    return Err(WorkError::Invalid);
                 }
             };
             write!(
@@ -238,11 +231,44 @@ impl WorkBrowseCollectionSchema {
         Ok(())
     }
 
+    pub(super) fn public_candidate_records(
+        &self,
+        archive: &AgentWorkArchivedExtraction,
+    ) -> Vec<u16> {
+        let Some(ArchivedValue::Rows { items }) =
+            archive.fields().first().map(ArchivedField::value)
+        else {
+            return vec![];
+        };
+        self.candidate_rows(items)
+    }
+
+    fn candidate_rows(&self, items: &[Vec<ArchivedField>]) -> Vec<u16> {
+        items
+            .iter()
+            .take(self.max_items)
+            .enumerate()
+            .filter_map(|(index, row)| {
+                row.iter()
+                    .any(|field| {
+                        self.subject_image_fields
+                            .iter()
+                            .any(|name| name == field.name())
+                            && matches!(field.value(), ArchivedValue::ImageUrl { value, .. }
+                    if zephium_core::work::media::is_public_image_candidate(value))
+                    })
+                    .then_some(index as u16)
+            })
+            .collect()
+    }
+
     pub(super) fn artifact(
         &self,
         profile: zephium_core::ids::ProfileId,
         output: &str,
         archive: &AgentWorkArchivedExtraction,
+        media: Option<&[zephium_core::work::media::WorkRecordMediaRefV1]>,
+        public_fallback: &[u16],
     ) -> Result<WorkArtifactDraft, WorkError> {
         if archive.descriptor().profile() != profile
             || archive.fields().len() != 1
@@ -256,196 +282,70 @@ impl WorkBrowseCollectionSchema {
         if items.is_empty() {
             return Err(WorkError::Unavailable);
         }
-        if items.len() > self.max_items {
-            return Err(WorkError::Capacity);
-        }
-        let extraction_id = zephium_core::work::WorkArtifactId::from(u128::from_be_bytes(
-            archive.descriptor().id(),
-        ));
-        let mut evidence = Vec::<WorkEvidenceLink>::new();
-        let mut cite = |sources: &[u16]| -> Result<Vec<u16>, WorkError> {
-            sources
-                .iter()
-                .map(|source| {
-                    if archive.source(*source).is_none() {
-                        return Err(WorkError::Invalid);
-                    }
-                    let link = WorkEvidenceLink {
-                        extraction_id,
-                        source_id: *source,
-                    };
-                    let index = if let Some(index) = evidence.iter().position(|item| *item == link)
-                    {
-                        index
-                    } else {
-                        if evidence.len() >= MAX_ARTIFACT_EVIDENCE {
-                            return Err(WorkError::Capacity);
-                        }
-                        evidence.push(link);
-                        evidence.len() - 1
-                    };
-                    u16::try_from(index).map_err(|_| WorkError::Capacity)
-                })
-                .collect()
+        // A page that showed more than was asked for keeps the first rows.
+        let items = &items[..items.len().min(self.max_items)];
+        let mut cite = Citer {
+            archive,
+            extraction_id: zephium_core::work::WorkArtifactId::from(u128::from_be_bytes(
+                archive.descriptor().id(),
+            )),
+            evidence: Vec::new(),
         };
-        let data = self.comparison(items, &mut cite)?;
-        data.validate(evidence.len())?;
+        let data = self.comparison_media(items, &mut cite, media, public_fallback)?;
+        data.validate(cite.evidence.len())?;
         Ok(WorkArtifactDraft {
             output: output.to_owned(),
             title: self.title.clone(),
             data,
-            evidence,
+            evidence: cite.evidence,
         })
     }
 
+    #[cfg(test)]
     fn comparison(
         &self,
         items: &[Vec<ArchivedField>],
         cite: &mut impl FnMut(&[u16]) -> Result<Vec<u16>, WorkError>,
     ) -> Result<WorkArtifactDataV1, WorkError> {
+        self.comparison_media(items, &mut |sources: &[u16]| cite(sources), None, &[])
+    }
+    fn comparison_media(
+        &self,
+        items: &[Vec<ArchivedField>],
+        cite: &mut impl Cite,
+        media: Option<&[zephium_core::work::media::WorkRecordMediaRefV1]>,
+        public_fallback: &[u16],
+    ) -> Result<WorkArtifactDataV1, WorkError> {
         let mut subjects = Vec::new();
         let mut cells = Vec::new();
-        for row in items {
-            if row
-                .iter()
-                .any(|cell| !self.fields.iter().any(|field| field.name() == cell.name()))
-            {
-                return Err(WorkError::Invalid);
-            }
-            let first = row.first().ok_or(WorkError::Invalid)?;
-            if first.name() != self.fields[0].name() {
-                return Err(WorkError::Invalid);
-            }
-            let ArchivedValue::Text {
-                value: name,
-                sources,
-            } = first.value()
-            else {
-                return Err(WorkError::Invalid);
-            };
-            // One name is one subject: a repeated card keeps its first row.
-            if subjects
-                .iter()
-                .any(|subject: &WorkSubject| subject.name.trim() == name.trim())
-            {
+        let mut seen_rows = std::collections::BTreeSet::new();
+        let mut refused = None;
+        for (record, row) in items.iter().enumerate() {
+            // A display name is not an identity (stays and product variants
+            // often share one). Only the exact values and their citations dedup.
+            let identity = serde_json::to_vec(row).map_err(|_| WorkError::Invalid)?;
+            if !seen_rows.insert(identity) {
                 continue;
             }
-            let name_evidence = cite(sources)?;
-            subjects.push(WorkSubject {
-                name: name.clone(),
-                descriptor: None,
-                homepage: None,
-                image_candidates: vec![],
-            });
-            let mut row_cells = Vec::new();
-            // Include identity evidence in each cell: it binds the value to its subject.
-            for field in self.fields.iter().skip(1) {
-                if !self.visible(field) {
-                    match row
-                        .iter()
-                        .find(|cell| cell.name() == field.name())
-                        .map(ArchivedField::value)
-                    {
-                        Some(ArchivedValue::ImageUrl { value, .. }) => subjects
-                            .last_mut()
-                            .ok_or(WorkError::Invalid)?
-                            .image_candidates
-                            .push(value.clone()),
-                        None => {}
-                        Some(_) => return Err(WorkError::Invalid),
-                    }
-                    continue;
+            // One row that breaks its shape or overflows the evidence leaves
+            // only itself out; the rows read before it still stand.
+            let mark = cite.mark();
+            match self.record(record, row, cite, media, public_fallback) {
+                Ok((subject, row_cells)) => {
+                    subjects.push(subject);
+                    cells.push(row_cells);
                 }
-                let mut cell_evidence = name_evidence.clone();
-                let value = match row
-                    .iter()
-                    .find(|cell| cell.name() == field.name())
-                    .map(ArchivedField::value)
-                {
-                    Some(ArchivedValue::Text { value, sources })
-                        if field.kind() == SemanticExtractionValueKind::Text =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        WorkCellValue::Text {
-                            text: value.clone(),
-                        }
+                Err(error) => {
+                    cite.rollback(mark);
+                    refused.get_or_insert(error);
+                    if error == WorkError::Capacity {
+                        break;
                     }
-                    Some(ArchivedValue::Url { value, sources })
-                        if field.kind() == SemanticExtractionValueKind::Url =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        if self.subject_url_field.as_deref() == Some(field.name()) {
-                            subjects.last_mut().ok_or(WorkError::Invalid)?.homepage =
-                                Some(value.clone());
-                        }
-                        WorkCellValue::Text {
-                            text: value.clone(),
-                        }
-                    }
-                    Some(ArchivedValue::ImageUrl { value, sources })
-                        if field.kind() == SemanticExtractionValueKind::ImageUrl =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        if self
-                            .subject_image_fields
-                            .iter()
-                            .any(|name| name == field.name())
-                        {
-                            let images = &mut subjects
-                                .last_mut()
-                                .ok_or(WorkError::Invalid)?
-                                .image_candidates;
-                            if !images.contains(value) {
-                                images.push(value.clone());
-                            }
-                        }
-                        WorkCellValue::Text {
-                            text: value.clone(),
-                        }
-                    }
-                    Some(ArchivedValue::Money {
-                        amount,
-                        currency,
-                        sources,
-                    }) if field.kind() == SemanticExtractionValueKind::Money
-                        && field
-                            .currencies()
-                            .is_some_and(|currencies| currencies.contains(currency)) =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        WorkCellValue::Money {
-                            amount: amount.clone(),
-                            currency: currency.clone(),
-                            observed_at: None,
-                        }
-                    }
-                    Some(ArchivedValue::Boolean { value, sources })
-                        if field.kind() == SemanticExtractionValueKind::Boolean =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        WorkCellValue::Presence { present: *value }
-                    }
-                    Some(ArchivedValue::Unsigned { value, sources })
-                        if field.kind() == SemanticExtractionValueKind::Unsigned =>
-                    {
-                        cell_evidence.extend(cite(sources)?);
-                        WorkCellValue::Text {
-                            text: value.to_string(),
-                        }
-                    }
-                    None if !field.required() => WorkCellValue::Unknown,
-                    _ => return Err(WorkError::Invalid),
-                };
-                cell_evidence.sort_unstable();
-                cell_evidence.dedup();
-                row_cells.push(WorkCell {
-                    value,
-                    evidence: cell_evidence,
-                    note: None,
-                    general_knowledge: false,
-                });
+                }
             }
-            cells.push(row_cells);
+        }
+        if subjects.is_empty() {
+            return Err(refused.unwrap_or(WorkError::Unavailable));
         }
         let criteria = self
             .fields
@@ -461,15 +361,313 @@ impl WorkBrowseCollectionSchema {
                 },
             })
             .collect();
+        let mut notes = vec![if subjects.len() < self.max_items {
+            format!("Work validated {} records against a limit of {}; additional matches may exist or remain unread.", subjects.len(), self.max_items)
+        } else {
+            "Observed records only; this collection does not establish complete site coverage."
+                .into()
+        }];
+        if cells
+            .iter()
+            .flatten()
+            .any(|cell| matches!(cell.value, WorkCellValue::Unknown))
+        {
+            notes.push(
+                "Some requested values were not observed; unknown cells remain empty.".into(),
+            );
+        }
         Ok(WorkArtifactDataV1::ComparisonMatrix {
             subjects,
             criteria,
             cells,
-            notes: vec![
-                "Observed records only; this collection does not establish complete site coverage."
-                    .into(),
-            ],
+            notes,
         })
+    }
+
+    fn record(
+        &self,
+        record: usize,
+        row: &[ArchivedField],
+        cite: &mut impl Cite,
+        media: Option<&[zephium_core::work::media::WorkRecordMediaRefV1]>,
+        public_fallback: &[u16],
+    ) -> Result<(WorkSubject, Vec<WorkCell>), WorkError> {
+        let withheld = media.is_some() && !public_fallback.contains(&(record as u16));
+        if row
+            .iter()
+            .any(|cell| !self.fields.iter().any(|field| field.name() == cell.name()))
+        {
+            return Err(WorkError::Invalid);
+        }
+        let first = row.first().ok_or(WorkError::Invalid)?;
+        if first.name() != self.fields[0].name() {
+            return Err(WorkError::Invalid);
+        }
+        let ArchivedValue::Text {
+            value: name,
+            sources,
+        } = first.value()
+        else {
+            return Err(WorkError::Invalid);
+        };
+        // A result the page labels only by its position (Kayak's "Result
+        // item 2") is named by its own first text; a sort tab is no record.
+        let (name, sources) = if placeholder(name) {
+            row.iter()
+                .skip(1)
+                .find_map(|cell| match cell.value() {
+                    ArchivedValue::Text { value, sources }
+                        if !interface_label(value) && value.chars().any(char::is_alphabetic) =>
+                    {
+                        Some((value, sources))
+                    }
+                    _ => None,
+                })
+                .ok_or(WorkError::Invalid)?
+        } else if interface_label(name) {
+            return Err(WorkError::Invalid);
+        } else {
+            (name, sources)
+        };
+        let name_evidence = cite.cite(sources)?;
+        let mut subject = WorkSubject {
+            name: name.clone(),
+            descriptor: None,
+            homepage: None,
+            record_media: media
+                .and_then(|media| {
+                    media
+                        .iter()
+                        .find(|media| usize::from(media.record) == record)
+                })
+                .cloned(),
+            media_attempted: withheld,
+            image_candidates: vec![],
+        };
+        let mut row_cells = Vec::new();
+        // Include identity evidence in each cell: it binds the value to its subject.
+        for field in self.fields.iter().skip(1) {
+            if !self.visible(field) {
+                match row
+                    .iter()
+                    .find(|cell| cell.name() == field.name())
+                    .map(ArchivedField::value)
+                {
+                    Some(ArchivedValue::ImageUrl { value, .. }) => {
+                        let public = !withheld
+                            && zephium_core::work::media::is_public_image_candidate(value);
+                        if public {
+                            subject.image_candidates.push(value.clone());
+                        }
+                    }
+                    None => {}
+                    Some(_) => return Err(WorkError::Invalid),
+                }
+                continue;
+            }
+            let mut cell_evidence = name_evidence.clone();
+            let value = match row
+                .iter()
+                .find(|cell| cell.name() == field.name())
+                .map(ArchivedField::value)
+            {
+                Some(ArchivedValue::Text { value, sources })
+                    if field.kind() == SemanticExtractionValueKind::Text =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    WorkCellValue::Text {
+                        text: value.clone(),
+                    }
+                }
+                Some(ArchivedValue::Url { value, sources })
+                    if field.kind() == SemanticExtractionValueKind::Url =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    if self.subject_url_field.as_deref() == Some(field.name()) {
+                        subject.homepage = Some(value.clone());
+                    }
+                    WorkCellValue::Text {
+                        text: value.clone(),
+                    }
+                }
+                Some(ArchivedValue::ImageUrl { value, sources })
+                    if field.kind() == SemanticExtractionValueKind::ImageUrl =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    if !withheld
+                        && zephium_core::work::media::is_public_image_candidate(value)
+                        && self
+                            .subject_image_fields
+                            .iter()
+                            .any(|name| name == field.name())
+                    {
+                        let images = &mut subject.image_candidates;
+                        if !images.contains(value) {
+                            images.push(value.clone());
+                        }
+                    }
+                    WorkCellValue::Text {
+                        text: value.clone(),
+                    }
+                }
+                Some(ArchivedValue::Money {
+                    amount,
+                    currency,
+                    sources,
+                }) if field.kind() == SemanticExtractionValueKind::Money
+                    && field
+                        .currencies()
+                        .is_some_and(|currencies| currencies.contains(currency)) =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    WorkCellValue::Money {
+                        amount: amount.clone(),
+                        currency: currency.clone(),
+                        observed_at: None,
+                    }
+                }
+                Some(ArchivedValue::Boolean { value, sources })
+                    if field.kind() == SemanticExtractionValueKind::Boolean =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    WorkCellValue::Presence { present: *value }
+                }
+                Some(ArchivedValue::Unsigned { value, sources })
+                    if field.kind() == SemanticExtractionValueKind::Unsigned =>
+                {
+                    cell_evidence.extend(cite.cite(sources)?);
+                    WorkCellValue::Text {
+                        text: value.to_string(),
+                    }
+                }
+                None if !field.required() => WorkCellValue::Unknown,
+                _ => return Err(WorkError::Invalid),
+            };
+            cell_evidence.sort_unstable();
+            cell_evidence.dedup();
+            row_cells.push(WorkCell {
+                value,
+                evidence: cell_evidence,
+                note: None,
+                general_knowledge: false,
+            });
+        }
+        Ok((subject, row_cells))
+    }
+}
+
+/// A sort tab, filter or heading the page shows above its results ("Best",
+/// "Cheapest"), read as if it were one of them: never a record.
+fn interface_label(name: &str) -> bool {
+    const LABELS: &[&str] = &[
+        "best",
+        "cheapest",
+        "fastest",
+        "quickest",
+        "recommended",
+        "top picks",
+        "sort by",
+        "relevance",
+        "most popular",
+        "popular",
+        "lowest price",
+        "highest rated",
+        "other sort",
+        "all results",
+        "filters",
+        "show more",
+        "load more",
+        "see all",
+        "results",
+        "sponsored",
+        "najtańsze",
+        "najlepsze",
+        "polecane",
+        "trafność",
+        "sortuj",
+    ];
+    LABELS.contains(&letters(name).as_str()) || placeholder(name)
+}
+
+/// A container's generic name for a result ("Result item 2", "Card"): the
+/// record is real, its name is not.
+fn placeholder(name: &str) -> bool {
+    const PLACEHOLDERS: &[&str] = &[
+        "result",
+        "result item",
+        "item",
+        "listing",
+        "product",
+        "card",
+        "offer",
+    ];
+    PLACEHOLDERS.contains(&letters(name).as_str())
+}
+
+fn letters(name: &str) -> String {
+    name.split(|c: char| !c.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Cites archive sources as artifact evidence; a row that does not fit is
+/// rolled back to its mark.
+pub(super) trait Cite {
+    fn cite(&mut self, sources: &[u16]) -> Result<Vec<u16>, WorkError>;
+    fn mark(&self) -> usize {
+        0
+    }
+    fn rollback(&mut self, _mark: usize) {}
+}
+
+impl<F: FnMut(&[u16]) -> Result<Vec<u16>, WorkError>> Cite for F {
+    fn cite(&mut self, sources: &[u16]) -> Result<Vec<u16>, WorkError> {
+        self(sources)
+    }
+}
+
+struct Citer<'a> {
+    archive: &'a AgentWorkArchivedExtraction,
+    extraction_id: zephium_core::work::WorkArtifactId,
+    evidence: Vec<WorkEvidenceLink>,
+}
+
+impl Cite for Citer<'_> {
+    fn cite(&mut self, sources: &[u16]) -> Result<Vec<u16>, WorkError> {
+        // A value proven by its first two sources is proven; citing every
+        // fragment would spend the artifact's evidence on a few rows.
+        sources
+            .iter()
+            .take(2)
+            .map(|source| {
+                if self.archive.source(*source).is_none() {
+                    return Err(WorkError::Invalid);
+                }
+                let link = WorkEvidenceLink {
+                    extraction_id: self.extraction_id,
+                    source_id: *source,
+                };
+                let index = match self.evidence.iter().position(|item| *item == link) {
+                    Some(index) => index,
+                    None if self.evidence.len() >= MAX_ARTIFACT_EVIDENCE => {
+                        return Err(WorkError::Capacity)
+                    }
+                    None => {
+                        self.evidence.push(link);
+                        self.evidence.len() - 1
+                    }
+                };
+                u16::try_from(index).map_err(|_| WorkError::Capacity)
+            })
+            .collect()
+    }
+    fn mark(&self) -> usize {
+        self.evidence.len()
+    }
+    fn rollback(&mut self, mark: usize) {
+        self.evidence.truncate(mark);
     }
 }
 
@@ -508,6 +706,190 @@ mod tests {
             currencies: vec!["USD".into(), "USD".into()],
         };
         assert!(WorkBrowseCollectionSchema::try_from(&invalid).is_err());
+    }
+
+    #[test]
+    fn multiple_records_copy_identity_as_well_as_requested_observed_fields() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Dated events","max_items":3,"columns":[
+                {"name":"date","required":false,"value":{"kind":"text"},"extraction":"verbatim"},
+                {"name":"url","required":true,"value":{"kind":"url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        assert!(
+            schema.fields[0].verbatim_text(),
+            "record names must retain an exact source fragment for every row"
+        );
+        assert!(schema.fields[1].verbatim_text());
+        assert_eq!(schema.fields[2].kind(), SemanticExtractionValueKind::Url);
+    }
+
+    #[test]
+    fn a_sort_tab_read_as_a_result_is_no_record() {
+        assert!(interface_label("Best"));
+        assert!(interface_label("Cheapest $1,178"));
+        assert!(interface_label("Result item 2"));
+        assert!(!interface_label("10:45 am – 9:28 pm LOT 1 stop"));
+        assert!(!interface_label("Best Western Plus Downtown"));
+    }
+
+    #[test]
+    fn a_result_named_only_by_its_position_is_named_by_its_own_text() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Flights", "max_items":4, "columns":[
+                {"name":"route","required":false,"value":{"kind":"text"}},
+                {"name":"price","required":false,"value":{"kind":"text"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            [{"name":"name","value":{"kind":"text","value":"Result item 1","sources":[1]}},
+             {"name":"route","value":{"kind":"text","value":"6:05 am – 11:45 am KLM 1 stop","sources":[2]}},
+             {"name":"price","value":{"kind":"text","value":"$1,384","sources":[3]}}],
+            [{"name":"name","value":{"kind":"text","value":"Cheapest","sources":[4]}},
+             {"name":"price","value":{"kind":"text","value":"$1,110","sources":[5]}}],
+            [{"name":"name","value":{"kind":"text","value":"Result item 3","sources":[6]}},
+             {"name":"price","value":{"kind":"text","value":"$990","sources":[7]}}]
+        ]))
+        .unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids: &[u16]| Ok(ids.to_vec()))
+            .unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!("comparison");
+        };
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].name, "6:05 am – 11:45 am KLM 1 stop");
+        assert_eq!(cells[0][0].evidence, vec![2]);
+    }
+
+    #[test]
+    fn a_row_that_breaks_or_overflows_leaves_only_itself_out() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Stays", "max_items":4, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            [{"name":"name","value":{"kind":"text","value":"Loft","sources":[1]}},
+             {"name":"price","value":{"kind":"text","value":"$90","sources":[2]}}],
+            [{"name":"name","value":{"kind":"text","value":"Studio","sources":[3]}},
+             {"name":"stray","value":{"kind":"text","value":"?","sources":[4]}}],
+            [{"name":"name","value":{"kind":"text","value":"Flat","sources":[5]}}],
+            [{"name":"name","value":{"kind":"text","value":"Room","sources":[9]}}]
+        ]))
+        .unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids: &[u16]| {
+                if ids.contains(&9) {
+                    return Err(WorkError::Capacity);
+                }
+                Ok(ids.iter().map(|id| id - 1).collect())
+            })
+            .unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix { subjects, .. } = data else {
+            panic!()
+        };
+        let names: Vec<_> = subjects.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Loft", "Flat"]);
+    }
+
+    #[test]
+    fn native_image_attempt_never_republishes_local_sources_as_remote_candidates() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Native card", "max_items":1, "columns":[
+                {"name":"description","required":true,"value":{"kind":"text"},"extraction":"verbatim"}
+            ]
+        })).unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        for url in [
+            "http://127.0.0.1/image.png",
+            "blob:https://example.test/private",
+            "https://example.test/image.png",
+        ] {
+            let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+                {"name":"name","value":{"kind":"text","value":"Wool scarf","sources":[1]}},
+                {"name":"description","value":{"kind":"text","value":"Source-backed text","sources":[2]}},
+                {"name":"image","value":{"kind":"image_url","value":url,"sources":[3]}}
+            ]])).unwrap();
+            let data = schema
+                .comparison_media(
+                    &rows,
+                    &mut |ids: &[u16]| Ok(ids.iter().map(|id| id - 1).collect()),
+                    Some(&[]),
+                    &[],
+                )
+                .unwrap();
+            data.validate(3).unwrap();
+            let WorkArtifactDataV1::ComparisonMatrix {
+                subjects, cells, ..
+            } = data
+            else {
+                panic!()
+            };
+            assert!(subjects[0].media_attempted);
+            assert!(subjects[0].image_candidates.is_empty());
+            assert!(
+                matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "Source-backed text")
+            );
+            // The older no-native path also omits an unsafe optional candidate,
+            // rather than discarding source-backed text or relaxing URL policy.
+            schema
+                .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+                .unwrap()
+                .validate(3)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn public_association_miss_keeps_validated_candidate_but_private_row_stays_withheld() {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Cards", "max_items":2, "columns":[
+                {"name":"description","required":true,"value":{"kind":"text"},"extraction":"verbatim"}
+            ]
+        })).unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([
+            [{"name":"name","value":{"kind":"text","value":"Public card","sources":[1]}},
+             {"name":"description","value":{"kind":"text","value":"Observed text","sources":[2]}},
+             {"name":"image","value":{"kind":"image_url","value":"https://cdn.example.com/a.png","sources":[3]}}],
+            [{"name":"name","value":{"kind":"text","value":"Private card","sources":[4]}},
+             {"name":"description","value":{"kind":"text","value":"Other text","sources":[5]}},
+             {"name":"image","value":{"kind":"image_url","value":"https://cdn.example.com/b.png","sources":[6]}}]
+        ])).unwrap();
+        assert_eq!(schema.candidate_rows(&rows), vec![0, 1]);
+        let data = schema
+            .comparison_media(
+                &rows,
+                &mut |ids: &[u16]| Ok(ids.iter().map(|id| id - 1).collect()),
+                Some(&[]),
+                &[0],
+            )
+            .unwrap();
+        data.validate(6).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix {
+            subjects, cells, ..
+        } = data
+        else {
+            panic!()
+        };
+        assert_eq!(
+            subjects[0].image_candidates,
+            ["https://cdn.example.com/a.png"]
+        );
+        assert!(!subjects[0].media_attempted);
+        assert!(subjects[1].image_candidates.is_empty());
+        assert!(subjects[1].media_attempted);
+        assert_eq!(cells.len(), 2);
     }
 
     #[test]
@@ -619,6 +1001,34 @@ mod tests {
             matches!(&cells[0][1].value, WorkCellValue::Text { text } if text == "https://www.lego.com/london.png")
         );
         assert_eq!(cells[0][1].evidence, [0, 1]);
+    }
+
+    #[test]
+    fn short_collection_reports_validated_count_and_missing_values_without_claiming_page_exhaustion(
+    ) {
+        let request: WorkBrowseCollection = serde_json::from_value(serde_json::json!({
+            "title":"Results", "max_items":3, "columns":[
+                {"name":"price","required":false,"value":{"kind":"text"}},
+                {"name":"url","required":true,"value":{"kind":"url"}}
+            ]
+        }))
+        .unwrap();
+        let schema = WorkBrowseCollectionSchema::try_from(&request).unwrap();
+        let rows: Vec<Vec<ArchivedField>> = serde_json::from_value(serde_json::json!([[
+            {"name":"name","value":{"kind":"text","value":"Observed item","sources":[1]}},
+            {"name":"url","value":{"kind":"url","value":"https://example.test/item?variant=2","sources":[2]}}
+        ]])).unwrap();
+        let data = schema
+            .comparison(&rows, &mut |ids| Ok(ids.iter().map(|id| id - 1).collect()))
+            .unwrap();
+        data.validate(2).unwrap();
+        let WorkArtifactDataV1::ComparisonMatrix { notes, cells, .. } = data else {
+            panic!()
+        };
+        assert!(notes[0].contains("validated 1 records against a limit of 3"));
+        assert!(notes[0].contains("additional matches may exist or remain unread"));
+        assert!(notes[1].contains("unknown cells remain empty"));
+        assert!(matches!(cells[0][0].value, WorkCellValue::Unknown));
     }
 
     #[test]
@@ -804,9 +1214,9 @@ mod tests {
     }
 
     #[test]
-    fn repeated_names_keep_their_first_row_as_one_subject() {
-        // Recorded shape: Airbnb's monthly stays page read four rows under one
-        // repeated name, and the duplicate subjects refused the whole matrix.
+    fn repeated_names_preserve_distinct_values_and_sources_but_exact_rows_dedup() {
+        // The observed Airbnb failure used repeated display names. They are
+        // separate cited listings, not permission to silently drop later rows.
         let schema = WorkBrowseCollectionSchema::try_new(
             "Observed stays".into(),
             vec![
@@ -828,6 +1238,7 @@ mod tests {
             row(" Monthly stay", 3, "$2,300"),
             row("Studio", 5, "$1,900"),
             row("Monthly stay", 7, "$2,500"),
+            row("Monthly stay", 1, "$2,100"),
         ]))
         .unwrap();
         let mut cited = Vec::new();
@@ -848,8 +1259,14 @@ mod tests {
             .iter()
             .map(|subject| subject.name.as_str())
             .collect();
-        assert_eq!(names, ["Monthly stay", "Studio"]);
+        assert_eq!(
+            names,
+            ["Monthly stay", " Monthly stay", "Studio", "Monthly stay"]
+        );
         assert!(matches!(&cells[0][0].value, WorkCellValue::Text { text } if text == "$2,100"));
-        assert_eq!(cited, [1, 2, 5, 6]);
+        assert_eq!(cited, [1, 2, 3, 4, 5, 6, 7, 8]);
+        for (row, expected) in cells.iter().zip(["$2,100", "$2,300", "$1,900", "$2,500"]) {
+            assert!(matches!(&row[0].value, WorkCellValue::Text { text } if text == expected));
+        }
     }
 }

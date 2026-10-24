@@ -84,8 +84,9 @@ step.
 - **You stay in charge.** Anything that posts, merges or changes something
   waits for your OK.
 - **Bring any model.** Use your own keys for Anthropic, OpenAI, Google Gemini,
-  DeepSeek or OpenRouter, or run a model locally through Ollama, LM Studio or
-  any OpenAI-compatible server. Keys live in your system keychain.
+  xAI, Mistral, DeepSeek, Groq, Cerebras or OpenRouter, or run a model locally
+  through Ollama, LM Studio or any OpenAI-compatible server. Keys live in your
+  system keychain. Or sign in to Zephium AI and skip the keys.
 
 Work ships with 25 skills, including trip planning, research, compare and
 choose, plan my day, fix a bug and weekly status. You can write your own.
@@ -145,7 +146,11 @@ Edge.
 - **No telemetry.** Zephium doesn't collect or send anything about how you
   browse.
 - **No account needed.** History, tasks, notes, memory and time live on your
-  device.
+  device. An account is only for Zephium AI, and until you sign in, Zephium
+  never contacts our servers.
+- **Zephium AI keeps no content.** Requests pass through to the model that
+  answers them. We count usage for your plan, never store prompts, answers or
+  pages, and never see your card.
 - **Private windows keep nothing** once they close.
 
 ## Download

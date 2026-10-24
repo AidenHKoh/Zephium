@@ -24,10 +24,43 @@ export function youtubeId(url: string): string | null {
   return id && VIDEO_ID.test(id) ? id : null;
 }
 
-/** The public thumbnail Rust admits as the link card's picture. */
+/**
+ * The poster YouTube itself serves for a video, from its image host: the one
+ * address a video link's picture is fetched from. Rust fetches it once,
+ * without cookies, and the canvas only ever draws the stored copy.
+ */
 export function youtubeThumbnail(url: string): string | null {
   const id = youtubeId(url);
   return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
+}
+
+/**
+ * A link stored with what its video page said carries the title, then the
+ * channel on the next line; as pasted it carries the bare host.
+ */
+export function splitLinkTitle(stored: string): { title: string; channel?: string } {
+  const [title = "", ...rest] = stored.split("\n");
+  const channel = rest.join(" ").trim();
+  return { title: title.trim(), ...(channel ? { channel } : {}) };
+}
+
+/** Whether a link still carries the bare host it was pasted with. */
+export function isBareTitle(stored: string, url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./u, "");
+    return stored.replace(/^www\./u, "") === host;
+  } catch {
+    return false;
+  }
+}
+
+/** Only addresses actually observed by a source are candidates. */
+export function pickCandidates(item: {
+  image_candidates?: readonly string[] | null;
+  media_attempted?: boolean;
+  url?: string | null;
+}): string[] {
+  return item.media_attempted ? [] : [...(item.image_candidates ?? [])];
 }
 
 /** The start a YouTube address asks for: `t=90`, `t=1m30s` or `start=90`, in seconds. */
@@ -54,7 +87,11 @@ function startOf(url: string): number | undefined {
 export function linkVideo(
   id: string,
   url: string,
-  { title, poster }: { title?: string; poster?: MediaView["poster"] } = {},
+  {
+    title,
+    channel,
+    poster,
+  }: { title?: string; channel?: string; poster?: MediaView["poster"] } = {},
 ): MediaView | null {
   if (!youtubeId(url)) return null;
   const start = startOf(url);
@@ -65,6 +102,7 @@ export function linkVideo(
     url,
     provider: "youtube",
     ...(title ? { title } : {}),
+    ...(title && channel ? { channel } : {}),
     ...(poster ? { poster } : {}),
     ...(start ? { startSecs: start } : {}),
   };

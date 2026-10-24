@@ -144,7 +144,6 @@ test("a decision is recorded on the element, shown on the card, and disclosed as
     session,
     tabs: [tabFixture({ id: "tab-1", title: "Keychron K2" })],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

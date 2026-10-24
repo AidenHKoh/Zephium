@@ -146,6 +146,7 @@ pub fn definitions(server: &WorkServerV1, tools: &[McpTool]) -> Vec<WorkModelToo
                 name: tool_name(&server.id, &tool.name),
                 description,
                 schema,
+                strict: false,
             }
         })
         .collect()

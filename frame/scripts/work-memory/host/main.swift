@@ -1,4 +1,5 @@
 import Cocoa
+import ScreenCaptureKit
 import WebKit
 
 // A WKWebView host on the system WebKit, as the app runs it (non-persistent data store).
@@ -80,6 +81,31 @@ final class Host: NSObject, NSApplicationDelegate {
         }
       }
       reply(names)
+    case "shot":
+      // This window's own pixels as composited, and nothing else on screen.
+      let id = CGWindowID(window.windowNumber)
+      let scale = window.backingScaleFactor
+      let size = web.bounds.size
+      Task {
+        do {
+          let content = try await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: false)
+          guard let target = content.windows.first(where: { $0.windowID == id }) else {
+            throw NSError(domain: "host", code: 1)
+          }
+          let config = SCStreamConfiguration()
+          config.width = Int(size.width * scale)
+          config.height = Int(size.height * scale)
+          let image = try await SCScreenshotManager.captureImage(
+            contentFilter: SCContentFilter(desktopIndependentWindow: target),
+            configuration: config)
+          let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+          try data?.write(to: URL(fileURLWithPath: arg))
+          DispatchQueue.main.async { self.reply(["shot": arg]) }
+        } catch {
+          DispatchQueue.main.async { self.reply(["error": "\(error)"]) }
+        }
+      }
     case "hide":
       window.miniaturize(nil)
       reply(["hidden": true])

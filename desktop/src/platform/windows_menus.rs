@@ -4,7 +4,7 @@ use tauri::WebviewWindow;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -17,11 +17,15 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const SUBCLASS: usize = 0x5a4d454e;
+// The appearance of the menu being opened, for the popup's own border.
+static MENU_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 struct Row {
     text: Vec<u16>,
     kind: MENU_ITEM_TYPE,
     previous: usize,
     position: u32,
+    /// The item's own picture, such as an extension's icon. Owned by the menu.
+    bitmap: HBITMAP,
 }
 struct Menu {
     handle: HMENU,
@@ -71,6 +75,18 @@ unsafe extern "system" fn popup_started(
         (&preference as *const windows::Win32::Graphics::Dwm::DWM_WINDOW_CORNER_PREFERENCE).cast(),
         size_of_val(&preference) as u32,
     );
+    // A hairline in the menu's own key instead of the system accent border.
+    let border = if MENU_DARK.load(std::sync::atomic::Ordering::Relaxed) {
+        rgb(64, 64, 70)
+    } else {
+        rgb(212, 212, 218)
+    };
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_BORDER_COLOR,
+        (&border as *const COLORREF).cast(),
+        size_of_val(&border) as u32,
+    );
 }
 impl Drop for Menu {
     fn drop(&mut self) {
@@ -104,9 +120,9 @@ fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
 }
 fn background(dark: bool) -> COLORREF {
     if dark {
-        rgb(35, 35, 39)
+        rgb(40, 40, 45)
     } else {
-        rgb(248, 248, 250)
+        rgb(249, 249, 251)
     }
 }
 pub fn install(window: &WebviewWindow) -> bool {
@@ -203,7 +219,7 @@ unsafe fn prepare(hwnd: HWND, handle: HMENU, dark: bool) -> Option<Menu> {
         let mut text = vec![0u16; 2048];
         let mut item = MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_FTYPE | MIIM_STRING | MIIM_DATA,
+            fMask: MIIM_FTYPE | MIIM_STRING | MIIM_DATA | MIIM_BITMAP,
             dwTypeData: PWSTR(text.as_mut_ptr()),
             cch: (text.len() - 1) as u32,
             ..Default::default()
@@ -214,11 +230,18 @@ unsafe fn prepare(hwnd: HWND, handle: HMENU, dark: bool) -> Option<Menu> {
             continue;
         }
         text.truncate(item.cch as usize);
+        // The predefined HBMMENU_* values are small integers, not bitmaps.
+        let bitmap = if (item.hbmpItem.0 as isize) > 11 {
+            item.hbmpItem
+        } else {
+            HBITMAP::default()
+        };
         let mut row = Box::new(Row {
             text,
             kind: item.fType,
             previous: item.dwItemData,
             position,
+            bitmap,
         });
         item.fMask = MIIM_FTYPE | MIIM_DATA;
         item.fType |= MFT_OWNERDRAW;
@@ -241,7 +264,9 @@ unsafe extern "system" fn procedure(
     match msg {
         WM_INITMENUPOPUP if (l.0 as usize >> 16) == 0 => {
             let handle = HMENU(w.0 as *mut _);
-            let dark = !matches!((*state).window.theme(), Ok(tauri::Theme::Light));
+            // The app's own appearance, which may differ from the system's.
+            let dark = !crate::appearance_is_light(&(*state).window);
+            MENU_DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
             // Do not retain a map entry borrow across reentrant Win32 calls.
             #[allow(clippy::map_entry)]
             if !(*state).menus.contains_key(&(handle.0 as isize)) {
@@ -261,20 +286,33 @@ unsafe extern "system" fn procedure(
                     {
                         let dc = GetDC(Some(hwnd));
                         let old = SelectObject(dc, menu.font.into());
-                        let mut bounds = RECT::default();
-                        let mut text = row.text.clone();
-                        draw_text(dc, &mut text, &mut bounds, DT_CALCRECT | DT_SINGLELINE);
+                        let tab = row.text.iter().position(|c| *c == 9);
+                        let measure_text = |text: &[u16]| {
+                            let mut bounds = RECT::default();
+                            let mut text = text.to_vec();
+                            draw_text(dc, &mut text, &mut bounds, DT_CALCRECT | DT_SINGLELINE);
+                            bounds
+                        };
+                        let label = measure_text(&row.text[..tab.unwrap_or(row.text.len())]);
+                        let hint = tab.map(|tab| measure_text(&row.text[tab + 1..]));
                         SelectObject(dc, old);
                         ReleaseDC(Some(hwnd), dc);
                         let pad = (menu.scale * 16.0).round() as u32;
                         measure.itemHeight = if row.kind.contains(MFT_SEPARATOR) {
                             (menu.scale * 9.0).round() as u32
                         } else {
-                            ((bounds.bottom - bounds.top) as u32 + pad)
+                            ((label.bottom - label.top) as u32 + pad)
                                 .max((menu.scale * 32.0).round() as u32)
                         };
-                        measure.itemWidth = (bounds.right - bounds.left).max(0) as u32
-                            + (menu.scale * 80.0).round() as u32;
+                        // Label, then a clear gap, then the shortcut, so the
+                        // two never run into each other.
+                        let hint_width = hint.map_or(0, |hint| {
+                            (hint.right - hint.left).max(0) as u32
+                                + (menu.scale * 28.0).round() as u32
+                        });
+                        measure.itemWidth = (label.right - label.left).max(0) as u32
+                            + hint_width
+                            + (menu.scale * 64.0).round() as u32;
                         return LRESULT(1);
                     }
                 }
@@ -352,17 +390,27 @@ unsafe fn paint(menu: &Menu, row: &Row, draw: &DRAWITEMSTRUCT) {
     let px = |v: f64| (v * menu.scale).round() as i32;
     let mut rect = draw.rcItem;
     let selected = draw.itemState.0 & ODS_SELECTED.0 != 0;
-    if selected {
+    if selected && !row.kind.contains(MFT_SEPARATOR) {
+        // A rounded plate inset from the menu's edge, as Windows 11 draws its own.
         let brush = CreateSolidBrush(if menu.dark {
-            rgb(61, 61, 66)
+            rgb(60, 60, 66)
         } else {
-            rgb(226, 226, 231)
+            rgb(230, 230, 235)
         });
-        rect.left += px(4.0);
-        rect.right -= px(4.0);
-        rect.top += px(2.0);
-        rect.bottom -= px(2.0);
-        FillRect(dc, &rect, brush);
+        let radius = px(8.0);
+        let old_brush = SelectObject(dc, brush.into());
+        let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+        let _ = RoundRect(
+            dc,
+            rect.left + px(5.0),
+            rect.top + px(2.0),
+            rect.right - px(5.0) + 1,
+            rect.bottom - px(2.0) + 1,
+            radius,
+            radius,
+        );
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
         let _ = DeleteObject(brush.into());
     }
     if row.kind.contains(MFT_SEPARATOR) {
@@ -384,14 +432,16 @@ unsafe fn paint(menu: &Menu, row: &Row, draw: &DRAWITEMSTRUCT) {
         let disabled = draw.itemState.0 & (ODS_DISABLED.0 | ODS_GRAYED.0) != 0;
         SetTextColor(
             dc,
-            if disabled {
-                rgb(135, 135, 140)
-            } else if menu.dark {
-                rgb(238, 238, 241)
-            } else {
-                rgb(30, 30, 34)
+            match (disabled, menu.dark) {
+                (true, true) => rgb(108, 108, 115),
+                (true, false) => rgb(166, 166, 172),
+                (false, true) => rgb(240, 240, 243),
+                (false, false) => rgb(28, 28, 31),
             },
         );
+        if !row.bitmap.0.is_null() {
+            draw_bitmap(dc, row.bitmap, &draw.rcItem, px(16.0), px(10.0), disabled);
+        }
         rect = draw.rcItem;
         rect.left += px(32.0);
         rect.right -= px(20.0);
@@ -411,6 +461,17 @@ unsafe fn paint(menu: &Menu, row: &Row, draw: &DRAWITEMSTRUCT) {
                 },
         );
         if let Some(tab) = tab {
+            // The shortcut is a caption on its row, a step quieter than the label.
+            if !disabled {
+                SetTextColor(
+                    dc,
+                    if menu.dark {
+                        rgb(150, 150, 158)
+                    } else {
+                        rgb(118, 118, 126)
+                    },
+                );
+            }
             let mut hint = row.text[tab + 1..].to_vec();
             draw_text(
                 dc,
@@ -429,6 +490,47 @@ unsafe fn paint(menu: &Menu, row: &Row, draw: &DRAWITEMSTRUCT) {
         }
     }
     let _ = RestoreDC(dc, saved);
+}
+
+/// Draws a 32-bit premultiplied bitmap, such as the one muda makes for an
+/// icon item, square in the row's leading column.
+unsafe fn draw_bitmap(dc: HDC, bitmap: HBITMAP, row: &RECT, size: i32, left: i32, faded: bool) {
+    let mut info = BITMAP::default();
+    if GetObjectW(
+        bitmap.into(),
+        size_of::<BITMAP>() as i32,
+        Some((&mut info as *mut BITMAP).cast()),
+    ) == 0
+        || info.bmBitsPixel != 32
+    {
+        return;
+    }
+    let source = CreateCompatibleDC(Some(dc));
+    if source.0.is_null() {
+        return;
+    }
+    let old = SelectObject(source, bitmap.into());
+    let top = row.top + (row.bottom - row.top - size) / 2;
+    let _ = AlphaBlend(
+        dc,
+        row.left + left,
+        top,
+        size,
+        size,
+        source,
+        0,
+        0,
+        info.bmWidth,
+        info.bmHeight.abs(),
+        BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: if faded { 110 } else { 255 },
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        },
+    );
+    SelectObject(source, old);
+    let _ = DeleteDC(source);
 }
 
 fn mnemonic(text: &[u16]) -> Option<String> {

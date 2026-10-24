@@ -15,6 +15,8 @@ export type RunSource = {
   /** The page's newest captured frame, when the run opened it. */
   frame?: string;
   file?: { record: string; path: string };
+  /** The run's objects cite it or it was read: not just a search result passed over. Only these are listed. */
+  used?: boolean;
 };
 export type RunSources = {
   rows: RunSource[];
@@ -65,6 +67,9 @@ function addressName(url: string): string {
       ? `${words(segments.at(-2)!)} ${last}`
       : words(last.replace(/\.[a-z0-9]{2,5}$/iu, "")).replace(/(?:\s\d{3,})+$/u, "");
     if (!segment || /^\d+$/u.test(segment) || segment.length < 3) return "";
+    // A short first word is a name or a command ("gh repo fork", "npm"), not
+    // the start of a sentence: capitalizing it would misspell it.
+    if (/^[a-z0-9]{1,3}\b/u.test(segment)) return segment;
     return segment.charAt(0).toLocaleUpperCase() + segment.slice(1);
   } catch {
     return "";
@@ -160,6 +165,7 @@ export function runSources(
     const known = seen.get(at) ?? seen.get(named);
     if (known) {
       if (!known.frame && row.frame) known.frame = row.frame;
+      if (row.used) known.used = true;
       seen.set(at, known);
       return;
     }
@@ -169,7 +175,10 @@ export function runSources(
   };
   for (const run of runs)
     for (const artifact of run.artifacts)
-      for (const link of artifact.evidence ?? []) admit(resolve(run, link));
+      for (const link of artifact.evidence ?? []) {
+        const row = resolve(run, link);
+        admit(row && { ...row, used: true });
+      }
   for (const run of runs)
     for (const step of run.steps ?? []) {
       if (step.kind.kind !== "read" || step.status !== "succeeded") continue;
@@ -187,6 +196,7 @@ export function runSources(
         host,
         title: clipText(pageName(runs, url, step.id) || host, TEXT),
         ...(frame ? { frame } : {}),
+        used: true,
       });
     }
   for (const run of runs) {
@@ -202,12 +212,20 @@ export function runSources(
       if (!row.file || !LISTINGS.has(row.file.kind))
         admit(
           row.file
-            ? { key: row.key, url: "", host: row.where, title: row.title, file: row.file }
+            ? {
+                key: row.key,
+                url: "",
+                host: row.where,
+                title: row.title,
+                file: row.file,
+                used: true,
+              }
             : {
                 key: row.key,
                 url: row.url,
                 host: row.where.replace(/^www\./u, ""),
                 title: row.title,
+                used: true,
               },
         );
   }

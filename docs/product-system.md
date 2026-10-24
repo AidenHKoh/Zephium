@@ -711,8 +711,10 @@ Work merely to make the hosted option appear better.
 
 ### 6.3 Search and capability providers
 
-Prefer the chosen provider's native web search for BYOK public discovery when
-that model/API supports it. Preserve search activity, citations, provenance,
+Work searches the person's own search engine's results page in the agent
+browser and reads it with no model call (see
+[Work execution](agent-work-execution.md#web-search)); the chosen provider's
+native web search is its capped fallback. Preserve search activity, citations, provenance,
 usage, cancellation, and attribution requirements through typed adapters. Do
 not require Tavily, Firecrawl, a Zephium account, or a hosted search subscription
 for BYOK. A future hosted offering can add suitable search services.
@@ -837,9 +839,9 @@ a Zephium-owned domain boundary:
 - **Pointer Events and Svelte actions:** spatial movement and resize; native
   drag-and-drop only at OS or WebView boundaries, with no generic DnD framework
   by default;
-- **LayerChart:** the existing semantic chart renderer, lazy-loaded behind
-  bounded chart contracts. Change rendering technology only for measured needs;
-  an unused upstream style is not by itself a reason to replace working APIs;
+- **Our own SVG charts:** the semantic chart renderer in `shared/ui/data/Chart`,
+  lazy-loaded behind bounded chart contracts, with no charting dependency. It
+  replaced LayerChart and d3 on measured cost: about 43 KB instead of 360 KB;
 - **TanStack Table/Virtual:** large tables and lists;
 - **MapLibre:** lazy-loaded only when a map is present;
 - **CodeMirror 6:** lazy-loaded only for editable code surfaces;

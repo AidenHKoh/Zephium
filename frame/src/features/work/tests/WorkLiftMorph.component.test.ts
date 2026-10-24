@@ -57,3 +57,33 @@ test("a lift whose card is no longer drawn opens and closes in place", async () 
   await expect.poll(() => onclose.mock.calls.length, { timeout: 2000 }).toBe(1);
   await screen.unmount();
 });
+
+test("Tab stays inside the lift, and focus goes back where it was when the lift is gone", async () => {
+  await page.viewport(1000, 760);
+  const opener = document.createElement("button");
+  opener.textContent = "Opener";
+  document.body.append(opener);
+  opener.focus();
+  const screen = await render(Lift, {
+    origin: null,
+    bounds: new DOMRect(0, 0, 1000, 760),
+    title: "Plan",
+    onclose: vi.fn(),
+    children: createRawSnippet(() => ({ render: () => "<p><button>Make tasks</button></p>" })),
+  });
+  await expect.element(screen.getByRole("dialog", { name: "Plan" })).toHaveFocus();
+  const close = screen.getByRole("button", { name: "Back to canvas" });
+  const action = screen.getByRole("button", { name: "Make tasks" });
+  await userEvent.keyboard("{Tab}");
+  await expect.element(close).toHaveFocus();
+  await userEvent.keyboard("{Tab}");
+  await expect.element(action).toHaveFocus();
+  await userEvent.keyboard("{Tab}");
+  await expect.element(close).toHaveFocus();
+  await userEvent.keyboard("{Shift>}{Tab}{/Shift}");
+  await expect.element(action).toHaveFocus();
+  (document.activeElement as HTMLElement).blur();
+  await screen.unmount();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
+});

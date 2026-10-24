@@ -1,9 +1,10 @@
 import { duration, easing } from "$shared/lib/motion";
 
 /**
- * Reordering a list in place. The row being dragged follows the pointer and
- * the rows it passes slide aside to open its slot, all by transform, so the
- * list never lays itself out while a finger is down. Nothing is committed
+ * Reordering a list in place. The rows it passes slide aside to open a slot
+ * for the row being dragged, which waits in that slot as a placeholder while
+ * a card of it follows the pointer; all by transform, so the list never lays
+ * itself out while a finger is down. Nothing is committed
  * until the drop; then the transforms are held until the reordered list
  * arrives and hands its rows to the list's own motion, which lands each one
  * from wherever it is drawn.
@@ -19,19 +20,26 @@ export class Reorder {
   #index: number;
   #startY: number;
   #step: number;
+  #reach: number;
   #inside = false;
 
-  private constructor(slots: Slot[], from: number, startY: number, step: number) {
+  private constructor(slots: Slot[], from: number, startY: number, step: number, reach: number) {
     this.#slots = slots;
     this.#from = from;
     this.#index = from;
     this.#startY = startY;
     this.#step = step;
+    this.#reach = reach;
   }
 
   /** Starts a reorder of the direct row `key` in `list`, or declines when
    *  the row is not one the list can reorder by itself. */
-  static begin(list: HTMLElement | undefined, key: string, pointerY: number): Reorder | null {
+  static begin(
+    list: HTMLElement | undefined,
+    key: string,
+    pointerY: number,
+    region?: HTMLElement,
+  ): Reorder | null {
     if (!list) return null;
     const slots = [...list.querySelectorAll<HTMLElement>(`:scope > [${KEY}]`)]
       .filter((element) => element.getClientRects().length > 0)
@@ -44,17 +52,19 @@ export class Reorder {
         ? next.rect.top - slots[from]!.rect.top
         : slots[from]!.rect.top - next.rect.top;
     const motion = `transform ${duration("base")}ms ${easing("emphasized")}`;
-    // The dragged row's position answers the pointer directly; only its lift
+    // The dragged row steps from slot to slot with the rest; only its dimming
     // eases in.
-    const lift = ["scale", "box-shadow", "background-color"]
+    const lift = ["opacity"]
       .map((property) => `${property} ${duration("fast")}ms ${easing("out")}`)
       .join(", ");
     for (const [index, slot] of slots.entries()) {
-      slot.element.style.transition = index === from ? lift : motion;
+      slot.element.style.transition = index === from ? `${lift}, ${motion}` : motion;
     }
     const dragged = slots[from]!.element;
     dragged.dataset.lifted = "";
-    return new Reorder(slots, from, pointerY, Math.abs(step));
+    // Past the last row the list's own space still means the end of it.
+    const reach = Math.max(slots.at(-1)!.rect.bottom, region?.getBoundingClientRect().bottom ?? 0);
+    return new Reorder(slots, from, pointerY, Math.abs(step), reach);
   }
 
   /** Follows the pointer. Returns whether it is over the list, where a drop
@@ -66,7 +76,7 @@ export class Reorder {
       x >= first.left - 12 &&
       x <= first.right + 12 &&
       y >= first.top - this.#step / 2 &&
-      y <= last.bottom + this.#step / 2;
+      y <= Math.max(last.bottom + this.#step / 2, this.#reach);
     const dragged = this.#slots[this.#from]!;
     if (!inside) {
       if (this.#inside) this.#rest();
@@ -76,11 +86,12 @@ export class Reorder {
     this.#inside = true;
     dragged.element.dataset.lifted = "";
 
+    // Where the row would land if let go decides the slot; the row itself
+    // waits there.
     const travel = Math.max(
       first.top - dragged.rect.top,
       Math.min(last.top - dragged.rect.top, y - this.#startY),
     );
-    dragged.element.style.transform = `translateY(${travel}px)`;
     const centre = dragged.rect.top + dragged.rect.height / 2 + travel;
     let index = 0;
     for (const [at, slot] of this.#slots.entries()) {
@@ -89,6 +100,8 @@ export class Reorder {
       // last row's, and the end of the list must still be reachable.
       if (slot.rect.top + slot.rect.height / 2 <= centre) index += 1;
     }
+    dragged.element.style.transform =
+      index === this.#from ? "" : `translateY(${(index - this.#from) * this.#step}px)`;
     this.#index = index;
     for (const [at, slot] of this.#slots.entries()) {
       if (at === this.#from) continue;
@@ -101,6 +114,11 @@ export class Reorder {
       slot.element.style.transform = shift === 0 ? "" : `translateY(${shift}px)`;
     }
     return true;
+  }
+
+  /** The slot the dragged row would take. */
+  get slot() {
+    return this.#index;
   }
 
   /** Where the drop lands: whether anything moved, and the tab it goes before. */

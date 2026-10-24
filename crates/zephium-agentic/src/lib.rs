@@ -55,7 +55,8 @@ mod work_browser_document;
 mod work_browser_resource;
 mod work_browser_session;
 pub use work_browser_document::{
-    registrable_site, same_site as same_work_site, WorkBrowserDocumentPolicy,
+    registrable_site, same_site as same_work_site, site_scheme as work_site_scheme,
+    WorkBrowserDocumentPolicy, WorkBrowserRedirect,
 };
 pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{
@@ -63,27 +64,33 @@ pub use work_browser_resource::{
     WorkBrowserActionCompletionCallback, WorkBrowserActionCompletionOwner,
     WorkBrowserActionDeliveryCompletion, WorkBrowserActionDeliveryTicket,
     WorkBrowserActionDispatch, WorkBrowserActionEvent, WorkBrowserActionRefusal,
-    WorkBrowserActionRequest, WorkBrowserExecutionLease, WorkBrowserHistoryBackCompletionCallback,
-    WorkBrowserHistoryBackDispatch, WorkBrowserHistoryBackRequest, WorkBrowserHumanProgress,
-    WorkBrowserHumanRegion, WorkBrowserLeaseDeliveryCompletion,
-    WorkBrowserLeaseDeliveryNotification, WorkBrowserLeaseDeliveryPollError,
-    WorkBrowserLeaseDeliveryProof, WorkBrowserLeaseDeliveryReceipt,
-    WorkBrowserLeaseDeliveryRefusal, WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded,
-    WorkBrowserLeaseNativeDebt, WorkBrowserNavigationCompletion,
+    WorkBrowserActionRequest, WorkBrowserAnonymousReadAuthority, WorkBrowserAnonymousReadLoss,
+    WorkBrowserAnonymousReadStatus, WorkBrowserCropGeometry, WorkBrowserExecutionLease,
+    WorkBrowserHistoryBackCompletionCallback, WorkBrowserHistoryBackDispatch,
+    WorkBrowserHistoryBackRequest, WorkBrowserHumanCheck, WorkBrowserHumanCheckState,
+    WorkBrowserHumanProgress, WorkBrowserHumanRegion, WorkBrowserHumanTime,
+    WorkBrowserLeaseDeliveryCompletion, WorkBrowserLeaseDeliveryNotification,
+    WorkBrowserLeaseDeliveryPollError, WorkBrowserLeaseDeliveryProof,
+    WorkBrowserLeaseDeliveryReceipt, WorkBrowserLeaseDeliveryRefusal,
+    WorkBrowserLeaseDeliveryTicket, WorkBrowserLeaseEnded, WorkBrowserLeaseNativeDebt,
+    WorkBrowserMediaFetchMode, WorkBrowserMediaProgress, WorkBrowserNavigationCompletion,
     WorkBrowserNavigationCompletionCallback, WorkBrowserNavigationDispatch,
     WorkBrowserNavigationEvent, WorkBrowserNavigationPreparation, WorkBrowserNavigationRequest,
     WorkBrowserObservationCapability, WorkBrowserObservationCompletion,
     WorkBrowserObservationCompletionCallback, WorkBrowserObservationDispatch,
-    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserReadBinding,
-    WorkBrowserResourceCompletion, WorkBrowserResourceCompletionCallback,
-    WorkBrowserResourceDispatch, WorkBrowserResourceError, WorkBrowserResourceEvent,
-    WorkBrowserResourceFailure, WorkBrowserResourceHealth, WorkBrowserResourceHealthReporter,
-    WorkBrowserResourceHealthState, WorkBrowserResourceId, WorkBrowserResourceIdentity,
-    WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome, WorkBrowserResourceOperation,
-    WorkBrowserResourcePhase, WorkBrowserResourceRequest, WorkBrowserResources, WorkId,
-    MAX_WORK_HUMAN_WAIT_MILLIS,
+    WorkBrowserObservationEvent, WorkBrowserObservationRequest, WorkBrowserPublicAssetReply,
+    WorkBrowserPublicAssetRequest, WorkBrowserReadBinding, WorkBrowserRecordImage,
+    WorkBrowserRecordImageOrigin, WorkBrowserResourceCompletion,
+    WorkBrowserResourceCompletionCallback, WorkBrowserResourceDispatch, WorkBrowserResourceError,
+    WorkBrowserResourceEvent, WorkBrowserResourceFailure, WorkBrowserResourceHealth,
+    WorkBrowserResourceHealthReporter, WorkBrowserResourceHealthState, WorkBrowserResourceId,
+    WorkBrowserResourceIdentity, WorkBrowserResourceJoin, WorkBrowserResourceNativeOutcome,
+    WorkBrowserResourceOperation, WorkBrowserResourcePhase, WorkBrowserResourceRequest,
+    WorkBrowserResources, WorkId, MAX_PUBLIC_RECORD_IMAGE_BYTES, MAX_WORK_HUMAN_WAIT_MILLIS,
 };
-pub use work_browser_session::{WeakWorkBrowserSession, WorkBrowserSession};
+pub use work_browser_session::{
+    WeakWorkBrowserSession, WorkBrowserSession, WorkBrowserSessionHumanHold,
+};
 #[cfg(feature = "probe-harness")]
 mod contract;
 #[cfg(feature = "probe-harness")]
@@ -116,6 +123,23 @@ pub use provider_transport::lead;
 #[cfg(feature = "provider-transport")]
 pub mod public_asset;
 mod semantic;
+mod semantic_media;
+#[cfg(feature = "probe-harness")]
+mod semantic_media_probe;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::youtube_oembed;
+pub use semantic_media::{
+    SemanticMediaEvidence, SemanticMediaKind, SemanticRecordMediaDiagnostics,
+    SemanticRecordMediaOutcome, SemanticRecordMediaPlan, MAX_SEMANTIC_MEDIA,
+    MAX_SEMANTIC_MEDIA_RELATIONS,
+};
+#[cfg(feature = "probe-harness")]
+pub use semantic_media_probe::{
+    set_semantic_media_name_probe, SemanticMediaNameObserver, SemanticMediaNameProbe,
+};
+mod secret_shapes;
+mod semantic_approval;
+pub use semantic_approval::SemanticApprovalBinding;
 mod semantic_action;
 mod semantic_action_batch_result;
 mod semantic_action_result;
@@ -125,22 +149,27 @@ mod semantic_execute;
 mod semantic_execute_coordinator;
 mod semantic_extract;
 mod semantic_extract_model;
+mod semantic_extract_repair;
 mod semantic_locate;
 mod semantic_locate_model;
 mod semantic_model;
 mod semantic_money;
 mod semantic_observation;
+mod semantic_person;
 #[cfg(feature = "probe-harness")]
 mod semantic_probe_evidence;
 mod semantic_read;
 mod semantic_read_model;
+mod semantic_record;
 mod semantic_runtime;
 mod semantic_screenshot;
 mod semantic_settle;
 mod semantic_settle_coordinator;
+mod semantic_suggestion;
 mod semantic_verify;
 mod semantic_wait;
 mod semantic_wire;
+pub use secret_shapes::contains_recognized_secret;
 mod sign_in_handoff;
 
 pub use agent_action_metrics::{
@@ -219,14 +248,22 @@ pub use agent_progress_metrics::{
 };
 #[cfg(test)]
 pub(crate) use agent_provider::AgentBrowserToolCall;
+#[cfg(feature = "provider-transport")]
+pub use agent_provider::AgentProviderModelReplyFacts;
 pub use agent_provider::AgentProviderNavigationRefusalReason;
 pub(crate) use agent_provider::AgentProviderPricedUsage;
+#[cfg(feature = "provider-transport")]
+pub(crate) use agent_provider::{
+    translate_model_client_call, AgentCommittedProviderRequest, AgentProviderContinuationSeed,
+    AgentProviderFinishedStream, AgentProviderStreamDecoder,
+};
 pub use agent_provider::{
-    AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
-    AgentBrowserSemanticQuery, AgentBrowserToolCallId, AgentBrowserToolContractError,
-    AgentBrowserToolKind, AgentBrowserToolProposal, AgentBrowserWaitCondition,
-    AgentCommittedProviderInput, AgentPreparedDiffRequest, AgentPreparedExtractionRequest,
-    AgentPreparedLocateRequest, AgentPreparedObservationRequest,
+    AgentBrowserActProposal, AgentBrowserFormBinding, AgentBrowserFormError, AgentBrowserFormFault,
+    AgentBrowserFormField, AgentBrowserFormProposal, AgentBrowserHumanReason,
+    AgentBrowserScopeProposal, AgentBrowserSemanticQuery, AgentBrowserToolCallId,
+    AgentBrowserToolContractError, AgentBrowserToolKind, AgentBrowserToolProposal,
+    AgentBrowserWaitCondition, AgentCommittedProviderInput, AgentPreparedDiffRequest,
+    AgentPreparedExtractionRequest, AgentPreparedLocateRequest, AgentPreparedObservationRequest,
     AgentPreparedReadContinuationRequest, AgentPreparedReadRequest, AgentPreparedScreenshotRequest,
     AgentProviderActionAuthority, AgentProviderActionRefusal, AgentProviderActionRefusalContext,
     AgentProviderActionRefusalKey, AgentProviderActionResolution,
@@ -250,15 +287,16 @@ pub use agent_provider::{
     AgentProviderPricingProfile, AgentProviderPricingRevision, AgentProviderPricingSchedule,
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
     AgentProviderProtocolError, AgentProviderProtocolEvent,
-    AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort, AgentProviderRequest,
-    AgentProviderRequestDigest, AgentProviderRequestError, AgentProviderRequestSettlement,
-    AgentProviderResponseIdentity, AgentProviderResponseRoute, AgentProviderRetryAfter,
-    AgentProviderRetryDisposition, AgentProviderScreenshotRequestDraft,
-    AgentProviderSemanticInputStats, AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
-    AgentProviderStopReason, AgentProviderStreamBatch, AgentProviderStreamBudget,
-    AgentProviderStreamConclusion, AgentProviderStreamStats, AgentProviderTerminalFailure,
-    AgentProviderTextDelta, AgentProviderTokenRates, AgentProviderTransportInput,
-    AgentProviderUsage, AGENT_BROWSER_SNAPSHOT_ACTION_KINDS,
+    AgentProviderReadContinuationRequestDraft, AgentProviderReasoningEffort,
+    AgentProviderRejectedAction, AgentProviderRequest, AgentProviderRequestDigest,
+    AgentProviderRequestError, AgentProviderRequestSettlement, AgentProviderResponseIdentity,
+    AgentProviderResponseRoute, AgentProviderRetryAfter, AgentProviderRetryDisposition,
+    AgentProviderScreenshotRequestDraft, AgentProviderSemanticInputStats,
+    AgentProviderSettledTerminal, AgentProviderSettledToolTurn, AgentProviderStopReason,
+    AgentProviderStreamBatch, AgentProviderStreamBudget, AgentProviderStreamConclusion,
+    AgentProviderStreamStats, AgentProviderTerminalFailure, AgentProviderTextDelta,
+    AgentProviderTokenRates, AgentProviderTransportInput, AgentProviderUsage,
+    AGENT_BROWSER_SNAPSHOT_ACTION_KINDS, MAX_AGENT_BROWSER_FORM_FIELDS,
     MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES, MAX_AGENT_BROWSER_SEMANTIC_QUERY_BYTES,
     MAX_AGENT_PROVIDER_ALLOWED_EFFECTIVE_MODELS,
     MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
@@ -272,12 +310,8 @@ pub use agent_provider::{
     MAX_AGENT_PROVIDER_SSE_EVENT_BYTES, MAX_AGENT_PROVIDER_SSE_LINE_BYTES,
     MAX_AGENT_PROVIDER_STREAM_EVENTS, MAX_AGENT_PROVIDER_STREAM_WIRE_BYTES,
     MAX_AGENT_PROVIDER_TOOL_ARGUMENT_BYTES, MAX_AGENT_PROVIDER_TOOL_CALLS,
-    MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES, MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS,
-};
-#[cfg(feature = "provider-transport")]
-pub(crate) use agent_provider::{
-    AgentCommittedProviderRequest, AgentProviderContinuationSeed, AgentProviderFinishedStream,
-    AgentProviderStreamDecoder,
+    MAX_AGENT_PROVIDER_TOOL_CALL_ID_BYTES, MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES,
+    MIN_AGENT_BROWSER_SNAPSHOT_SETTLE_MILLIS,
 };
 pub use agent_supervisor::{
     AgentDelegationNode, AgentDelegationSpec, AgentDelegationTopology, AgentNodeExecution,
@@ -299,10 +333,11 @@ pub use agent_supervisor::{
     MAX_AGENT_WORK_ORCHESTRATION_TURNS,
 };
 pub use agent_work_journal::{
-    AgentWorkDebt, AgentWorkDisposition, AgentWorkHumanHandoff, AgentWorkIncarnation,
-    AgentWorkJournalCompletion, AgentWorkJournalError, AgentWorkJournalMutation,
-    AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest, AgentWorkRecord,
-    AGENT_WORK_RECORD_BYTES, MAX_DURABLE_AGENT_WORK_RUNS,
+    outstanding_agent_work_runs, remember_agent_work_record, AgentWorkDebt, AgentWorkDisposition,
+    AgentWorkHumanHandoff, AgentWorkIncarnation, AgentWorkJournalCompletion, AgentWorkJournalError,
+    AgentWorkJournalMutation, AgentWorkJournalPort, AgentWorkJournalReply, AgentWorkJournalRequest,
+    AgentWorkRecord, AGENT_WORK_RECORD_BYTES, MAX_AGENT_WORK_INVENTORY,
+    MAX_DURABLE_AGENT_WORK_RUNS, RETAINED_CLEAN_AGENT_WORK_RUNS,
 };
 #[cfg(all(
     feature = "provider-transport",
@@ -520,20 +555,22 @@ pub use semantic_execute_coordinator::{
     SemanticModelClickQualificationExecution,
 };
 pub use semantic_extract::{
-    extract_delivered_semantic_read, extract_semantic_read, SemanticExtractedBoolean,
-    SemanticExtractedField, SemanticExtractedMoney, SemanticExtractedRow, SemanticExtractedRows,
-    SemanticExtractedText, SemanticExtractedTextList, SemanticExtractedUnsigned,
-    SemanticExtractedValue, SemanticExtractionError, SemanticExtractionFieldSchema,
-    SemanticExtractionResult, SemanticExtractionSchema, SemanticExtractionSchemaError,
-    SemanticExtractionSchemaId, SemanticExtractionSource, SemanticExtractionSourceSpan,
-    SemanticExtractionStats, SemanticExtractionTrust, SemanticExtractionValueKind,
-    SemanticOwnedExtractionResult, SemanticOwnedExtractionSource, SemanticOwnedReadContent,
-    MAX_SEMANTIC_EXTRACTION_FIELDS, MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES,
-    MAX_SEMANTIC_EXTRACTION_INPUT_BYTES, MAX_SEMANTIC_EXTRACTION_LIST_ITEMS,
-    MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES, MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES,
-    MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE, MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES,
-    MAX_SEMANTIC_EXTRACTION_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES,
-    MAX_SEMANTIC_EXTRACTION_VALUES, SEMANTIC_EXTRACTION_SCHEMA_VERSION,
+    extract_delivered_semantic_read, extract_semantic_read,
+    semantic_extraction_refusal_is_retryable, semantic_extraction_refusal_note,
+    SemanticExtractedBoolean, SemanticExtractedField, SemanticExtractedMoney, SemanticExtractedRow,
+    SemanticExtractedRows, SemanticExtractedText, SemanticExtractedTextList,
+    SemanticExtractedUnsigned, SemanticExtractedValue, SemanticExtractionError,
+    SemanticExtractionFieldSchema, SemanticExtractionResult, SemanticExtractionSchema,
+    SemanticExtractionSchemaError, SemanticExtractionSchemaId, SemanticExtractionSource,
+    SemanticExtractionSourceSpan, SemanticExtractionStats, SemanticExtractionTrust,
+    SemanticExtractionValueKind, SemanticOwnedExtractionResult, SemanticOwnedExtractionSource,
+    SemanticOwnedReadContent, MAX_SEMANTIC_EXTRACTION_FIELDS,
+    MAX_SEMANTIC_EXTRACTION_FIELD_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_INPUT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_LIST_ITEMS, MAX_SEMANTIC_EXTRACTION_LIST_ITEM_BYTES,
+    MAX_SEMANTIC_EXTRACTION_SCHEMA_NAME_BYTES, MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE,
+    MAX_SEMANTIC_EXTRACTION_SOURCE_EDGES, MAX_SEMANTIC_EXTRACTION_TEXT_BYTES,
+    MAX_SEMANTIC_EXTRACTION_TOTAL_TEXT_BYTES, MAX_SEMANTIC_EXTRACTION_VALUES,
+    SEMANTIC_EXTRACTION_EMPTY_NOTE, SEMANTIC_EXTRACTION_SCHEMA_VERSION,
 };
 pub use semantic_extract_model::{
     encode_semantic_extraction_request, SemanticEncodedExtractionRequest,
@@ -563,6 +600,7 @@ pub use semantic_observation::{
     MAX_SEMANTIC_TEXT_SEARCH_BYTES, MAX_SEMANTIC_TEXT_SEARCH_QUERY_BYTES,
     MAX_SEMANTIC_TEXT_SEARCH_RESULTS,
 };
+pub use semantic_person::PersonDirectedAction;
 #[cfg(feature = "probe-harness")]
 pub use semantic_probe_evidence::{
     decode_windows_semantic_probe_response, encode_windows_semantic_probe_response,
@@ -577,17 +615,21 @@ pub use semantic_probe_evidence::{
 };
 pub use semantic_read::{
     read_selected_semantic_observation, read_semantic_observation,
-    read_semantic_observation_for_schema, SemanticCaptureInstant, SemanticReadAuthority,
+    read_semantic_observation_for_schema, read_semantic_observation_for_schema_with_viewport_image,
+    read_semantic_target, semantic_observation_needs_visual_mapping,
+    semantic_observation_reads_sparse, SemanticCaptureInstant, SemanticReadAuthority,
     SemanticReadBudget, SemanticReadBudgetError, SemanticReadContent, SemanticReadError,
     SemanticReadField, SemanticReadFragment, SemanticReadFragmentId, SemanticReadOmission,
     SemanticReadOmissions, SemanticReadProvenance, SemanticReadResult, SemanticReadRoleSelection,
     SemanticReadRoleSelectionError, SemanticReadSensitivityLimit, SemanticReadStats,
     SemanticRetainedReadEvidence, MAX_SEMANTIC_READ_BYTES, MAX_SEMANTIC_READ_ITEMS,
+    SEMANTIC_VIEWPORT_IMAGE_TEXT,
 };
 pub use semantic_read_model::{
     encode_semantic_read, SemanticEncodedRead, SemanticReadDeliveryReceipt,
     SemanticReadEncodingStats, SemanticReadModelPayload, SEMANTIC_READ_MODEL_SCHEMA_VERSION,
 };
+pub use semantic_runtime::SEMANTIC_RUNTIME_HUMAN_SURVEY;
 pub use semantic_runtime::{
     encode_semantic_action_runtime_invocation, encode_semantic_runtime_invocation,
     SemanticActionRuntimeEvidence, SemanticActionRuntimeFault, SemanticActionRuntimeInvocation,
@@ -607,14 +649,15 @@ pub use semantic_runtime::{
     SEMANTIC_RUNTIME_GLOBAL_NAME, SEMANTIC_RUNTIME_PROGRAM, SEMANTIC_RUNTIME_PROTOCOL_VERSION,
 };
 pub use semantic_screenshot::{
-    prepare_semantic_screenshot, SemanticScreenshot, SemanticScreenshotBudget,
-    SemanticScreenshotBudgetError, SemanticScreenshotCoordinator,
-    SemanticScreenshotCoordinatorError, SemanticScreenshotCoordinatorStatus,
-    SemanticScreenshotDeliveryReceipt, SemanticScreenshotError, SemanticScreenshotNativeCapture,
-    SemanticScreenshotNativeFailure, SemanticScreenshotNativeRequest,
-    SemanticScreenshotPaintEvidence, SemanticScreenshotPending, SemanticScreenshotPixelLayout,
-    SemanticScreenshotRequest, SemanticScreenshotRequestError, SemanticScreenshotRequestId,
-    SemanticScreenshotScope, SemanticScreenshotStats, SemanticScreenshotTrust,
+    prepare_semantic_screenshot, SemanticModelImageHost, SemanticModelImagePlan,
+    SemanticScreenshot, SemanticScreenshotBudget, SemanticScreenshotBudgetError,
+    SemanticScreenshotCoordinator, SemanticScreenshotCoordinatorError,
+    SemanticScreenshotCoordinatorStatus, SemanticScreenshotDeliveryReceipt,
+    SemanticScreenshotError, SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure,
+    SemanticScreenshotNativeRequest, SemanticScreenshotPaintEvidence, SemanticScreenshotPending,
+    SemanticScreenshotPixelLayout, SemanticScreenshotRequest, SemanticScreenshotRequestError,
+    SemanticScreenshotRequestId, SemanticScreenshotScope, SemanticScreenshotSource,
+    SemanticScreenshotSourcePort, SemanticScreenshotStats, SemanticScreenshotTrust,
     MAX_PENDING_SEMANTIC_SCREENSHOTS, MAX_SEMANTIC_SCREENSHOT_CAPTURE_MILLIS,
     MAX_SEMANTIC_SCREENSHOT_HEIGHT, MAX_SEMANTIC_SCREENSHOT_PIXELS,
     MAX_SEMANTIC_SCREENSHOT_PNG_BYTES, MAX_SEMANTIC_SCREENSHOT_PNG_CHUNKS,
@@ -632,6 +675,10 @@ pub use semantic_settle_coordinator::{
     SemanticActionSettlementTerminal, SemanticActionSettlementUpdate,
     MAX_PENDING_SEMANTIC_ACTION_SETTLEMENTS,
 };
+pub use semantic_suggestion::{
+    semantic_focused_text_field, semantic_picker_values, semantic_shows_value,
+    semantic_sole_choice, semantic_typed_choices,
+};
 #[cfg(test)]
 pub(crate) use semantic_verify::verify_semantic_action;
 pub use semantic_verify::{
@@ -642,8 +689,8 @@ pub use semantic_verify::{
     MAX_SEMANTIC_SCROLL_COORDINATE,
 };
 pub use semantic_wire::{
-    decode_semantic_snapshot, SemanticDecodeContext, SemanticDecodeError, MAX_SEMANTIC_WIRE_BYTES,
-    SEMANTIC_WIRE_VERSION,
+    decode_semantic_snapshot, plain_url_fragment, SemanticDecodeContext, SemanticDecodeError,
+    MAX_SEMANTIC_WIRE_BYTES, SEMANTIC_WIRE_VERSION,
 };
 pub use sign_in_handoff::{
     ContextSignInHandoff, ContextSignInHandoffBlocker, ContextSignInHandoffCleanup,
@@ -659,22 +706,34 @@ pub use provider_transport::agent::{OpenAiWorkAgent, WorkAgentWireFault};
 pub use provider_transport::decision::capture_app_views;
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::decision::{
-    app_view_control, app_view_wire, app_views, captured_app_view, read_app_view,
-    search_enough_projection, search_reuse_projection, untracked_document_address,
-    AdmittedDecisionOutput, AppView, AppViewSink, DailyApp, DecisionActionSelection,
-    DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic, DecisionCallFailure,
-    DecisionCallOutput, DecisionEnvelopeFacts, DecisionEnvelopeFailure, DecisionLocatedRead,
-    DecisionObservation, DecisionObservationAnswers, DecisionObservationFallback,
-    DecisionOperation, DecisionProjectionError, DecisionReadSelection, DecisionRowDiscovery,
-    JevDecisionClient, OpenAiDecisionCall, OpenAiDecisionClient, SearchQueryTerms,
+    app_view_control, app_view_wire, app_views, captured_app_view, native_listing_census,
+    read_app_view, read_cited_rows, search_enough_projection, search_reuse_projection,
+    untracked_document_address, AdmittedDecisionOutput, AppView, AppViewSink, DailyApp,
+    DecisionActionSelection, DecisionBackendKind, DecisionCallAccounting, DecisionCallDiagnostic,
+    DecisionCallFailure, DecisionCallOutput, DecisionEnvelopeFacts, DecisionEnvelopeFailure,
+    DecisionLocatedRead, DecisionObservation, DecisionObservationAnswers,
+    DecisionObservationFallback, DecisionOperation, DecisionProjectionError, DecisionReadSelection,
+    DecisionRowDiscovery, JevDecisionClient, ModelDecisionCall, NativeListingCensus,
+    NativeListingContinuation, OpenAiDecisionCall, OpenAiDecisionClient, SearchQueryTerms,
 };
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::decision::{read_search_page, SearchPageRead, SEARCH_PAGE_RESULTS};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::planning::{OpenAiWorkPlanner, WorkPlanningConfig};
 #[cfg(feature = "provider-transport")]
 pub use provider_transport::synthesis::OpenAiWorkSynthesizer;
 
 #[cfg(feature = "provider-transport")]
+pub use provider_transport::browser_search::{BrowserSearch, BROWSER_SEARCH_FALLBACKS};
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::model_client::AgentProviderModelClient;
+#[cfg(feature = "provider-transport")]
+pub use provider_transport::model_search::ModelNativeSearch;
+#[cfg(feature = "provider-transport")]
 pub use provider_transport::search::{
     OpenAiPublicSearch, OpenAiPublicSearchCitation, OpenAiPublicSearchConfig,
     OpenAiPublicSearchResult,
 };
+/// The provider-neutral model vocabulary a chosen-model client speaks.
+#[cfg(feature = "provider-transport")]
+pub use zephium_core::work::model as work_model;

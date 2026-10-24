@@ -33,6 +33,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     settingSet: native.settingSet,
     browserOpenUrl: native.openUrl,
     openSoftwareUpdate: native.softwareUpdate,
+    updateHighlights: async () => null,
   });
 });
 

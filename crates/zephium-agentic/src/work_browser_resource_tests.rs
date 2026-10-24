@@ -785,7 +785,7 @@ fn wrong_phase_duplicate_and_old_incarnation_receipts_cannot_reopen_resources() 
         .unwrap();
     let duplicate = WorkBrowserResourceCompletion {
         effective_document: None,
-        operation: request.operation.clone(),
+        operation: (*request.operation).clone(),
         outcome: WorkBrowserResourceNativeOutcome::Acquired,
         delivery: None,
     };
@@ -1159,4 +1159,802 @@ fn anonymous_session_attachment_requires_exact_owner_and_isolated_construction()
         )
         .unwrap();
     assert!(request.with_anonymous_session(session).is_err());
+}
+
+#[test]
+fn work_website_data_is_isolated_construction_only_and_excludes_run_storage() {
+    use std::time::{Duration, Instant};
+    let profile = ProfileId::from(2_u128);
+    let work = WorkId::from(1_u128);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let construct = |rows: &mut WorkBrowserResources, isolated| {
+        rows.construct_document_with_isolation(
+            WorkBrowserResourceId::generate(),
+            ContextId::generate(),
+            ContextProfileStorageClass::Durable,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            isolated,
+            tick(1),
+        )
+        .unwrap()
+    };
+    let mut rows = registry();
+    assert!(construct(&mut rows, false)
+        .with_work_website_data()
+        .is_err());
+    let request = construct(&mut rows, true).with_work_website_data().unwrap();
+    assert!(request.work_website_data());
+    let session = crate::WorkBrowserSession::new(profile, work, deadline);
+    let request = request.with_anonymous_session(session.clone()).unwrap_err();
+    assert!(request.anonymous_session().is_none());
+    assert!(request.with_work_website_data().is_err());
+    let sessioned = construct(&mut rows, true)
+        .with_anonymous_session(session)
+        .unwrap();
+    let refused = sessioned.with_work_website_data().unwrap_err();
+    assert!(!refused.work_website_data());
+}
+
+#[test]
+fn public_asset_retry_needs_frozen_public_isolation_not_a_cookie_free_claim() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    use crate::{
+        ContextCapabilities, ContextCapability, ContextIdentity, ContextKind, ContextOperationId,
+        ContextRegistry, ContextRunId, ContextSettlement, FrameGeneration, FrameId,
+        SemanticFrameJoin, SemanticFrameTrust, SemanticInvocationId, SemanticOrigin,
+        SemanticSnapshotGeneration,
+    };
+    for storage in [
+        ContextProfileStorageClass::Durable,
+        ContextProfileStorageClass::Ephemeral,
+    ] {
+        for isolated in [false, true] {
+            for policy in [
+                crate::WorkBrowserDocumentPolicy::PublicQueryFinalization,
+                crate::WorkBrowserDocumentPolicy::SiteSession,
+            ] {
+                for mode in [Mode::SessionOnly, Mode::PublicAssetRetry] {
+                    let mut rows = registry();
+                    let target =
+                        ContextNavigationTarget::parse("https://example.test/catalog").unwrap();
+                    let request = rows
+                        .construct_document_with_isolation(
+                            WorkBrowserResourceId::from_raw(901),
+                            ContextId::from_raw(1001),
+                            storage,
+                            target.clone(),
+                            policy,
+                            isolated,
+                            tick(0),
+                        )
+                        .unwrap();
+                    let WorkBrowserResourceEvent::Retained(resource) =
+                        rows.settle(request.complete_document(target)).unwrap()
+                    else {
+                        panic!()
+                    };
+                    let identity = ContextIdentity::new(
+                        ContextId::from_raw(1001),
+                        ContextRunId::from_raw(2),
+                        ProfileId::from(2),
+                        ContextKind::Owned,
+                    );
+                    let mut contexts = ContextRegistry::new();
+                    contexts
+                        .reserve(
+                            identity,
+                            ContextCapabilities::try_new(
+                                ContextKind::Owned,
+                                &[ContextCapability::Observe],
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                    let construction = contexts
+                        .begin_context(identity.id(), ContextOperationId::new(1).unwrap())
+                        .unwrap();
+                    contexts
+                        .settle_construction(
+                            identity.id(),
+                            construction,
+                            ContextSettlement::Applied,
+                        )
+                        .unwrap();
+                    let plan = crate::SemanticRecordMediaPlan {
+                        outcome: Default::default(),
+                        fetch_stage: Default::default(),
+                        crop: None,
+                        record: 0,
+                        source: [1; 32],
+                        frame: SemanticFrameJoin::try_new(
+                            contexts.join(identity.id()).unwrap(),
+                            FrameId::MAIN,
+                            FrameGeneration::INITIAL,
+                            SemanticOrigin::parse("https://example.test").unwrap(),
+                            SemanticFrameTrust::SameOrigin,
+                        )
+                        .unwrap(),
+                        invocation: SemanticInvocationId::new(1).unwrap(),
+                        snapshot: SemanticSnapshotGeneration::new(1).unwrap(),
+                        key: 1,
+                        name_key: 2,
+                    };
+                    let result =
+                        rows.read_record_media(&resource, vec![plan], mode, tick(1), tick(1000));
+                    let allowed = mode == Mode::SessionOnly; // No original construction proof in this legacy fixture.
+                    assert_eq!(
+                        result.is_ok(),
+                        allowed,
+                        "storage={storage:?} isolated={isolated} policy={policy:?} mode={mode:?}"
+                    );
+                    if let Ok((request, _)) = result {
+                        assert_eq!(request.media_fetch_mode(), mode);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn original_read_registry_construction_claim_is_exact_and_cannot_be_reused() {
+    let proof = anonymous::tests::proof();
+    let target = ContextNavigationTarget::parse("https://example.test/").unwrap();
+    for (profile, context, target) in [
+        (ProfileId::from(2), ContextId::from_raw(3), target.clone()),
+        (ProfileId::from(1), ContextId::from_raw(4), target.clone()),
+        (
+            ProfileId::from(1),
+            ContextId::from_raw(3),
+            ContextNavigationTarget::parse("https://example.test/other").unwrap(),
+        ),
+    ] {
+        let mut rows = WorkBrowserResources::new(WorkId::from(1), profile);
+        assert!(rows
+            .construct_document_with_original_read(
+                WorkBrowserResourceId::generate(),
+                context,
+                ContextProfileStorageClass::Ephemeral,
+                target,
+                crate::WorkBrowserDocumentPolicy::Exact,
+                true,
+                proof.clone(),
+                tick(2)
+            )
+            .is_err());
+        assert_eq!(
+            proof.status(tick(2)),
+            WorkBrowserAnonymousReadStatus::Absent
+        );
+    }
+    for storage in [
+        ContextProfileStorageClass::Ephemeral,
+        ContextProfileStorageClass::Durable,
+    ] {
+        let proof = anonymous::tests::proof();
+        let mut rows = WorkBrowserResources::new(WorkId::from(1), ProfileId::from(1));
+        let request = rows
+            .construct_document_with_original_read(
+                WorkBrowserResourceId::generate(),
+                ContextId::from_raw(3),
+                storage,
+                target.clone(),
+                crate::WorkBrowserDocumentPolicy::Exact,
+                true,
+                proof.clone(),
+                tick(2),
+            )
+            .unwrap();
+        assert_eq!(
+            proof.status(tick(2)),
+            WorkBrowserAnonymousReadStatus::Current
+        );
+        let mut other = WorkBrowserResources::new(WorkId::from(1), ProfileId::from(1));
+        assert!(other
+            .construct_document_with_original_read(
+                WorkBrowserResourceId::generate(),
+                ContextId::from_raw(3),
+                storage,
+                target.clone(),
+                crate::WorkBrowserDocumentPolicy::Exact,
+                true,
+                proof.clone(),
+                tick(2)
+            )
+            .is_err());
+        assert!(matches!(
+            rows.settle(request.complete_document(target.clone()))
+                .unwrap(),
+            WorkBrowserResourceEvent::Retained(_)
+        ));
+        drop(rows);
+        assert_eq!(
+            proof.status(tick(3)),
+            WorkBrowserAnonymousReadStatus::Closed
+        );
+    }
+}
+fn original_read_fixture() -> (
+    WorkBrowserResources,
+    WorkBrowserResourceJoin,
+    WorkBrowserAnonymousReadAuthority,
+    crate::SemanticRecordMediaPlan,
+) {
+    let proof = anonymous::tests::proof();
+    let mut rows = WorkBrowserResources::new(WorkId::from(1), ProfileId::from(1));
+    let target = ContextNavigationTarget::parse("https://example.test/").unwrap();
+    let request = rows
+        .construct_document_with_original_read(
+            WorkBrowserResourceId::generate(),
+            ContextId::from_raw(3),
+            ContextProfileStorageClass::Durable,
+            target.clone(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            true,
+            proof.clone(),
+            tick(2),
+        )
+        .unwrap();
+    let WorkBrowserResourceEvent::Retained(resource) =
+        rows.settle(request.complete_document(target)).unwrap()
+    else {
+        panic!("construction")
+    };
+    let request = rows
+        .acquire(&resource, ContextRunId::from_raw(2), tick(3), tick(80))
+        .unwrap();
+    let WorkBrowserResourceEvent::Acquired(lease) = rows
+        .settle(request.complete(WorkBrowserResourceNativeOutcome::Acquired))
+        .unwrap()
+    else {
+        panic!("lease")
+    };
+    let binding = rows.read_binding(&lease, tick(4)).unwrap();
+    let plan = crate::SemanticRecordMediaPlan {
+        outcome: Default::default(),
+        fetch_stage: Default::default(),
+        crop: None,
+        record: 0,
+        source: [1; 32],
+        frame: binding.frame().clone(),
+        invocation: crate::SemanticInvocationId::new(1).unwrap(),
+        snapshot: crate::SemanticSnapshotGeneration::new(1).unwrap(),
+        key: 1,
+        name_key: 2,
+    };
+    let revoke = rows.revoke(&lease).unwrap();
+    let _ = ended(&mut rows, revoke);
+    (rows, resource, proof, plan)
+}
+#[test]
+fn original_read_registry_retained_fetch_needs_exact_source_lease_and_no_handoff() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    let (mut rows, resource, proof, plan) = original_read_fixture();
+    assert_eq!(
+        rows.anonymous_read_status(&resource, tick(5)).unwrap(),
+        WorkBrowserAnonymousReadStatus::Current
+    );
+    let (capped, _) = rows
+        .read_record_media(
+            &resource,
+            vec![plan.clone()],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(100),
+        )
+        .unwrap();
+    assert_eq!(
+        capped.media_deadline(),
+        Some(tick(90)),
+        "media cannot extend original policy expiry"
+    );
+    let _ = rows
+        .dispatch_refused(capped, ContextPortFailure::Unsupported)
+        .unwrap();
+    let (request, _) = rows
+        .read_record_media(
+            &resource,
+            vec![plan.clone()],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    let _ = rows
+        .dispatch_refused(request, ContextPortFailure::Unsupported)
+        .unwrap();
+    let request = rows
+        .acquire(&resource, ContextRunId::from_raw(2), tick(6), tick(80))
+        .unwrap();
+    let WorkBrowserResourceEvent::Acquired(lease) = rows
+        .settle(request.complete(WorkBrowserResourceNativeOutcome::Acquired))
+        .unwrap()
+    else {
+        panic!("lease")
+    };
+    let revoke = rows.revoke(&lease).unwrap();
+    let _ = ended(&mut rows, revoke);
+    assert!(
+        rows.read_record_media(
+            &resource,
+            vec![plan],
+            Mode::PublicAssetRetry,
+            tick(7),
+            tick(80)
+        )
+        .is_err(),
+        "older same-run lease is stale"
+    );
+    assert_eq!(
+        proof.status(tick(7)),
+        WorkBrowserAnonymousReadStatus::Current
+    );
+}
+#[test]
+fn original_read_registry_every_handoff_loses_authority_and_never_revives_on_return() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for kind in 0..3 {
+        for refused in [false, true] {
+            let (mut rows, resource, proof, mut plan) = original_read_fixture();
+            let request = if kind == 0 {
+                rows.hand_over_unpresented(&resource, tick(5), tick(80))
+                    .unwrap()
+            } else {
+                rows.present_human_for(
+                    &resource,
+                    WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap(),
+                    tick(5),
+                    tick(80),
+                    kind == 2,
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                proof.status(tick(5)),
+                WorkBrowserAnonymousReadStatus::HumanHandoff
+            );
+            if refused {
+                let _ = rows
+                    .dispatch_refused(request, ContextPortFailure::Unsupported)
+                    .unwrap();
+                assert!(rows
+                    .read_record_media(
+                        &resource,
+                        vec![plan],
+                        Mode::PublicAssetRetry,
+                        tick(6),
+                        tick(80)
+                    )
+                    .is_err());
+                assert_eq!(
+                    proof.status(tick(6)),
+                    WorkBrowserAnonymousReadStatus::HumanHandoff
+                );
+                continue;
+            }
+            assert!(matches!(
+                rows.settle(request.complete(WorkBrowserResourceNativeOutcome::HumanPresented))
+                    .unwrap(),
+                WorkBrowserResourceEvent::HumanPresented(_)
+            ));
+            let request = rows.continue_after_human(&resource, tick(6)).unwrap();
+            assert!(matches!(
+                rows.settle(request.complete_human_document(
+                    ContextNavigationTarget::parse("https://example.test/").unwrap()
+                ))
+                .unwrap(),
+                WorkBrowserResourceEvent::HumanContinued(_)
+            ));
+            let request = rows
+                .acquire(&resource, ContextRunId::from_raw(2), tick(7), tick(80))
+                .unwrap();
+            let WorkBrowserResourceEvent::Acquired(lease) = rows
+                .settle(request.complete(WorkBrowserResourceNativeOutcome::Acquired))
+                .unwrap()
+            else {
+                panic!("lease")
+            };
+            plan.frame = rows.read_binding(&lease, tick(8)).unwrap().frame().clone();
+            let request = rows.revoke(&lease).unwrap();
+            let _ = ended(&mut rows, request);
+            assert!(rows
+                .read_record_media(
+                    &resource,
+                    vec![plan.clone()],
+                    Mode::PublicAssetRetry,
+                    tick(9),
+                    tick(80)
+                )
+                .is_err());
+            assert!(rows
+                .read_record_media(&resource, vec![plan], Mode::SessionOnly, tick(9), tick(80))
+                .is_ok());
+            assert_eq!(
+                proof.status(tick(9)),
+                WorkBrowserAnonymousReadStatus::HumanHandoff
+            );
+        }
+    }
+}
+#[test]
+fn original_read_registry_successor_stop_destroy_and_drop_close_shared_proof() {
+    for action in 0..5 {
+        let (mut rows, resource, proof, _) = original_read_fixture();
+        match action {
+            0 => {
+                rows.seal();
+            }
+            1 => {
+                let _request = rows.destroy(&resource).unwrap();
+            }
+            2 => {
+                rows.quarantine(&resource).unwrap();
+            }
+            3 => {
+                drop(rows);
+            }
+            _ => {
+                let _request = rows
+                    .acquire(&resource, ContextRunId::from_raw(8), tick(5), tick(80))
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            proof.status(tick(5)),
+            if action == 4 {
+                WorkBrowserAnonymousReadStatus::SuccessorRun
+            } else {
+                WorkBrowserAnonymousReadStatus::Closed
+            }
+        );
+    }
+}
+#[test]
+fn original_read_registry_refused_construction_closes_clones_without_native_receipt() {
+    let proof = anonymous::tests::proof();
+    let mut rows = WorkBrowserResources::new(WorkId::from(1), ProfileId::from(1));
+    let request = rows
+        .construct_document_with_original_read(
+            WorkBrowserResourceId::generate(),
+            ContextId::from_raw(3),
+            ContextProfileStorageClass::Ephemeral,
+            ContextNavigationTarget::parse("https://example.test/").unwrap(),
+            crate::WorkBrowserDocumentPolicy::Exact,
+            true,
+            proof.clone(),
+            tick(2),
+        )
+        .unwrap();
+    assert_eq!(
+        proof.status(tick(2)),
+        WorkBrowserAnonymousReadStatus::Current
+    );
+    let _ = rows
+        .dispatch_refused(request, ContextPortFailure::Unsupported)
+        .unwrap();
+    assert_eq!(
+        proof.status(tick(3)),
+        WorkBrowserAnonymousReadStatus::Closed
+    );
+}
+
+#[test]
+fn original_read_mode_selection_racing_revocation_or_expiry_creates_no_native_request() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for expired in [false, true] {
+        let (mut rows, resource, proof, plan) = original_read_fixture();
+        let selected = if proof.status(tick(5)) == WorkBrowserAnonymousReadStatus::Current {
+            Mode::PublicAssetRetry
+        } else {
+            Mode::SessionOnly
+        };
+        assert_eq!(selected, Mode::PublicAssetRetry);
+        if !expired {
+            proof.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff);
+        }
+        let at = if expired { 91 } else { 6 };
+        assert!(rows
+            .read_record_media(
+                &resource,
+                vec![plan.clone()],
+                selected,
+                tick(at),
+                tick(at + 8)
+            )
+            .is_err());
+        assert!(
+            rows.rows
+                .get(&resource.identity.resource)
+                .unwrap()
+                .pending
+                .is_none(),
+            "no native callback or retry owner was created"
+        );
+        assert_eq!(
+            proof.status(tick(at)),
+            if expired {
+                WorkBrowserAnonymousReadStatus::Expired
+            } else {
+                WorkBrowserAnonymousReadStatus::HumanHandoff
+            }
+        );
+        // Session-only access is a separate explicit existing operation; refusal
+        // above neither dispatches it nor invokes any legacy public asset fetch.
+        assert!(rows
+            .read_record_media(
+                &resource,
+                vec![plan],
+                Mode::SessionOnly,
+                tick(at),
+                tick(at + 8)
+            )
+            .is_ok());
+    }
+}
+
+#[test]
+fn native_media_retry_accepts_original_read_proof_on_goal_policy() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (request, _) = rows
+        .read_record_media(
+            &resource,
+            vec![plan],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    assert!(
+        !request.document_policy().is_public(),
+        "regression: goal navigation policy is not a retry grant"
+    );
+    assert!(request.media_fetch_authority_current(&resource, tick(6)));
+    assert!(
+        !request.media_fetch_authority_current(&resource, tick(80)),
+        "original media deadline remains fixed"
+    );
+}
+
+#[test]
+fn native_media_retry_rejects_wrong_resource_source_generation_and_raised_deadline() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for change in 0..5 {
+        let (mut rows, resource, _, plan) = original_read_fixture();
+        let (mut request, _) = rows
+            .read_record_media(
+                &resource,
+                vec![plan],
+                Mode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        let (_, other, _, _) = original_read_fixture();
+        assert!(!request.media_fetch_authority_current(&other, tick(6)));
+        match change {
+            0 => request.media.as_mut().unwrap().retry_authority = None,
+            1 => {
+                request
+                    .media
+                    .as_mut()
+                    .unwrap()
+                    .retry_authority
+                    .as_mut()
+                    .unwrap()
+                    .resource = other
+            }
+            2 => {
+                request
+                    .media
+                    .as_mut()
+                    .unwrap()
+                    .retry_authority
+                    .as_mut()
+                    .unwrap()
+                    .generation += 1
+            }
+            3 => request.media.as_mut().unwrap().deadline = tick(81),
+            _ => {
+                let media = request.media.as_mut().unwrap();
+                let old = media.plans[0].frame.clone();
+                let original = old.context();
+                let identity = crate::ContextIdentity::new(
+                    ContextId::from_raw(9),
+                    original.identity().owner(),
+                    ProfileId::from(1),
+                    crate::ContextKind::Owned,
+                );
+                let foreign = crate::ContextJoin::work_execution(
+                    identity,
+                    original.context_generation(),
+                    original.navigation_epoch(),
+                    original.frame_generation(),
+                );
+                media.plans[0].frame = crate::SemanticFrameJoin::try_new(
+                    foreign,
+                    crate::FrameId::MAIN,
+                    crate::FrameGeneration::INITIAL,
+                    crate::SemanticOrigin::parse("https://example.test").unwrap(),
+                    crate::SemanticFrameTrust::SameOrigin,
+                )
+                .unwrap();
+            }
+        }
+        assert!(
+            !request.media_fetch_authority_current(&resource, tick(6)),
+            "mutation {change}"
+        );
+    }
+}
+
+#[test]
+fn native_media_retry_rechecks_loss_between_native_admission_and_callback() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for reason in [
+        WorkBrowserAnonymousReadStatus::HumanHandoff,
+        WorkBrowserAnonymousReadStatus::SuccessorRun,
+        WorkBrowserAnonymousReadStatus::Closed,
+        WorkBrowserAnonymousReadStatus::PrivateDisclosure,
+    ] {
+        let (mut rows, resource, proof, plan) = original_read_fixture();
+        let (request, _) = rows
+            .read_record_media(
+                &resource,
+                vec![plan],
+                Mode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        assert!(request.media_fetch_authority_current(&resource, tick(6)));
+        proof.revoke(reason);
+        assert!(
+            !request.media_fetch_authority_current(&resource, tick(7)),
+            "loss {reason:?}"
+        );
+    }
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (request, progress) = rows
+        .read_record_media(
+            &resource,
+            vec![plan],
+            Mode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    progress.cancel();
+    assert!(!request.media_fetch_authority_current(&resource, tick(6)));
+}
+
+#[test]
+fn native_media_session_mode_cannot_be_promoted_to_retry_without_original_proof() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    let (mut rows, resource, _, plan) = original_read_fixture();
+    let (mut request, _) = rows
+        .read_record_media(&resource, vec![plan], Mode::SessionOnly, tick(5), tick(80))
+        .unwrap();
+    assert!(request.media_fetch_authority_current(&resource, tick(6)));
+    assert!(request.media.as_ref().unwrap().retry_authority.is_none());
+    request.media.as_mut().unwrap().fetch_mode = Mode::PublicAssetRetry;
+    assert!(!request.media_fetch_authority_current(&resource, tick(6)));
+}
+
+#[test]
+fn public_record_asset_exchange_is_single_use_bounded_and_original_grant_bound() {
+    use crate::WorkBrowserMediaFetchMode as Mode;
+    for mode in [Mode::SessionOnly, Mode::PublicAssetRetry] {
+        let (mut rows, resource, _proof, plan) = original_read_fixture();
+        let (_request, progress) = rows
+            .read_record_media(&resource, vec![plan.clone()], mode, tick(5), tick(80))
+            .unwrap();
+        for raw in [
+            "http://cdn.example.com/a.png",
+            "https://user:password@cdn.example.com/a.png",
+            "https://cdn.example.com/a.png?access_token=secret",
+        ] {
+            assert!(progress
+                .request_public_asset(&plan, raw, tick(6), tick(70))
+                .is_none());
+        }
+        let mut foreign = plan.clone();
+        foreign.name_key += 1;
+        assert!(progress
+            .request_public_asset(&foreign, "https://cdn.example.com/a.png", tick(6), tick(70))
+            .is_none());
+        assert!(progress
+            .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(81))
+            .is_none());
+        let reply = progress.request_public_asset(
+            &plan,
+            "https://cdn.example.com/a.png",
+            tick(6),
+            tick(70),
+        );
+        if mode == Mode::SessionOnly {
+            assert!(reply.is_none());
+            continue;
+        }
+        let reply = reply.unwrap();
+        let pending = progress.take_public_asset().unwrap();
+        assert_eq!(pending.url(), "https://cdn.example.com/a.png");
+        assert!(pending.current(tick(7)));
+        assert!(!format!("{pending:?}").contains("cdn.example.com"));
+        assert!(progress.take_public_asset().is_none());
+        assert!(progress
+            .request_public_asset(&plan, "https://cdn.example.com/b.png", tick(7), tick(70))
+            .is_none());
+        pending.complete(tick(8), Some(vec![1, 2, 3]));
+        assert_eq!(reply.poll(), Some(Some(vec![1, 2, 3])));
+    }
+}
+#[test]
+fn public_record_asset_exchange_discards_revoked_expired_cancelled_and_oversized_bytes() {
+    for fault in 0..6 {
+        let (mut rows, resource, proof, plan) = original_read_fixture();
+        let (_request, progress) = rows
+            .read_record_media(
+                &resource,
+                vec![plan.clone()],
+                crate::WorkBrowserMediaFetchMode::PublicAssetRetry,
+                tick(5),
+                tick(80),
+            )
+            .unwrap();
+        let reply = progress
+            .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(70))
+            .unwrap();
+        let pending = progress.take_public_asset().unwrap();
+        let mut at = tick(8);
+        let mut bytes = vec![1];
+        match fault {
+            0 => progress.cancel(),
+            1 => proof.revoke(WorkBrowserAnonymousReadStatus::HumanHandoff),
+            2 => at = tick(70),
+            3 => bytes = vec![1; crate::MAX_PUBLIC_RECORD_IMAGE_BYTES + 1],
+            4 => {
+                drop(pending);
+                assert_eq!(reply.poll(), Some(None));
+                continue;
+            }
+            _ => {
+                assert!(progress.finish(vec![]));
+            }
+        }
+        pending.complete(at, Some(bytes));
+        assert_eq!(reply.poll(), Some(None));
+    }
+}
+
+#[test]
+fn public_record_asset_publication_wakes_the_existing_owner_once() {
+    struct Counter(std::sync::atomic::AtomicUsize);
+    impl std::task::Wake for Counter {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (mut rows, resource, _proof, plan) = original_read_fixture();
+    let (_request, progress) = rows
+        .read_record_media(
+            &resource,
+            vec![plan.clone()],
+            crate::WorkBrowserMediaFetchMode::PublicAssetRetry,
+            tick(5),
+            tick(80),
+        )
+        .unwrap();
+    let counter = std::sync::Arc::new(Counter(std::sync::atomic::AtomicUsize::new(0)));
+    progress.set_public_asset_waker(counter.clone().into());
+    let _reply = progress
+        .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(6), tick(70))
+        .unwrap();
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(progress.take_public_asset().is_some());
+    assert!(progress
+        .request_public_asset(&plan, "https://cdn.example.com/a.png", tick(7), tick(70))
+        .is_none());
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

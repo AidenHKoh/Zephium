@@ -4,7 +4,7 @@
   import HostGlyph from "../cards/HostGlyph.svelte";
   import AskReceipt from "./AskReceipt.svelte";
   import AskShell from "./AskShell.svelte";
-  import { ASK_WORDS, registrableSite, type EntryAsk } from "./asks";
+  import { ASK_WORDS, registrableSite, siteName, type EntryAsk } from "./asks";
 
   /** The one question before the agent works in the person's session on a site. */
   let {
@@ -20,6 +20,11 @@
     onanswer: (answer: string) => void;
   } = $props();
 
+  /** Screenshot consent names the site as a person knows it; Rust keys it by exact origin. */
+  const site = $derived(ask.screenshotOrigin ? siteName(ask.host ?? ask.name) : null);
+  const title = $derived(
+    site ? m.work_ask_screenshot_title({ site }) : m.work_ask_entry_title({ name: ask.name }),
+  );
   const answered = $derived(
     ask.answer === ASK_WORDS.allow
       ? m.work_ask_allowed()
@@ -33,10 +38,10 @@
   <AskShell
     {placement}
     {busy}
-    label={m.work_ask_entry_title({ name: ask.name })}
-    note={m.work_ask_entry_note()}
+    label={title}
+    note={site ? m.work_ask_screenshot_note() : m.work_ask_entry_note()}
     where={ask.host ? registrableSite(ask.host) : ask.name}
-    title={m.work_ask_entry_title({ name: ask.name })}
+    {title}
   >
     {#snippet mark()}
       {#if ask.hosts.length > 1}<span class="marks"
@@ -49,10 +54,15 @@
       <p class="plan"><span class="label">{m.work_ask_plan()}</span>{ask.plan}</p>
     {/if}
     {#snippet actions()}
-      <Button variant="ghost" disabled={busy} onclick={() => onanswer(ASK_WORDS.notNow)}
-        >{m.work_ask_not_now()}</Button
+      <button
+        type="button"
+        class="decline"
+        disabled={busy}
+        onclick={() => onanswer(ASK_WORDS.notNow)}>{m.work_ask_not_now()}</button
       >
-      <Button disabled={busy} onclick={() => onanswer(ask.always)}>{m.work_ask_always()}</Button>
+      <Button variant="ghost" disabled={busy} onclick={() => onanswer(ask.always)}
+        >{m.work_ask_always_for({ name: site ?? ask.name })}</Button
+      >
       <Button variant="primary" pending={busy} onclick={() => onanswer(ASK_WORDS.allow)}
         >{m.work_ask_allow()}</Button
       >
@@ -62,11 +72,31 @@
   <AskReceipt
     tone={ask.answer === ASK_WORDS.notNow ? "declined" : "done"}
     status={answered}
-    text={m.work_ask_entry_receipt({ name: ask.name })}
+    text={site
+      ? m.work_ask_screenshot_receipt({ site })
+      : m.work_ask_entry_receipt({ name: ask.name })}
   />
 {/if}
 
 <style>
+  /* Declining is always there and never loud: a word, not a third button. */
+  .decline {
+    margin-inline-end: auto;
+    padding: 4px 2px;
+    border-radius: var(--radius-control);
+    color: var(--color-faint);
+    font-size: var(--text-label);
+  }
+
+  .decline:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .decline:hover:not(:disabled) {
+    color: var(--color-text);
+  }
+
   .marks {
     display: inline-flex;
     align-items: center;

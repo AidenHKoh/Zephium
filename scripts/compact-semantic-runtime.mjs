@@ -8,13 +8,27 @@ const espreeRequire = createRequire(eslintRequire.resolve("espree"));
 const { parse, tokenizer } = espreeRequire("acorn");
 
 const assets = new URL("../crates/zephium-agentic/assets/", import.meta.url);
-const source = readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");
+const source = readFileSync(new URL("semantic-record-media-v1.js", assets), "utf8") + readFileSync(new URL("semantic-pixel-privacy-v1.js", assets), "utf8") + readFileSync(new URL("semantic-runtime-v1.js", assets), "utf8");
 let end = 0;
 let compact = "";
+let previous = "";
+// Preserve every original newline for ASI. Token boundaries are conservative;
+// full parsed AST equality below is mandatory before any output is written.
+const word = (c) => /[\w$]/u.test(c);
+const operator = (c) => /[+\-*%=&|^<>!?/]/u.test(c);
+const needsSpace = (left, right) => {
+  const a = left.at(-1) || "", b = right[0] || "";
+  return (word(a) && word(b)) || (operator(a) && operator(b))
+    || (a === "/" && word(b)) || (/[0-9.]/u.test(a) && b === ".")
+    || (a === "." && /[0-9.]/u.test(b));
+};
 for (const token of tokenizer(source, { ecmaVersion: "latest" })) {
   const gap = source.slice(end, token.start);
-  compact += /\r|\n/.test(gap) ? "\n" : gap.length ? " " : "";
-  compact += source.slice(token.start, token.end);
+  const raw = source.slice(token.start, token.end);
+  compact += /\r|\n/.test(gap) ? "\n"
+    : gap.length && needsSpace(previous, raw) ? " " : "";
+  compact += raw;
+  previous = raw;
   end = token.end;
 }
 compact += "\n";

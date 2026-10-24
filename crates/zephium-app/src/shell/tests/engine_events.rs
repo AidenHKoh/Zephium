@@ -1,5 +1,59 @@
 use super::*;
 
+/// Counts the sidebar snapshots and tab deltas chrome is sent.
+fn counted_shell() -> (Shell, Arc<Mutex<(usize, usize)>>) {
+    let counts = Arc::new(Mutex::new((0, 0)));
+    let sink = counts.clone();
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        Arc::new(FakeStore::default()),
+        Arc::new(FakeChrome),
+        Box::new(move |projection| match projection {
+            Projection::Items(_) => sink.lock().unwrap().0 += 1,
+            Projection::Tab(_) => sink.lock().unwrap().1 += 1,
+            _ => {}
+        }),
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    (shell, counts)
+}
+
+#[test]
+fn a_page_repeating_its_title_costs_chrome_nothing() {
+    let (mut shell, counts) = counted_shell();
+    let id = shell.windows.focused().unwrap().active.unwrap();
+    let title = |shell: &mut Shell, title: &str| {
+        shell.handle(Command::Engine(EngineEvent::TitleChanged {
+            id,
+            title: title.into(),
+        }))
+    };
+    title(&mut shell, "Inbox (3)");
+    let after_first = counts.lock().unwrap().1;
+    title(&mut shell, "Inbox (3)");
+    title(&mut shell, "Inbox (3)");
+    assert_eq!(counts.lock().unwrap().1, after_first);
+    title(&mut shell, "Inbox (4)");
+    assert_eq!(counts.lock().unwrap().1, after_first + 1);
+}
+
+#[test]
+fn a_committed_action_that_changes_no_row_sends_no_snapshot_but_a_reload_gets_one() {
+    let (mut shell, counts) = counted_shell();
+    let id = shell.windows.focused().unwrap().active.unwrap();
+    let before = counts.lock().unwrap().0;
+    // Focusing the tab that is already focused commits, and changes nothing.
+    shell.handle(Command::Activate(id));
+    shell.handle(Command::Activate(id));
+    assert_eq!(counts.lock().unwrap().0, before);
+    // The chrome document reloaded: it asks again and is sent everything.
+    shell.handle(Command::Bootstrap);
+    assert_eq!(counts.lock().unwrap().0, before + 1);
+    shell.handle(Command::Open);
+    assert_eq!(counts.lock().unwrap().0, before + 2);
+}
+
 #[test]
 fn engine_events_fold_into_projection() {
     let (mut shell, engine, screen) = setup();

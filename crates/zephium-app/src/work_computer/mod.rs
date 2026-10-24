@@ -1,7 +1,6 @@
-//! The Computer helper: a coding agent's tools over the folders the person
-//! granted. Files resolve through `WorkFileGrant`, changes wait for the
-//! person as proposed diffs, and commands keep their approval classes from
-//! `work_commands::policy`; nothing here widens what a run may touch.
+//! Computer inspects granted files, proposes approved edits, and reviews those
+//! edits in a confined copy on qualified platforms. Qualified text-file Trash
+//! retains explicit recovery; arbitrary execution stays independently gated.
 pub mod delegate;
 pub mod diff;
 pub mod find;
@@ -54,6 +53,10 @@ pub struct ComputerDiff {
 /// Where the helper's steps go: the run that owns the part. The lead's
 /// tool-set context implements it; tests use a recorder.
 pub trait ComputerHost: Send + Sync {
+    /// Trusted owning browser profile for recovery storage; never a tool argument.
+    fn recovery_profile(&self) -> Option<String> {
+        None
+    }
     /// Records a running step on the part and returns its id.
     fn begin(
         &self,

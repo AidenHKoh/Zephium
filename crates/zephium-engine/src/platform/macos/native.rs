@@ -273,7 +273,7 @@ pub fn configure(
     partition: Partition,
     expected_ephemeral_store: Option<&super::WebsiteDataStore>,
 ) -> Result<(), String> {
-    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSColor, NSView};
+    use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSView};
 
     let wk = webkit(webview);
     let data_store = unsafe { wk.configuration().websiteDataStore() };
@@ -298,6 +298,14 @@ pub fn configure(
     // Fill the assigned region and follow window resize in AppKit's layout pass.
     view.setTranslatesAutoresizingMaskIntoConstraints(true);
     view.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
+    round_page(view, radius);
+    Ok(())
+}
+
+/// A Browse page's own edge: its corner and the hairline that keeps it
+/// readable.
+pub(crate) fn round_page(view: &objc2_app_kit::NSView, radius: f64) {
+    use objc2_app_kit::NSColor;
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(radius);
         // The window's own corners are continuous, so a circular page corner
@@ -311,8 +319,6 @@ pub fn configure(
         layer.setBorderColor(Some(&border.CGColor()));
         layer.setBorderWidth(1.0);
     }
-
-    Ok(())
 }
 
 fn validate_data_store_postcondition(

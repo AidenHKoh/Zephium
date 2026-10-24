@@ -68,7 +68,8 @@ closed!(WorkListStyleV1 {
     Todo,
     Messages,
     Reading,
-    Requirements
+    Requirements,
+    Questions
 });
 closed!(WorkListPriorityV1 { High });
 closed!(WorkSheetColumnKindV1 {
@@ -151,6 +152,12 @@ pub struct WorkPickV1 {
     /// Public HTTPS pictures of the subject itself, from its sources.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_candidates: Vec<String>,
+    /// Host-only immutable native record image; never supplied by model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// Host withheld remote fallback for privacy/account authority; not an enrichment failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
     /// A bare public host whose logo stands for the subject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_host: Option<String>,
@@ -235,6 +242,9 @@ pub struct WorkRouteV1 {
 pub struct WorkPlanStepV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// The day it falls on, `YYYY-MM-DD`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -264,6 +274,30 @@ pub struct WorkLabelledV1 {
     pub value: String,
 }
 
+/// Where a subject stands, in its service's word, and the tone it reads in.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkSubjectStateV1 {
+    pub label: String,
+    pub tone: WorkSubjectToneV1,
+}
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkSubjectToneV1 {
+    /// Open, in progress, unread.
+    Active,
+    /// Merged, resolved, done.
+    Done,
+    /// Waiting on review, on hold, draft.
+    Waiting,
+    /// Failing, blocked, changes requested.
+    Blocked,
+    /// Closed without being done, archived.
+    Closed,
+}
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -275,10 +309,21 @@ pub struct WorkListItemV1 {
     pub due: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<WorkListPriorityV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub done: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<WorkListFromV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<u16>,
+    /// Exact native collection-row evidence, independent of the prose citation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_source: Option<u16>,
+    /// Host-only immutable native image; never accepted from model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// The selected native row attempted media; no URL fallback is implied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
 }
 /// Where an item came from: the app or site, who, when, their words.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -327,6 +372,11 @@ pub struct WorkSheetRowV1 {
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkSheetEntityV1 {
+    /// Exact native row image, copied only by the host from admitted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logo_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,13 +542,14 @@ pub mod limit {
     pub const FIGURE_NOTE: usize = 40;
     pub const REPLY_POINTS: usize = 5;
     pub const REPLY_POINT: usize = 140;
-    pub const PICK_NAME: usize = 60;
+    pub const PICK_NAME: usize = 200;
     pub const PICK_SUBTITLE: usize = 80;
     pub const PICK_IMAGES: usize = 3;
-    pub const PICK_PRICE: usize = 24;
+    pub const PICK_PRICE: usize = 64;
     pub const PICK_FACTS: usize = 4;
     pub const FACT_LABEL: usize = 20;
     pub const FACT_VALUE: usize = 40;
+    pub const PICK_FACT_VALUE: usize = 120;
     pub const PICK_WHY: usize = 160;
     pub const PICK_TAGS: usize = 3;
     pub const PICK_TAG: usize = 16;
@@ -524,7 +575,7 @@ pub mod limit {
     pub const FROM_QUOTE: usize = 200;
     pub const COLUMN_LABEL: usize = 24;
     pub const COLUMN_UNIT: usize = 12;
-    pub const CELL_TEXT: usize = 60;
+    pub const CELL_TEXT: usize = 200;
     pub const CELL_DATE: usize = 32;
     pub const CELL_DURATION: usize = 16;
     pub const CELL_ENTITY: usize = 40;
@@ -543,6 +594,17 @@ pub mod limit {
     pub const DRAFT_SUBJECT: usize = 120;
     pub const MEDIA_TITLE: usize = 80;
     pub const MEDIA_DURATION: usize = 16;
+    pub const SUBJECT_NOUN: usize = 24;
+    pub const SUBJECT_REFERENCE: usize = 48;
+    pub const SUBJECT_TITLE: usize = 160;
+    pub const SUBJECT_STATE: usize = 20;
+    pub const SUBJECT_PEOPLE: usize = 4;
+    pub const SUBJECT_ROLE: usize = 20;
+    pub const SUBJECT_NAME: usize = 40;
+    pub const SUBJECT_FACTS: usize = 6;
+    pub const SUBJECT_LABELS: usize = 6;
+    pub const SUBJECT_LABEL: usize = 24;
+    pub const SUBJECT_SUMMARY: usize = 400;
     pub const DIAGRAM_NAME: usize = 28;
     pub const DIAGRAM_NOTE: usize = 60;
     pub const DIAGRAM_EDGE_LABEL: usize = 24;
@@ -706,17 +768,38 @@ fn measured(value: &str) -> WorkTextFound {
 
 /// Bytes of person-visible text one object may hold in total.
 pub const MAX_OBJECT_TEXT_BYTES: usize = 32 * 1024;
-pub(super) struct Budget(usize);
+pub(super) struct Budget {
+    used: usize,
+    /// The person's own object: a table, list or plan may stand empty while
+    /// they fill it.
+    owned: bool,
+}
 impl Budget {
     pub(super) fn new() -> Self {
-        Self(0)
+        Self {
+            used: 0,
+            owned: false,
+        }
+    }
+    pub(super) fn owned() -> Self {
+        Self {
+            used: 0,
+            owned: true,
+        }
     }
     fn add(&mut self, value: &str) -> Checked {
-        self.0 += value.len();
-        if self.0 > MAX_OBJECT_TEXT_BYTES {
+        self.used += value.len();
+        if self.used > MAX_OBJECT_TEXT_BYTES {
             return Err(fault(F::Text));
         }
         Ok(())
+    }
+    /// `count`, except that the person's own object may hold none yet.
+    fn gathered(&self, len: usize, max: usize, field: F, at: Place) -> Checked {
+        if self.owned && len == 0 {
+            return Ok(());
+        }
+        count(len, max, field, at)
     }
 }
 
@@ -950,6 +1033,14 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
             F::PickSubtitle,
             place("items[].subtitle", i),
         )?;
+        if item
+            .record_media
+            .as_ref()
+            .is_some_and(|media| media.validate().is_err())
+        {
+            return Err(place("items[].record_media", i)
+                .dropping(F::PickImages, Remove("items[].record_media")));
+        }
         extra(
             item.image_candidates.len(),
             L::PICK_IMAGES,
@@ -1015,7 +1106,7 @@ pub(super) fn check_picks(budget: &mut Budget, evidence: usize, items: &[WorkPic
             droppable(
                 budget,
                 &fact.value,
-                L::FACT_VALUE,
+                L::PICK_FACT_VALUE,
                 F::PickFacts,
                 inner("items[].facts[].value", index, sub),
                 whole,
@@ -1133,13 +1224,39 @@ pub(super) fn picks_link(items: &[WorkPickV1]) -> bool {
         .any(|item| item.url.is_some() || !item.image_candidates.is_empty())
 }
 
+/// A real day written `YYYY-MM-DD`, between 1900 and 2199.
+fn calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let number = |range: std::ops::Range<usize>| {
+        value
+            .get(range)
+            .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<u32>().ok())
+    };
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return false;
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1900..2200).contains(&year) && (1..=days).contains(&day)
+}
+
 pub(super) fn check_plan(
     budget: &mut Budget,
     evidence: usize,
     steps: &[WorkPlanStepV1],
     total: &Option<WorkLabelledV1>,
 ) -> Checked {
-    count(
+    budget.gathered(
         steps.len(),
         MAX_PLAN_STEPS,
         F::PlanSteps,
@@ -1154,6 +1271,14 @@ pub(super) fn check_plan(
             F::PlanStepWhen,
             place("steps[].when", i),
         )?;
+        if step
+            .date
+            .as_deref()
+            .is_some_and(|date| !calendar_date(date))
+        {
+            return Err(place("steps[].date", i)
+                .dropping(F::PlanStepDate, WorkFaultDrop::Remove("steps[].date")));
+        }
         line(
             budget,
             &step.title,
@@ -1220,7 +1345,7 @@ pub(super) fn check_list(
     items: &[WorkListItemV1],
 ) -> Checked {
     use WorkFaultDrop::Remove;
-    count(
+    budget.gathered(
         items.len(),
         MAX_LIST_ITEMS,
         F::ListItems,
@@ -1295,9 +1420,23 @@ pub(super) fn check_list(
             }
         }
         source(item.source, evidence, place("items[].source", i))?;
+        source(
+            item.record_source,
+            evidence,
+            place("items[].record_source", i),
+        )?;
+        if item
+            .record_media
+            .as_ref()
+            .is_some_and(|media| media.validate().is_err() || item.record_source.is_none())
+        {
+            return Err(place("items[].record_media", i)
+                .dropping(F::ListItemMedia, Remove("items[].record_media")));
+        }
     }
     Ok(())
 }
+
 pub(super) fn list_links(items: &[WorkListItemV1]) -> bool {
     items
         .iter()
@@ -1366,7 +1505,7 @@ pub(super) fn check_sheet(
             );
         }
     }
-    count(
+    budget.gathered(
         rows.len(),
         MAX_SHEET_ROWS,
         F::SheetRows,
@@ -1397,7 +1536,13 @@ pub(super) fn check_sheet(
             budget.add(cell)?;
         }
         if let Some(entity) = &row.entity {
-            if !host(&entity.logo_host) || entity.image.as_deref().is_some_and(|u| !https(u)) {
+            if !host(&entity.logo_host)
+                || entity.image.as_deref().is_some_and(|u| !https(u))
+                || entity
+                    .record_media
+                    .as_ref()
+                    .is_some_and(|media| media.validate().is_err())
+            {
                 return Err(place("rows[].entity", Some(index))
                     .dropping(F::SheetEntity, Remove("rows[].entity")));
             }
@@ -1889,6 +2034,139 @@ impl Media<'_> {
             return Err(place("start_secs", None).dropping(F::MediaDuration, Remove("start_secs")));
         }
         Ok(())
+    }
+}
+
+pub(super) struct Subject<'a> {
+    pub noun: &'a str,
+    pub reference: &'a Option<String>,
+    pub title: &'a str,
+    pub state: &'a Option<WorkSubjectStateV1>,
+    pub people: &'a [WorkLabelledV1],
+    pub facts: &'a [WorkLabelledV1],
+    pub labels: &'a [String],
+    pub summary: &'a Option<String>,
+    pub url: &'a str,
+}
+impl Subject<'_> {
+    pub(super) fn check(&self, budget: &mut Budget) -> Checked {
+        use WorkFaultDrop::Remove;
+        line(
+            budget,
+            self.noun,
+            L::SUBJECT_NOUN,
+            F::SubjectNoun,
+            place("noun", None),
+        )?;
+        optional(
+            budget,
+            self.reference,
+            L::SUBJECT_REFERENCE,
+            F::SubjectReference,
+            place("reference", None),
+        )?;
+        line(
+            budget,
+            self.title,
+            L::SUBJECT_TITLE,
+            F::SubjectTitle,
+            place("title", None),
+        )?;
+        if let Some(state) = self.state {
+            droppable(
+                budget,
+                &state.label,
+                L::SUBJECT_STATE,
+                F::SubjectState,
+                place("state", None),
+                Remove("state"),
+            )?;
+        }
+        extra(
+            self.people.len(),
+            L::SUBJECT_PEOPLE,
+            F::SubjectPeople,
+            place("people", None),
+        )?;
+        for (index, person) in self.people.iter().enumerate() {
+            let at = place("people[]", Some(index));
+            droppable(
+                budget,
+                &person.label,
+                L::SUBJECT_ROLE,
+                F::SubjectPeople,
+                at,
+                Remove(at.path),
+            )?;
+            droppable(
+                budget,
+                &person.value,
+                L::SUBJECT_NAME,
+                F::SubjectPeople,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        extra(
+            self.facts.len(),
+            L::SUBJECT_FACTS,
+            F::SubjectFacts,
+            place("facts", None),
+        )?;
+        for (index, fact) in self.facts.iter().enumerate() {
+            let at = place("facts[]", Some(index));
+            droppable(
+                budget,
+                &fact.label,
+                L::FACT_LABEL,
+                F::SubjectFacts,
+                at,
+                Remove(at.path),
+            )?;
+            droppable(
+                budget,
+                &fact.value,
+                L::FACT_VALUE,
+                F::SubjectFacts,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        extra(
+            self.labels.len(),
+            L::SUBJECT_LABELS,
+            F::SubjectLabels,
+            place("labels", None),
+        )?;
+        for (index, label) in self.labels.iter().enumerate() {
+            let at = place("labels[]", Some(index));
+            droppable(
+                budget,
+                label,
+                L::SUBJECT_LABEL,
+                F::SubjectLabels,
+                at,
+                Remove(at.path),
+            )?;
+        }
+        if let Some(summary) = self.summary {
+            if summary.trim().is_empty()
+                || summary.chars().count() > L::SUBJECT_SUMMARY
+                || summary.chars().any(char::is_control)
+                || !inline_only(summary)
+            {
+                return Err(WorkObjectFault {
+                    found: Some(measured(summary)),
+                    limit: limit(L::SUBJECT_SUMMARY),
+                    ..place("summary", None).dropping(F::SubjectSummary, Remove("summary"))
+                });
+            }
+            budget.add(summary)?;
+        }
+        if !https(self.url) {
+            return Err(place("url", None).fault(F::SubjectUrl));
+        }
+        budget.add(self.url)
     }
 }
 

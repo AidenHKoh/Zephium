@@ -14,6 +14,8 @@ pub(crate) struct WorkProviders {
     pub(crate) activity: super::work_activity::WorkActivity,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) browser: zephium_work_composition::NativeWorkComposition,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    engine: Arc<zephium_engine::WebviewEngine>,
 }
 impl WorkProviders {
     pub(crate) fn new(
@@ -25,6 +27,15 @@ impl WorkProviders {
         let _ = (engine, store);
         // The page lane and searches log their refusals as closed facts.
         zephium_app::work_trace::install(Arc::new(record_diagnostic));
+        zephium_app::work_trace::install_record_media(Arc::new(|event| {
+            record_diagnostic(format_args!(
+                "work: phase=record_media detail={event:?}; content=redacted"
+            ));
+        }));
+        record_diagnostic(format_args!(
+            "work: event=session_started build={} content=redacted",
+            option_env!("ZEPHIUM_BUILD_REVISION").unwrap_or("unknown")
+        ));
         // A request may offer a grant for a signed-in attached tab: the engine
         // answers whether the profile holds cookies for a site, nothing more.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -41,8 +52,17 @@ impl WorkProviders {
         Self {
             activity: super::work_activity::WorkActivity::new(frames),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            browser: zephium_work_composition::NativeWorkComposition::new(engine, store),
+            browser: zephium_work_composition::NativeWorkComposition::new(engine.clone(), store),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            engine,
         }
+    }
+
+    /// Empties Work's own website data for the profile; its answer is
+    /// whether the store is empty afterwards.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn clear_website_data(&self, profile: ProfileId) -> std::sync::mpsc::Receiver<bool> {
+        self.engine.clear_work_website_data(profile)
     }
 
     pub(crate) async fn run(
@@ -99,76 +119,7 @@ impl WorkProviders {
         profile: ProfileId,
         input: WorkOperationV1,
     ) -> Result<WorkOperationStateV1, WorkError> {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        use zephium_agentic::OpenAiWorkSynthesizer;
-        use zephium_agentic::{
-            AgentProviderTransport, AgentProviderTransportConfig, OpenAiWorkPlanner,
-        };
-        use zephium_app::{
-            work_execution::WorkExecutionService, work_planning::WorkPlanningService,
-        };
         match input {
-            WorkOperationV1::ReadPublic { command, context } => {
-                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                {
-                    let _ = (command, context);
-                    Err(WorkError::Unavailable)
-                }
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                {
-                    let zephium_core::work::runtime::WorkRuntimeIntent::ReadPublic {
-                        scope,
-                        limits,
-                    } = &command.intent
-                    else {
-                        return Err(WorkError::Invalid);
-                    };
-                    if command.version != 1 {
-                        return Err(WorkError::Invalid);
-                    }
-                    zephium_core::work::search::validate_direct_public_read(scope, *limits)?;
-                    let transport =
-                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                            .map_err(|_| WorkError::Unavailable)?;
-                    let config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
-                        zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
-                            &scope.model,
-                            4096,
-                        )
-                        .map_err(|_| WorkError::Unavailable)?,
-                    )?;
-                    let provider = zephium_agentic::OpenAiPublicSearch::try_new(
-                        transport,
-                        credential().await?,
-                        config,
-                    )?;
-                    let projection = WorkExecutionService::new(shell).read_public_with_context(profile, command, context, |attempt, bodies| async move {
-                        #[cfg(feature = "work-development-traces")]
-                        let provider = provider.with_public_response_retention().with_public_work_trace(attempt.work(),attempt.execution(),attempt.attempt());
-                        let attempt_id = attempt.attempt();
-                        let started = std::time::Instant::now();
-                        let result = attempt.search_public_owned_with_context(&provider, &bodies).await;
-                        match &result {
-                            Ok(settlement) => {
-                                if let Some(fact) = settlement.projection().executions.iter().find(|fact| fact.id == settlement.execution()).and_then(|fact| fact.attempts.iter().find(|fact| fact.id == attempt_id)) {
-                                    record_diagnostic(format_args!("work: attempt={attempt_id} phase=public_search status={:?} usage={:?} elapsed_ms={} native_resources=0", fact.status, fact.usage, started.elapsed().as_millis()));
-                                }
-                            }
-                            Err(error) => record_diagnostic(format_args!("work: attempt={attempt_id} phase=public_search failure={error:?} elapsed_ms={}", started.elapsed().as_millis())),
-                        }
-                        result
-                    }, |observer| self.activity.track(observer)).await?;
-                    Ok(WorkOperationStateV1::Settled {
-                        response: WorkResponseV1 {
-                            version: 1,
-                            profile: profile.to_string(),
-                            reply: WorkReplyV1::Projection {
-                                projection: Box::new(projection),
-                            },
-                        },
-                    })
-                }
-            }
             WorkOperationV1::Run {
                 command,
                 context,
@@ -176,12 +127,11 @@ impl WorkProviders {
             } => {
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
-                    let _ = (command, context, signed_in);
+                    let _ = (shell, command, context, signed_in);
                     Err(WorkError::Unavailable)
                 }
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 {
-                    use zephium_app::work_agent::{WorkAgentProviders, WorkAgentService};
                     let zephium_core::work::runtime::WorkRuntimeIntent::BeginAgent {
                         grant, ..
                     } = &command.intent
@@ -194,365 +144,35 @@ impl WorkProviders {
                     grant.validate()?;
                     // Retired: sessions are decided per site inside the run.
                     let _ = signed_in;
-                    if lead::runtime(profile).await == lead::WorkRuntimeChoice::Lead {
-                        match lead::models(profile).await {
-                            Some(models) => {
-                                return self.lead(shell, profile, command, context, models).await
-                            }
-                            None => record_diagnostic(format_args!(
-                                "work: phase=lead state=no_model fallback=classic"
-                            )),
-                        }
-                    }
-                    let binding_request = shell.work_profile_binding();
-                    let binding =
-                        tokio::time::timeout(std::time::Duration::from_secs(8), async move {
-                            loop {
-                                if let Some(binding) = binding_request.try_recv() {
-                                    break binding;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            }
-                        })
-                        .await
-                        .map_err(|_| WorkError::Unavailable)?;
-                    let zephium_app::AgentWorkProfileReadiness::Ready(binding) = binding else {
-                        return Err(WorkError::ProfileUnavailable);
+                    let Some(models) = lead::models(profile, Some(command.work)).await else {
+                        record_diagnostic(format_args!("work: phase=lead state=no_model"));
+                        return Err(WorkError::Unavailable);
                     };
-                    if binding.profile() != profile {
-                        return Err(WorkError::ProfileUnavailable);
-                    }
-                    let transport =
-                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                            .map_err(|_| WorkError::Unavailable)?;
-                    let agent = zephium_agentic::OpenAiWorkAgent::try_new(
-                        transport.clone(),
-                        credential().await?,
-                        agent_model_config()?,
-                    )
-                    .map_err(|_| WorkError::Unavailable)?;
-                    let decisions = public_decision_settings(profile, transport).await?;
-                    let agent = match decisions {
-                        Some(decisions) => agent
-                            .with_link_decisions(
-                                decisions.primary,
-                                decisions.emulation,
-                                decisions.diagnostic,
-                            )
-                            .map_err(|_| WorkError::Unavailable)?,
-                        None => agent,
-                    };
-                    #[cfg(feature = "work-development-traces")]
-                    let agent = agent.with_diagnostic(|event| {
-                        use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
-                        match event {
-                            WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=agent_turn input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),
-                            WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } => record_diagnostic(format_args!("work: phase=agent_turn provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}")),
-                            WorkSynthesisDiagnostic::TurnRejected { reason } => record_diagnostic(format_args!("work: phase=agent_turn rejected reason={reason:?}")),
-                            _ => {}
-                        }
-                    }).with_wire_diagnostic(|fault| record_diagnostic(format_args!("work: phase=agent_turn wire_error path={} expected={} dropped={}", fault.path, fault.expected, fault.dropped)));
-                    let search_transport =
-                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                            .map_err(|_| WorkError::Unavailable)?;
-                    let search_config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
-                        zephium_agent_model_catalog::try_public_search_provider_exact_call_config(
-                            &grant.model,
-                            4096,
-                        )
-                        .map_err(|_| WorkError::Unavailable)?,
-                    )?;
-                    let search = zephium_agentic::OpenAiPublicSearch::try_new(
-                        search_transport.clone(),
-                        credential().await?,
-                        search_config,
-                    )?;
-                    let search =
-                        configure_search_ranking(search, profile, search_transport).await?;
-                    #[cfg(feature = "work-development-traces")]
-                    let search = search.with_public_response_retention().with_diagnostic(|event| {
-                        if let zephium_core::work::synthesis::WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } = event {
-                            record_diagnostic(format_args!("work: phase=search provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}"));
-                        }
-                    });
-                    let callback = shell.callback_handle();
-                    let work = command.work;
-                    let started = std::time::Instant::now();
-                    let service = WorkAgentService::new(shell);
-                    let service = service.with_diagnostic(|event| {
-                        record_diagnostic(format_args!("work: phase=agent loop={event:?}"));
-                    });
-                    let projection = service
-                        .run(
-                            profile,
-                            command,
-                            context,
-                            WorkAgentProviders {
-                                turn: &agent,
-                                search: &search,
-                            },
-                            |probe, request| {
-                                let callback = &callback;
-                                async move {
-                                    let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
-                                        binding,
-                                        zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
-                                        zephium_app::AgentWorkApplicationConfig::new(
-                                            zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
-                                            AgentProviderTransportConfig::STANDARD,
-                                        ),
-                                        credential().await?,
-                                    );
-                                    settings.decisions = super::work_decision::composition_preference(
-                                        super::work_decision::selected_choice(profile).await,
-                                    );
-                                    #[cfg(feature = "work-development-traces")]
-                                    let settings = {
-                                        let mut settings = settings;
-                                        settings.retain_public_responses = true;
-                                        settings.diagnostic = Some(|attempt, snapshot| {
-                                            record_diagnostic(format_args!("work: attempt={attempt} phase=agent_browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
-                                        });
-                                        settings.model_diagnostic = Some(record_browser_diagnostic);
-                                        settings.stage_diagnostic = Some(|stage| {
-                                            record_diagnostic(format_args!("work: phase=agent_browser stage={stage}"));
-                                        });
-                                        settings.resource_diagnostic = Some(|cause| {
-                                            record_diagnostic(format_args!("work: phase=agent_browser resource_failure={cause:?}"));
-                                        });
-                                        settings
-                                    };
-                                    let result = self.browser.run_agent_step(callback, &probe, request, settings).await;
-                                    if let Err(error) = &result {
-                                        record_diagnostic(format_args!("work: attempt={} phase=agent_browser failure={error:?}", probe.attempt()));
-                                    }
-                                    result
-                                }
-                            },
-                            |observer| self.activity.track(observer),
-                        )
-                        .await;
-                    match &projection {
-                        Ok(projection) => {
-                            if let Some(fact) = projection.executions.last() {
-                                record_diagnostic(format_args!(
-                                    "work: work={work} phase=agent status={:?} steps={} artifacts={} elapsed_ms={}",
-                                    fact.status,
-                                    fact.steps.len(),
-                                    fact.artifacts.len(),
-                                    started.elapsed().as_millis()
-                                ));
-                            }
-                        }
-                        Err(error) => record_diagnostic(format_args!(
-                            "work: work={work} phase=agent failure={error:?} elapsed_ms={}",
-                            started.elapsed().as_millis()
-                        )),
-                    }
-                    Ok(WorkOperationStateV1::Settled {
-                        response: WorkResponseV1 {
-                            version: 1,
-                            profile: profile.to_string(),
-                            reply: WorkReplyV1::Projection {
-                                projection: Box::new(projection?),
-                            },
-                        },
-                    })
+                    self.lead(shell, profile, command, context, models).await
                 }
             }
-            input @ (WorkOperationV1::Plan { .. } | WorkOperationV1::PreparePlan { .. }) => {
-                let (request, prepare) = match input {
-                    WorkOperationV1::Plan { request } => (request, false),
-                    WorkOperationV1::PreparePlan { request } => (request, true),
-                    _ => unreachable!(),
-                };
-                let transport =
-                    AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                        .map_err(|_| WorkError::Unavailable)?;
-                let provider = OpenAiWorkPlanner::try_new(
-                    transport,
-                    credential().await?,
-                    planning_model_config()?,
-                )
-                .map_err(|_| WorkError::Unavailable)?;
-                #[cfg(feature = "work-development-traces")]
-                let provider = provider.with_public_response_retention();
-                let service = WorkPlanningService::new(shell, Arc::new(provider));
-                #[cfg(feature = "work-development-traces")]
-                let service = service.with_execution_diagnostic(|reason| {
-                    record_diagnostic(format_args!("work: phase=prepare_plan refusal={reason:?}"));
-                });
-                let response = if prepare {
-                    service.prepare_request(profile, request).await
-                } else {
-                    service.plan_request(profile, request).await
-                };
-                Ok(WorkOperationStateV1::Planned { response })
+            // The earlier runtime's public read, planning, review and start
+            // are retired: every request runs as the lead.
+            WorkOperationV1::ReadPublic { .. }
+            | WorkOperationV1::Plan { .. }
+            | WorkOperationV1::PreparePlan { .. }
+            | WorkOperationV1::Prepare { .. }
+            | WorkOperationV1::Start { .. } => {
+                let _ = (shell, profile);
+                Err(WorkError::Unavailable)
             }
-            WorkOperationV1::Prepare { request } => {
-                let response = WorkExecutionService::new(shell)
-                    .prepare_public_approval(profile, request)
-                    .await?;
-                Ok(WorkOperationStateV1::Settled { response })
-            }
-            // Retired with origin grants; the frame drops its entry in Stage 3.
+            // Retired with origin grants.
             WorkOperationV1::PrepareAccount { .. } => Err(WorkError::Invalid),
-            WorkOperationV1::Start { request } => {
-                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                {
-                    let _ = request;
-                    Err(WorkError::Unavailable)
-                }
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                {
-                    let binding_request = shell.work_profile_binding();
-                    let binding =
-                        tokio::time::timeout(std::time::Duration::from_secs(8), async move {
-                            loop {
-                                if let Some(binding) = binding_request.try_recv() {
-                                    break binding;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            }
-                        })
-                        .await
-                        .map_err(|_| WorkError::Unavailable)?;
-                    let zephium_app::AgentWorkProfileReadiness::Ready(binding) = binding else {
-                        return Err(WorkError::ProfileUnavailable);
-                    };
-                    if binding.profile() != profile {
-                        return Err(WorkError::ProfileUnavailable);
-                    }
-                    let transport =
-                        AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD)
-                            .map_err(|_| WorkError::Unavailable)?;
-                    let synthesis = OpenAiWorkSynthesizer::try_new(
-                        transport,
-                        credential().await?,
-                        synthesis_model_config()?,
-                    )
-                    .map_err(|_| WorkError::Unavailable)?;
-                    #[cfg(feature = "work-development-traces")]
-                    let synthesis =
-                        synthesis
-                            .with_public_response_retention()
-                            .with_diagnostic(|event| {
-                                use zephium_core::work::synthesis::WorkSynthesisDiagnostic;
-                                match event {
-                                    WorkSynthesisDiagnostic::DisclosureReady { attempt, bytes, sources, evidence } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis disclosure_ready bytes={bytes} sources={sources} evidence={evidence}")),
-                                    WorkSynthesisDiagnostic::DisclosureFailed { attempt, error } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis disclosure_failed error={error:?}")),
-                                    WorkSynthesisDiagnostic::ProviderRefused { attempt, error } => record_diagnostic(format_args!("work: attempt={attempt} phase=synthesis provider_refused error={error:?}")),
-                                    WorkSynthesisDiagnostic::InputCounted { tokens, maximum, request_bytes } => record_diagnostic(format_args!("work: phase=synthesis input_counted tokens={tokens} maximum={maximum} request_bytes={request_bytes}")),
-                                    WorkSynthesisDiagnostic::ProviderTransport { http_status, body_bytes, decoded, elapsed_millis } => record_diagnostic(format_args!("work: phase=synthesis provider_transport http_status={http_status:?} body_bytes={body_bytes} decoded={decoded} elapsed_ms={elapsed_millis}")),
-                                    WorkSynthesisDiagnostic::TurnRejected { .. } => {}
-                                }
-                            });
-                    let callback = shell.callback_handle();
-                    let projection = WorkExecutionService::new(shell).execute_request(profile, request, &synthesis, |attempt| {
-                        let callback = &callback;
-                        async move {
-                            if let zephium_core::work::runtime::WorkCapability::PublicSearch { scope } = &attempt.specification().capability {
-                                let transport = AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).map_err(|_| WorkError::Unavailable)?;
-                                let config = zephium_agentic::OpenAiPublicSearchConfig::try_new(
-                                    zephium_agent_model_catalog::try_public_search_provider_exact_call_config(&scope.model, 4096).map_err(|_| WorkError::Unavailable)?
-                                )?;
-                                let provider = zephium_agentic::OpenAiPublicSearch::try_new(transport, credential().await?, config)?;
-                                #[cfg(feature = "work-development-traces")]
-                                let provider = provider.with_public_response_retention().with_public_work_trace(attempt.work(), attempt.execution(), attempt.attempt());
-                                let attempt_id = attempt.attempt();
-                                let started = std::time::Instant::now();
-                                let result = attempt.search_public_owned(&provider).await;
-                                match &result {
-                                    Ok(settlement) => {
-                                        if let Some(fact) = settlement.projection().executions.iter().find(|fact| fact.id == settlement.execution()).and_then(|fact| fact.attempts.iter().find(|fact| fact.id == attempt_id)) {
-                                            record_diagnostic(format_args!("work: attempt={attempt_id} phase=public_search status={:?} usage={:?} elapsed_ms={} native_resources=0", fact.status, fact.usage, started.elapsed().as_millis()));
-                                        }
-                                    }
-                                    Err(error) => record_diagnostic(format_args!("work: attempt={attempt_id} phase=public_search failure={error:?} elapsed_ms={}", started.elapsed().as_millis())),
-                                }
-                                return result;
-                            }
-                            let mut settings = zephium_work_composition::durable_runtime::WorkBrowserAdapterSettings::new(
-                                binding,
-                                zephium_agent_controller::AgentBrowserModel::Gpt6Luna,
-                                zephium_app::AgentWorkApplicationConfig::new(
-                                    zephium_agent_runtime::AgentRuntimeConfig::STANDARD,
-                                    AgentProviderTransportConfig::STANDARD,
-                                ),
-                                credential().await?,
-                            );
-                            settings.decisions = super::work_decision::composition_preference(
-                                super::work_decision::selected_choice(profile).await,
-                            );
-                            #[cfg(feature = "work-development-traces")]
-                            let settings = {
-                                let mut settings = settings;
-                                settings.retain_public_responses = true;
-                                settings.diagnostic = Some(|attempt, snapshot| {
-                                    record_diagnostic(format_args!("work: attempt={attempt} phase=browser state={:?} failure={:?} persistence_failure={:?}", snapshot.phase, snapshot.failure, snapshot.persistence_failure));
-                                });
-                                settings
-                            };
-                            let attempt_id = attempt.attempt();
-                            let result = self.browser.execute_public_node_owned(callback, attempt, settings).await;
-                            if let Err(error) = &result {
-                                record_diagnostic(format_args!("work: attempt={attempt_id} phase=browser_adapter failure={error:?}"));
-                            }
-                            result
-                        }
-                    }, |observer| self.activity.track(observer)).await?;
-                    Ok(WorkOperationStateV1::Settled {
-                        response: WorkResponseV1 {
-                            version: 1,
-                            profile: profile.to_string(),
-                            reply: WorkReplyV1::Projection {
-                                projection: Box::new(projection),
-                            },
-                        },
-                    })
-                }
-            }
         }
     }
 }
 
-fn planning_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
-    zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
-            .map_err(|_| WorkError::Unavailable)?,
-        8192,
-        100_000,
-    )
-    .map_err(|_| WorkError::Unavailable)
-}
 // An agent turn discloses a bounded 48KiB context: objective, steps, sources
 // and canvas objects. Each turn is separately capped by the run's remaining
 // limits; this ceiling only bounds one call.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn agent_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
-    const MAX_TURN_INPUT_TOKENS: u32 = 32_768;
-    zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(8192)
-            .map_err(|_| WorkError::Unavailable)?,
-        MAX_TURN_INPUT_TOKENS,
-        300_000,
-    )
-    .map_err(|_| WorkError::Unavailable)
-}
 // Synthesis consumes a bounded 32KiB semantic context plus schema/instructions.
 // Its token ceiling is separate from planning; exact provider counting and the
 // original attempt's token/cost limits still decide whether generation starts.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn synthesis_model_config() -> Result<zephium_agentic::WorkPlanningConfig, WorkError> {
-    const MAX_SYNTHESIS_INPUT_TOKENS: u32 = 32_768;
-    zephium_agentic::WorkPlanningConfig::try_new(
-        zephium_agent_model_catalog::try_gpt6_luna_provider_exact_call_config(4096)
-            .map_err(|_| WorkError::Unavailable)?,
-        MAX_SYNTHESIS_INPUT_TOKENS,
-        100_000,
-    )
-    .map_err(|_| WorkError::Unavailable)
-}
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn configure_search_ranking(
     search: zephium_agentic::OpenAiPublicSearch,

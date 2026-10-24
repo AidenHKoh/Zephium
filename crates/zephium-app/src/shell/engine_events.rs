@@ -377,9 +377,12 @@ impl Shell {
                     self.project_tab(id);
                 }
             }
-            EngineEvent::ExternalAppRequested { id, url, app } => {
-                self.on_external_app_requested(id, url, app)
-            }
+            EngineEvent::ExternalAppRequested {
+                id,
+                url,
+                app,
+                user_gesture,
+            } => self.on_external_app_requested(id, url, app, user_gesture),
             EngineEvent::FocusBlocked { id, url } => self.on_focus_blocked(id, url),
             EngineEvent::LinkedDownloadStarted { id } => {
                 if self.items.tab(id).is_some_and(|tab| {
@@ -516,7 +519,12 @@ impl Shell {
             EngineEvent::ShortcutPressed { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
-                self.items.set_title(id, title.clone());
+                // Pages re-publish the title they already have (counters,
+                // tickers, frameworks on every route); each would cost chrome a
+                // projection, history a write and extensions a new surface.
+                if !self.items.set_title(id, title.clone()) {
+                    return;
+                }
                 self.amend_recorded_visit_title(id, &title);
                 self.project_tab(id);
                 self.sync_extension_browser_surface_metadata(id);

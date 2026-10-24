@@ -59,7 +59,11 @@ impl EngineHost {
             } else {
                 continue;
             };
-            self.erase_windows_anonymous_environment(native_profile, completion);
+            self.erase_windows_native_environment(
+                native_profile,
+                self.private_runtime.root().to_owned(),
+                completion,
+            );
         }
     }
     pub(super) fn prepare_windows_anonymous_erasure(
@@ -87,14 +91,81 @@ impl EngineHost {
             } else {
                 let native_profile = entry.native_profile;
                 entry.retirement = Some(completion.clone());
-                self.erase_windows_anonymous_environment(native_profile, completion);
+                self.erase_windows_native_environment(
+                    native_profile,
+                    self.private_runtime.root().to_owned(),
+                    completion,
+                );
             }
         }
         selected
     }
-    fn erase_windows_anonymous_environment(
+    /// Profile erasure also removes Work's own store folder, whether or not
+    /// this process opened it.
+    pub(super) fn prepare_windows_work_store_erasure(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        completion: Arc<crate::erasure::Completion>,
+    ) -> Arc<crate::erasure::Completion> {
+        let mut completions = crate::erasure::Completion::split(completion, 2);
+        let selected = completions.remove(0);
+        let work = completions.remove(0);
+        self.erase_windows_native_environment(
+            crate::work_website_data::native_profile(profile),
+            self.profiles_root.clone(),
+            work,
+        );
+        selected
+    }
+    /// Empties the profile's Work store. A live Work page clears it through
+    /// WebView2; with no environment running the folder is removed. While
+    /// the environment runs without a page the answer is false.
+    pub(crate) fn clear_work_website_data(
+        &mut self,
+        profile: zephium_core::ids::ProfileId,
+        reply: std::sync::mpsc::Sender<bool>,
+    ) {
+        if self.erasure_tombstones.contains(&profile) {
+            let _ = reply.send(false);
+            return;
+        }
+        let expected = AgentOwnedProfile::work(crate::work_website_data::identifier(profile));
+        let live = self
+            .work_resources
+            .values()
+            .filter(|resource| resource.profile() == profile)
+            .find_map(|resource| {
+                resource
+                    .view
+                    .as_ref()
+                    .filter(|view| view.work_profile_matches(&expected))
+            });
+        if let Some(view) = live {
+            if !view.clear_profile_browsing_data(reply.clone()) {
+                let _ = reply.send(false);
+            }
+            return;
+        }
+        let native = crate::work_website_data::native_profile(profile);
+        if self.environments.contains_key(&native) || self.erasure_tombstones.contains(&native) {
+            let _ = reply.send(false);
+            return;
+        }
+        let root = self.profiles_root.clone();
+        let spawned = std::thread::Builder::new()
+            .name("work-website-data-clear".into())
+            .spawn(move || {
+                let _ = reply.send(crate::erasure::remove_profile_directories_verified(
+                    &[root],
+                    native,
+                ));
+            });
+        drop(spawned);
+    }
+    fn erase_windows_native_environment(
         &mut self,
         native_profile: zephium_core::ids::ProfileId,
+        root: std::path::PathBuf,
         completion: Arc<crate::erasure::Completion>,
     ) {
         self.erasure_tombstones.insert(native_profile);
@@ -120,7 +191,7 @@ impl EngineHost {
             process,
             proof,
             clean,
-            vec![self.private_runtime.root().to_owned()],
+            vec![root],
             native_profile,
             completion,
         );
@@ -296,7 +367,10 @@ impl EngineHost {
         native_resource: &mut Option<super::NativeResourceLease>,
     ) -> Result<AgentOwnedView, ContextPortFailure> {
         let profile = guard.resource().identity().profile();
-        let storage = if guard.isolated_public() {
+        let work_data = guard.work_website_data();
+        let storage = if work_data {
+            ContextProfileStorageClass::Durable
+        } else if guard.isolated_public() {
             ContextProfileStorageClass::Ephemeral
         } else {
             guard.storage()
@@ -308,17 +382,24 @@ impl EngineHost {
         }
         self.collect_pending_windows_cleanup_debts();
         self.retire_windows_anonymous_work_sessions();
-        self.work_site_stores
-            .retain(|_, store| std::rc::Rc::strong_count(store) > 1 || !store.quiescent());
+        self.work_site_stores.retain(|_, store| {
+            std::rc::Rc::strong_count(store) > 1 || !store.quiescent() || store.return_pending()
+        });
+        self.prune_work_profile_cookie_sources();
         if self.windows_view_admission_blocked(profile)
             || !self.windows_profile_process_group_capacity_allows(profile)
             || self.agent_cookie_quarantined_profiles.contains(&profile)
         {
             return Err(ContextPortFailure::ResourceExhausted);
         }
-        let native_profile = if storage == ContextProfileStorageClass::Ephemeral
-            && guard.isolated_public()
-        {
+        let native_profile = if work_data {
+            if self.profile_persistence_classes.get(&profile)
+                != Some(&super::profiles::ProfilePersistenceClass::Durable)
+            {
+                return Err(ContextPortFailure::ProfileUnavailable);
+            }
+            crate::work_website_data::native_profile(profile)
+        } else if storage == ContextProfileStorageClass::Ephemeral && guard.isolated_public() {
             if let Some(session) = guard.anonymous_session() {
                 if let Some(entry) = self.anonymous_work_environments.get(&session.id()) {
                     if entry.retirement.is_some() {
@@ -388,12 +469,12 @@ impl EngineHost {
         let deadline = guard
             .construction_deadline(Instant::now())
             .ok_or(ContextPortFailure::TimedOut)?;
-        let _bootstrap = self
+        let mut bootstrap = self
             .begin_windows_work_profile_environment(
                 native_profile,
                 deadline,
                 path.clone(),
-                storage == ContextProfileStorageClass::Durable,
+                storage == ContextProfileStorageClass::Durable && !work_data,
             )
             .map_err(|_| ContextPortFailure::ProfileUnavailable)?;
         let environment = self
@@ -410,7 +491,10 @@ impl EngineHost {
         let browser = guard.clone();
         let invariant = guard.clone();
         let panic = guard.clone();
-        let owned_profile = if storage == ContextProfileStorageClass::Durable {
+        let redirected = guard.clone();
+        let owned_profile = if work_data {
+            AgentOwnedProfile::work(crate::work_website_data::identifier(profile))
+        } else if storage == ContextProfileStorageClass::Durable {
             AgentOwnedProfile::work_site(guard.document().ok_or(ContextPortFailure::NativeRefused)?)
                 .map_err(|_| ContextPortFailure::NativeRefused)?
         } else if let Some(session) = guard.anonymous_session() {
@@ -428,7 +512,7 @@ impl EngineHost {
                 let _ = writeln!(std::io::stderr().lock(), "windows-work-cookies: stage=construct store_reused={reused} expected_native_name_hash={hash}; content=redacted");
             }
         }
-        let store = if storage == ContextProfileStorageClass::Durable {
+        let store = if storage == ContextProfileStorageClass::Durable && !work_data {
             let AgentOwnedProfile::Automation { name } = &owned_profile else {
                 return Err(ContextPortFailure::NativeRefused);
             };
@@ -468,6 +552,7 @@ impl EngineHost {
         } else {
             None
         };
+        let credential_denied = guard.clone();
         let built = crate::platform::windows::build_owned_work_view(
             &ParentHandle(self.parent.0),
             ContextOwnedViewport::STANDARD,
@@ -476,7 +561,7 @@ impl EngineHost {
             storage,
             &path,
             deadline,
-            storage == ContextProfileStorageClass::Durable,
+            storage == ContextProfileStorageClass::Durable && !work_data,
             AgentOwnedViewCallbacks::new(
                 move |_| {
                     legacy.fail();
@@ -502,7 +587,17 @@ impl EngineHost {
                     panic.fail();
                     super::notify_work_resource(panic.clone());
                 },
-            ),
+            )
+            .with_credential_denied(move || credential_denied.revoke_public_visual_lineage())
+            .with_redirect(move |destination| {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                redirected.record_failure_cause(
+                    crate::agent_context_port::work_resource_failure_diagnostic::WorkResourceFailureCause::Redirected,
+                );
+                redirected.record_redirect(destination);
+                redirected.fail();
+                super::notify_work_resource(redirected.clone());
+            }),
         );
         for debt in wry::pending_webview2_cleanup_debts() {
             let resource = native_resource.take().or_else(|| {
@@ -522,36 +617,39 @@ impl EngineHost {
         let (mut view, _) = built.map_err(|_| ContextPortFailure::NativeRefused)?;
         view.set_work_native_profile(native_profile);
         if let Some(store) = store {
-            let source = self
+            let document = guard.document().ok_or(ContextPortFailure::NativeRefused)?;
+            // With no tab of the profile open, this construction's own
+            // page-inert controller of the profile stands in for one.
+            let tab = self
                 .selected_profile_cookie_source(profile, &environment)
                 .ok();
-            let origin = guard
-                .document()
-                .ok_or(ContextPortFailure::NativeRefused)?
-                .as_url()
-                .origin()
-                .ascii_serialization();
-            let scope = zephium_agentic::ContextCookieScope::try_new(vec![
-                zephium_agentic::ContextCookieOrigin::parse(&origin)
-                    .map_err(|_| ContextPortFailure::NativeRefused)?,
-            ])
-            .map_err(|_| ContextPortFailure::NativeRefused)?;
+            let borrowed = bootstrap
+                .as_ref()
+                .filter(|_| tab.is_none())
+                .and_then(|bootstrap| bootstrap.profile_cookie_manager(&environment).ok());
+            let borrows_bootstrap = borrowed.is_some();
+            let profile_source = tab.or(borrowed);
+            let origin = document.as_url().origin().ascii_serialization();
+            let scope = crate::work_site_session::session_scope(document, None)
+                .map_err(|_| ContextPortFailure::NativeRefused)?;
+            let context = guard.resource().identity().context();
             let done = guard.clone();
             let panicked = guard.clone();
             view.seed_work_session(
-                source,
+                profile_source,
                 scope,
                 origin,
                 store,
                 deadline,
                 move |success, unproven| {
-                    if unproven {
-                        done.dispatch_notification(move || {
-                            super::best_effort_with(move |host| {
+                    done.dispatch_notification(move || {
+                        super::best_effort_with(move |host| {
+                            host.release_work_profile_cookie_source(context);
+                            if unproven {
                                 host.agent_cookie_quarantined_profiles.insert(profile);
-                            });
+                            }
                         });
-                    }
+                    });
                     if !success {
                         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                         {
@@ -564,6 +662,7 @@ impl EngineHost {
                 move || {
                     panicked.dispatch_notification(move || {
                         super::best_effort_with(move |host| {
+                            host.release_work_profile_cookie_source(context);
                             host.agent_cookie_quarantined_profiles.insert(profile);
                         });
                     });
@@ -571,8 +670,189 @@ impl EngineHost {
                     super::notify_work_resource(panicked.clone());
                 },
             );
+            if borrows_bootstrap {
+                if let Some(bootstrap) = bootstrap.take() {
+                    self.work_profile_cookie_sources.insert(context, bootstrap);
+                }
+            }
         }
+        drop(bootstrap);
         Ok(view)
+    }
+}
+
+/// A return's whole native window: a few seconds to copy above the transfer's
+/// cleanup reserve, while the continued page waits on it.
+const WORK_SESSION_RETURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl EngineHost {
+    /// After a sign-in handoff on a Work page in the person's account, adds
+    /// that page's site cookies to the person's profile, so their tabs are
+    /// signed in too, then lets the page continue. A return that cannot start
+    /// stays pending for the site's next page; the page continues either way.
+    pub(super) fn return_work_site_session(&mut self, guard: &Arc<WorkResourceGuard>) {
+        if !self.start_work_site_return(guard) {
+            self.continue_after_work_site_return(guard);
+        }
+    }
+
+    /// The continued page goes idle and resumes only now, so its suspension
+    /// never overlaps the copy that reads its store.
+    fn continue_after_work_site_return(&mut self, guard: &Arc<WorkResourceGuard>) {
+        let context = guard.resource().identity().context();
+        let Some(resource) = self
+            .work_resources
+            .get_mut(&context)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+        else {
+            return;
+        };
+        if let Some((task, document)) = resource.human_return.take() {
+            resource.finish_human_continue(task, document);
+        }
+    }
+
+    fn start_work_site_return(&mut self, guard: &Arc<WorkResourceGuard>) -> bool {
+        let context = guard.resource().identity().context();
+        let profile = guard.resource().identity().profile();
+        let pending = self
+            .work_resources
+            .get(&context)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+            .and_then(|resource| resource.view.as_ref())
+            .is_some_and(|view| view.work_session_return_pending());
+        if !pending
+            || self.erasure_tombstones.contains(&profile)
+            || self.agent_cookie_quarantined_profiles.contains(&profile)
+        {
+            return false;
+        }
+        let (Some(document), Some(deadline), Some(environment)) = (
+            guard.document().cloned(),
+            Instant::now().checked_add(WORK_SESSION_RETURN_WINDOW),
+            self.environments.get(&profile).cloned(),
+        ) else {
+            return false;
+        };
+        self.prune_work_profile_cookie_sources();
+        let (manager, bootstrap) = match self.selected_profile_cookie_source(profile, &environment)
+        {
+            Ok(manager) => (manager, None),
+            Err(_) => {
+                let bootstrap =
+                    crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
+                        .ok()
+                        .and_then(|path| {
+                            self.begin_windows_work_profile_environment(
+                                profile, deadline, path, true,
+                            )
+                            .ok()
+                            .flatten()
+                        });
+                let manager = bootstrap
+                    .as_ref()
+                    .and_then(|bootstrap| bootstrap.profile_cookie_manager(&environment).ok());
+                match (manager, bootstrap) {
+                    (Some(manager), Some(bootstrap)) => (manager, Some(bootstrap)),
+                    (_, bootstrap) => {
+                        drop(bootstrap);
+                        self.collect_pending_windows_cleanup_debts();
+                        return false;
+                    }
+                }
+            }
+        };
+        let started = self
+            .work_resources
+            .get(&context)
+            .filter(|resource| Arc::ptr_eq(&resource.guard, guard))
+            .and_then(|resource| resource.view.as_ref())
+            .is_some_and(|view| {
+                let current = crate::platform::imp::current_url(view.view())
+                    .and_then(|current| url::Url::parse(&current).ok());
+                let Ok(scope) =
+                    crate::work_site_session::session_scope(&document, current.as_ref())
+                else {
+                    return false;
+                };
+                let done = guard.clone();
+                let panicked = guard.clone();
+                view.return_work_session(
+                    manager,
+                    scope,
+                    deadline,
+                    move |result| {
+                        let continuing = done.clone();
+                        done.dispatch_notification(move || {
+                            super::best_effort_with(move |host| {
+                                host.release_work_profile_cookie_source(context);
+                                if result == crate::work_site_session::SyncResult::Unproven {
+                                    host.agent_cookie_quarantined_profiles.insert(profile);
+                                }
+                                host.continue_after_work_site_return(&continuing);
+                            });
+                        });
+                    },
+                    move || {
+                        let continuing = panicked.clone();
+                        panicked.dispatch_notification(move || {
+                            super::best_effort_with(move |host| {
+                                host.release_work_profile_cookie_source(context);
+                                host.agent_cookie_quarantined_profiles.insert(profile);
+                                host.continue_after_work_site_return(&continuing);
+                            });
+                        });
+                    },
+                )
+            });
+        match bootstrap {
+            Some(bootstrap) if started => {
+                self.work_profile_cookie_sources.insert(context, bootstrap);
+            }
+            bootstrap => {
+                drop(bootstrap);
+                self.collect_pending_windows_cleanup_debts();
+            }
+        }
+        started
+    }
+
+    pub(super) fn release_work_profile_cookie_source(
+        &mut self,
+        context: zephium_agentic::ContextId,
+    ) {
+        if self.work_profile_cookie_sources.remove(&context).is_some() {
+            self.collect_pending_windows_cleanup_debts();
+        }
+    }
+
+    /// Releases every borrowed profile controller, or only one profile's.
+    pub(super) fn release_work_profile_cookie_sources(
+        &mut self,
+        profile: Option<zephium_core::ids::ProfileId>,
+    ) {
+        let before = self.work_profile_cookie_sources.len();
+        self.work_profile_cookie_sources
+            .retain(|_, bootstrap| profile.is_some_and(|profile| bootstrap.profile() != profile));
+        if self.work_profile_cookie_sources.len() != before {
+            self.collect_pending_windows_cleanup_debts();
+        }
+    }
+
+    /// A page that ended before its sync reported back no longer needs it.
+    fn prune_work_profile_cookie_sources(&mut self) {
+        let before = self.work_profile_cookie_sources.len();
+        let resident: std::collections::HashSet<_> = self
+            .work_resources
+            .iter()
+            .filter(|(_, resource)| resource.view.is_some())
+            .map(|(context, _)| *context)
+            .collect();
+        self.work_profile_cookie_sources
+            .retain(|context, _| resident.contains(context));
+        if self.work_profile_cookie_sources.len() != before {
+            self.collect_pending_windows_cleanup_debts();
+        }
     }
 }
 

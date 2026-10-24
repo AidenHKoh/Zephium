@@ -13,7 +13,7 @@ impl NativeWorkComposition {
         PreparedAgentWork::try_new_for_public_probe(
             request.input,
             request.config,
-            request.credential,
+            request.access,
             request.task,
             self.ports(),
         )

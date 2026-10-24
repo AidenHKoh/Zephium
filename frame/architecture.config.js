@@ -47,7 +47,15 @@ export const architecture = {
                 element: {
                   type: "features",
                   captured: {
-                    module: ["notes", "tasks", "history", "downloads", "bookmarks", "time"],
+                    module: [
+                      "notes",
+                      "tasks",
+                      "history",
+                      "downloads",
+                      "bookmarks",
+                      "time",
+                      "assist",
+                    ],
                   },
                 },
               },
@@ -57,6 +65,16 @@ export const architecture = {
           {
             from: { element: { type: "features", captured: { module: "settings" } } },
             allow: { to: { element: { type: "features", captured: { module: "time" } } } },
+          },
+          // Page styles are listed and removed where the other per-site choices are.
+          {
+            from: { element: { type: "features", captured: { module: "settings" } } },
+            allow: { to: { element: { type: "features", captured: { module: "assist" } } } },
+          },
+          // The sidebar assistant's composer borrows Work's model chip and dictation.
+          {
+            from: { element: { type: "features", captured: { module: "assist" } } },
+            allow: { to: { element: { type: "features", captured: { module: "work" } } } },
           },
           {
             from: { element: { type: "features", captured: { module: "library" } } },

@@ -38,6 +38,7 @@
     overflow: hidden;
     border-radius: var(--radius-card);
     background: var(--color-surface);
+    box-shadow: var(--shadow-card);
   }
 
   .ui-settings-note {

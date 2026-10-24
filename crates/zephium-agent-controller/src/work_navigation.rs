@@ -28,7 +28,7 @@ impl AgentWorkController {
             || target.as_url().as_str().len() > MAX_AGENT_BROWSER_NAVIGATION_URL_BYTES
             || SemanticOrigin::parse(target.as_url().as_str()).as_ref() != Ok(&context.origin)
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(())
     }
@@ -65,7 +65,10 @@ impl AgentWorkController {
                     && node.sensitivity() == SemanticSensitivity::Public
                     && node.link_destination() == Some(target)
             });
-        if !observed {
+        // A site task may open any address on its own site (its search
+        // results for a query, a listing sorted by price); other scopes
+        // follow only shown links.
+        if !observed && !scope.is_site_session() {
             return Some(Reason::Unobserved);
         }
         let session = state.session.as_ref()?;
@@ -76,61 +79,90 @@ impl AgentWorkController {
                 AgentNavigationLedgerRefusal::HopsSpent => Reason::HopsSpent,
                 AgentNavigationLedgerRefusal::AlreadyHere => Reason::AlreadyHere,
                 AgentNavigationLedgerRefusal::Revisited => Reason::Revisited,
+                AgentNavigationLedgerRefusal::Redirected => Reason::Redirected,
             })
+    }
+
+    /// A refusal of the exact proposal refused before is marked repeated,
+    /// so the model hears to change approach.
+    pub(super) fn repeated_refusal(
+        refused: &mut Vec<AgentProviderActionRefusalKey>,
+        refusal: AgentProviderActionRefusal,
+    ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
+        let Some(key) = refusal.key() else {
+            return Ok(refusal);
+        };
+        if refused.contains(&key) {
+            return Ok(refusal.repeated());
+        }
+        refused.try_reserve(1).map_err(|_| crate::contract!())?;
+        refused.push(key);
+        Ok(refusal)
     }
 
     /// Counts a refusal of a control that ran or reached the page (not
     /// observed, rejected at dispatch, covered) by the control's role and
-    /// name digest: the second marks the refusal repeated, the third ends
-    /// the page's loop. Other refusals pass through.
+    /// name digest: from the second on, the refusal is marked repeated. A
+    /// covered control is kept for its key press only. Other refusals pass
+    /// through.
     pub(super) fn count_refused_control(
         refused: &mut Vec<(u64, u8)>,
+        covered: &mut Vec<u64>,
         refusal: AgentProviderActionRefusal,
         observation: &SemanticObservation,
         frames: &[SemanticFrameJoin],
     ) -> Result<AgentProviderActionRefusal, AgentWorkFailure> {
-        use std::hash::{Hash, Hasher};
         if !matches!(
             refusal.reason(),
             SemanticActionBindingError::Unverified
                 | SemanticActionBindingError::DispatchRejected
                 | SemanticActionBindingError::TargetCovered
+                | SemanticActionBindingError::OutcomeUnknown
         ) {
             return Ok(refusal);
         }
-        let Some(node) = refusal.target().and_then(|target| {
-            let expected = observation.reference_frame(target).ok()?;
-            let current = frames
-                .iter()
-                .find(|frame| frame.frame() == expected.frame())?;
-            observation.resolve_node(target, current).ok()
-        }) else {
+        let Some(control) = Self::refused_control(&refusal, observation, frames) else {
             return Ok(refusal);
         };
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{:?}", node.role()).hash(&mut hasher);
-        node.name().map(SemanticText::as_str).hash(&mut hasher);
-        let control = hasher.finish();
+        if refusal.reason() == SemanticActionBindingError::TargetCovered
+            && !covered.contains(&control)
+        {
+            covered.try_reserve(1).map_err(|_| crate::contract!())?;
+            covered.push(control);
+        }
         let count = match refused.iter_mut().find(|(known, _)| *known == control) {
             Some((_, count)) => {
                 *count = count.saturating_add(1);
                 *count
             }
             None => {
-                refused
-                    .try_reserve(1)
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                refused.try_reserve(1).map_err(|_| crate::contract!())?;
                 refused.push((control, 1));
                 1
             }
         };
-        match count {
-            1 => Ok(refusal),
-            2 => Ok(refusal.repeated()),
-            _ => Err(AgentWorkFailure::Browser(
-                AgentBrowserProviderError::ActionProposalLoop,
-            )),
-        }
+        Ok(if count == 1 {
+            refusal
+        } else {
+            refusal.repeated()
+        })
+    }
+
+    /// The refused proposal's control, by its role and name digest.
+    pub(super) fn refused_control(
+        refusal: &AgentProviderActionRefusal,
+        observation: &SemanticObservation,
+        frames: &[SemanticFrameJoin],
+    ) -> Option<u64> {
+        let target = refusal.target()?;
+        let expected = observation.reference_frame(target).ok()?;
+        let current = frames
+            .iter()
+            .find(|frame| frame.frame() == expected.frame())?;
+        observation
+            .resolve_node(target, current)
+            .ok()
+            .map(super::control_digest)
     }
 
     pub(super) async fn navigate_current(
@@ -146,7 +178,7 @@ impl AgentWorkController {
             SemanticObservation,
             SemanticCaptureInstant,
             AgentWorkTaskProgress,
-            AgentBrowserProviderTurn,
+            Option<AgentBrowserProviderTurn>,
         ),
         AgentWorkFailure,
     > {
@@ -155,6 +187,11 @@ impl AgentWorkController {
             NavigationStart::Model(turn) => (Some(*turn), None),
             NavigationStart::Follow(follow) => (None, Some(*follow)),
         };
+        // A model's load that fails goes back to the page it left.
+        let departed = turn
+            .as_ref()
+            .and(state.native.retained.as_ref())
+            .map(|browser| page_address(browser.binding().document()));
         let kind = turn
             .as_ref()
             .map_or(AgentBrowserToolKind::Navigate, |turn| {
@@ -169,7 +206,7 @@ impl AgentWorkController {
                 || !state.history_back
                 || state.native.retained.is_none()))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let discovery = state.navigation_discovery.as_ref();
         let expected = if discovery.is_some() {
@@ -187,15 +224,15 @@ impl AgentWorkController {
             None
         } else if let Some((_, target)) = &follow {
             if !discovery.is_some_and(|scope| scope.is_site_session() && scope.admits(target)) {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             Some(target.clone())
         } else if let (Some(scope), Some(turn)) = (discovery, turn.as_ref()) {
             let AgentBrowserToolProposal::Navigate(target) = turn.turn.proposal() else {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             };
             if !scope.admits(target) {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             }
             Some(target.clone())
         } else {
@@ -203,7 +240,7 @@ impl AgentWorkController {
                 state
                     .current_navigation_target()
                     .cloned()
-                    .ok_or(AgentWorkFailure::Contract)?,
+                    .ok_or_else(|| crate::contract!())?,
             )
         };
         if !is_back
@@ -213,9 +250,9 @@ impl AgentWorkController {
                 (Some(AgentBrowserToolProposal::Navigate(proposed)), Some(target)) if proposed == target
             )
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         // Keep the original total ceiling and reserve the remaining exact route
         // proposals plus final extraction/mapping; no hop receives a new budget.
         let remaining_hops = if discovery.is_some() {
@@ -224,7 +261,7 @@ impl AgentWorkController {
             state
                 .navigation_length()
                 .checked_sub(state.navigation_hops)
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or_else(|| crate::contract!())?
         };
         if usize::from(session.turns) + remaining_hops + 1 > usize::from(session.max_model_calls)
             || usize::try_from(
@@ -233,7 +270,7 @@ impl AgentWorkController {
                     .remaining_operations(session.lease.lease())
                     .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Authority))?,
             )
-            .map_err(|_| AgentWorkFailure::Contract)?
+            .map_err(|_| crate::contract!())?
                 < 2 * remaining_hops + 1
         {
             return Err(AgentWorkFailure::Browser(
@@ -262,7 +299,7 @@ impl AgentWorkController {
             let now = state
                 .session
                 .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or_else(|| crate::contract!())?
                 .policy_now()
                 .map_err(AgentWorkFailure::Browser)?;
             retained.automation_state(now)?
@@ -274,27 +311,27 @@ impl AgentWorkController {
                 .map_err(|_| AgentWorkFailure::Context)?
         };
         let legacy_operation = if state.native.retained.is_none() {
-            Some(ContextOperationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?)
+            Some(ContextOperationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?)
         } else {
             None
         };
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let (continuation, following) = match (turn, follow) {
             (Some(turn), None) => (turn.into_tool_turn().into_parts().1, false),
             (None, Some((continuation, _))) => (continuation, true),
-            _ => return Err(AgentWorkFailure::Contract),
+            _ => return Err(crate::contract!()),
         };
         if state.navigation_discovery.is_some() {
             let schema = state
                 .extraction_schema
                 .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?;
+                .ok_or_else(|| crate::contract!())?;
             let read = read_semantic_observation_for_schema(
                 observation,
                 SemanticReadAuthority::Acknowledged(continuation.baseline()),
                 captured_at,
                 SemanticReadSensitivityLimit::PublicOnly,
-                SemanticReadBudget::STANDARD,
+                schema.extraction_read_budget(),
                 schema,
             )
             .map_err(|error| AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error)))?;
@@ -323,14 +360,14 @@ impl AgentWorkController {
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                proposed_target.as_ref().ok_or_else(|| crate::contract!())?,
             )
         } else {
             session.policy.authorize_navigation(
                 authorization,
                 observation,
                 continuation.baseline(),
-                proposed_target.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                proposed_target.as_ref().ok_or_else(|| crate::contract!())?,
             )
         }
         .map_err(|error| {
@@ -349,21 +386,21 @@ impl AgentWorkController {
         } else {
             continuation.retire_for_navigation(observation, &target, &session.config)
         }
-        .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation));
+        .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()));
         let checkpoint = match checkpoint {
             Ok(checkpoint) => checkpoint,
             Err(failure) => {
                 session
                     .policy
                     .cancel_navigation(permit)
-                    .map_err(|_| AgentWorkFailure::Contract)?;
+                    .map_err(|_| crate::contract!())?;
                 return Err(failure);
             }
         };
         let prepared = if let Some(retained) = &mut state.native.retained {
             retained.prepare_navigation(automation.context(), now)
         } else {
-            let op = legacy_operation.ok_or(AgentWorkFailure::Contract)?;
+            let op = legacy_operation.ok_or_else(|| crate::contract!())?;
             state
                 .native
                 .contexts()?
@@ -376,7 +413,7 @@ impl AgentWorkController {
                 state
                     .session
                     .as_mut()
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or_else(|| crate::contract!())?
                     .policy
                     .cancel_navigation(permit)
                     .map_err(|error| {
@@ -387,7 +424,7 @@ impl AgentWorkController {
         };
         // The old registry join is now irrevocably stale, before native dispatch.
         state.native.snapshot_generation = None;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let active = session
             .policy
             .dispatch_navigation(permit, operation, now)
@@ -412,7 +449,7 @@ impl AgentWorkController {
         let active = session
             .navigation
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or_else(|| crate::contract!())?;
         state.native.operation = Some(operation);
         let dispatch = if let Some(retained) = &mut state.native.retained {
             if is_back {
@@ -421,9 +458,7 @@ impl AgentWorkController {
                 retained.dispatch_navigation(active)
             }
         } else {
-            let request = active
-                .native_request()
-                .map_err(|_| AgentWorkFailure::Contract)?;
+            let request = active.native_request().map_err(|_| crate::contract!())?;
             browser.dispatch(ContextNativeRequest::Navigate(request))
         };
         let refusal = match dispatch {
@@ -444,7 +479,7 @@ impl AgentWorkController {
         let journal_failure = session
             .journal
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)
+            .ok_or_else(|| crate::contract!())
             .and_then(|journal| journal.navigation_active(active))
             .err();
         if let Some(failure) = refusal {
@@ -459,7 +494,7 @@ impl AgentWorkController {
             let terminal = state
                 .session
                 .as_mut()
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or_else(|| crate::contract!())?
                 .settle_navigation_refusal();
             let terminal = match terminal {
                 Ok(terminal) => terminal,
@@ -479,7 +514,7 @@ impl AgentWorkController {
                 let result = state
                     .session
                     .as_mut()
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or_else(|| crate::contract!())?
                     .settle_navigation_terminal(&terminal);
                 let terminal_record = match result {
                     Ok(terminal_record) => terminal_record,
@@ -523,7 +558,7 @@ impl AgentWorkController {
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         if receipt.hop() != state.navigation_hops {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         if state.navigation_discovery.is_some() {
             state
@@ -534,21 +569,84 @@ impl AgentWorkController {
                 })?;
         }
         state.navigation_hops += 1;
-        let fresh = Self::fit_model_observation(Self::observe(state, worker, browser).await?)?;
+        state.covered_controls.clear();
+        state.scroll_streak = 0;
+        state.look_streak = 0;
+        state.moved_on();
+        let arrived = state
+            .native
+            .retained
+            .as_ref()
+            .map(|browser| page_address(browser.binding().document()));
+        match (departed, proposed_target.as_ref().map(page_address)) {
+            (Some(departed), Some(target))
+                if arrived.as_ref() == Some(&departed) && target != departed =>
+            {
+                state.setbacks.count(
+                    super::Setback::Navigation,
+                    address_digest(&target),
+                    AgentWorkFailure::Native(ContextPortFailure::NativeRefused),
+                )?;
+            }
+            _ => state.setbacks.progressed(),
+        }
+        let fresh = Self::fit_model_observation(
+            Box::pin(Self::observe_after_navigation(state, worker, browser)).await?,
+        )?;
+        let now = state
+            .session
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)?;
+        let account = state.task.attest_account(operation.context(), now);
+        state.native.check_control(worker, browser)?;
+        state
+            .session
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?
+            .accept_arrival(receipt, account?)
+            .map_err(AgentWorkFailure::Browser)?;
+        // A move can land on a sign-in, code or bot-check page: the person
+        // gets it before any model call is spent on a page it cannot pass.
+        let (fresh, held) = if state.human_request
+            && (state.task.human_wall(&fresh).is_some() || looks_like_human_challenge(&fresh))
+        {
+            Box::pin(Self::settle_human_challenge(state, worker, browser, fresh)).await?
+        } else {
+            (fresh, false)
+        };
+        // An offer the site laid over the page it moved to (a location or
+        // newsletter popover) is closed as on the first page.
+        let fresh = match (held, state.task.overlay_dismissal(&fresh)) {
+            (false, Some(target))
+                if state.actions_before_extraction
+                    && state
+                        .navigation_discovery
+                        .as_ref()
+                        .is_some_and(AgentNavigationDiscovery::is_site_session) =>
+            {
+                Box::pin(Self::close_overlay(state, worker, browser, fresh, target)).await?
+            }
+            _ => fresh,
+        };
         let captured_at = SemanticCaptureInstant::from_millis(
             state
                 .journal_mut()?
                 .clock
                 .now()
-                .map_err(|_| AgentWorkFailure::Contract)?
+                .map_err(|_| crate::contract!())?
                 .millis(),
         );
         let progress = state.task_progress(&fresh)?;
+        if held {
+            return Ok((fresh, captured_at, progress, None));
+        }
         let navigation_available = !state.navigation_complete();
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&fresh))
@@ -556,14 +654,14 @@ impl AgentWorkController {
         let now = state
             .session
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .policy_now()
             .map_err(AgentWorkFailure::Browser)?;
         let account = state.task.attest_account(operation.context(), now);
         state.native.check_control(worker, browser)?;
         state.check_task_contract()?;
         let account = account?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let turn = Self::provider(
             &mut state.native,
             worker,
@@ -579,7 +677,87 @@ impl AgentWorkController {
             ),
         )
         .await?;
-        Ok((fresh, captured_at, progress, turn))
+        Ok((fresh, captured_at, progress, Some(turn)))
+    }
+}
+
+/// A document's address without the route an app keeps in its fragment.
+pub(super) fn page_address(target: &ContextNavigationTarget) -> String {
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    url.into()
+}
+
+pub(super) fn address_digest(address: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    address.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl AgentWorkController {
+    /// A document a move just committed may still be an application shell of
+    /// loading placeholders. A few bounded looks give it time to fill in, so
+    /// the model is not paid to read, or snapshot again, an empty page. Like
+    /// the first look's wait, this is scheduling only, never readiness proof.
+    async fn observe_after_navigation(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        const DELAYS_MS: [u64; 6] = [250, 500, 1000, 1500, 2000, 2000];
+        let mut observation = Self::observe(state, worker, browser).await?;
+        let started = Instant::now();
+        // A site page that has rendered next to nothing yet (an app booting,
+        // results still on their way) is waited out like a first page.
+        let site = state
+            .navigation_discovery
+            .as_ref()
+            .is_some_and(AgentNavigationDiscovery::is_site_session);
+        for delay in DELAYS_MS {
+            // A results page still saying it loads them gets longer.
+            let announced = site && super::announces_loading(&observation);
+            let deadline = started
+                .checked_add(Duration::from_secs(if announced { 8 } else { 4 }))
+                .ok_or(AgentWorkFailure::Deadline)?
+                .min(state.native.deadline);
+            if !(has_dominant_loading_placeholders(&observation)
+                || announced
+                || (site && super::unrendered(&observation)))
+                || state
+                    .native
+                    .retained
+                    .as_ref()
+                    .is_some_and(|browser| !browser.allows_readiness_retry())
+            {
+                break;
+            }
+            let wake = Instant::now()
+                .checked_add(Duration::from_millis(delay))
+                .ok_or(AgentWorkFailure::Deadline)?;
+            if wake >= deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            state.check_task_contract()?;
+            // The arrival's account is attested once, after its settled look.
+            state.native.check_control(worker, browser)?;
+            let next = Self::observe(state, worker, browser).await?;
+            // A page that loaded its own site meanwhile is a new document:
+            // its look continues the wait.
+            if !super::replaced_document(&observation, &next) {
+                validate_initial_readiness_successor(&observation, &next)?;
+            }
+            observation = next;
+        }
+        Ok(observation)
     }
 }
 
@@ -589,10 +767,10 @@ impl AgentBrowserSession {
         terminal: &ContextNavigationSettlement,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
         if self.navigation_refusal.is_some() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let active = self.navigation.as_ref().ok_or_else(|| crate::contract!())?;
         let receipt = self
             .policy
             .settle_navigation(active, terminal, now)
@@ -610,17 +788,17 @@ impl AgentBrowserSession {
     pub(super) fn settle_navigation_refusal(
         &mut self,
     ) -> Result<NavigationTerminal, AgentWorkFailure> {
-        let refusal = self.navigation_refusal.ok_or(AgentWorkFailure::Contract)?;
+        let refusal = self.navigation_refusal.ok_or_else(|| crate::contract!())?;
         if self
             .navigation
             .as_ref()
             .map(AgentActiveNavigation::operation)
             != Some(refusal.operation)
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let now = self.policy_now().map_err(AgentWorkFailure::Browser)?;
-        let active = self.navigation.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let active = self.navigation.as_ref().ok_or_else(|| crate::contract!())?;
         let receipt = self
             .policy
             .refuse_navigation_dispatch(active, refusal.failure, now)
@@ -640,7 +818,7 @@ impl AgentBrowserSession {
         let journal_failure = self
             .journal
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)
+            .ok_or_else(|| crate::contract!())
             .and_then(|journal| journal.navigation_settled(receipt))
             .err();
         if journal_failure.is_none() {
@@ -665,15 +843,12 @@ impl AgentBrowserSession {
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
-        if receipt.source() != self.account.context()
-            || account.observed_at() < receipt.settled_at()
-            || account.attestation() == self.account.attestation()
-        {
-            return Err(AgentBrowserProviderError::Account(
-                super::super::AgentBrowserAccountError::ContextChanged,
-            ));
+        let arrived = self.arrived.take() == Some(receipt.operation());
+        if arrived {
+            self.validate_account_update(account, receipt.operation().context())?;
+        } else {
+            self.validate_arrival(receipt, account)?;
         }
-        self.validate_account_update(account, receipt.operation().context())?;
         let provisional = self.next_model_call_request()?;
         let request = AgentModelCallRequest::new(
             provisional.id(),
@@ -690,16 +865,16 @@ impl AgentBrowserSession {
                 &self.config,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         self.history_depth = match receipt.kind() {
             AgentNavigationKind::Load => self
                 .history_depth
                 .checked_add(1)
-                .ok_or(AgentBrowserProviderError::Continuation)?,
+                .ok_or_else(|| crate::continuation!())?,
             AgentNavigationKind::HistoryBack => self
                 .history_depth
                 .checked_sub(1)
-                .ok_or(AgentBrowserProviderError::Continuation)?,
+                .ok_or_else(|| crate::continuation!())?,
         };
         self.config = self
             .config
@@ -715,7 +890,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = match action_authority {
             Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
                 &mut self.policy,
@@ -736,9 +911,44 @@ impl AgentBrowserSession {
             ),
         }
         .map_err(AgentBrowserProviderError::from_request)?;
+        if account != self.account {
+            self.account_attestations.push(account.attestation());
+            self.account = account;
+        }
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
+    }
+
+    fn validate_arrival(
+        &mut self,
+        receipt: AgentNavigationReceipt,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        if receipt.source() != self.account.context()
+            || account.observed_at() < receipt.settled_at()
+            || account.attestation() == self.account.attestation()
+        {
+            return Err(AgentBrowserProviderError::Account(
+                super::super::AgentBrowserAccountError::ContextChanged,
+            ));
+        }
+        self.validate_account_update(account, receipt.operation().context())
+    }
+
+    /// Moves the account to the document a settled navigation arrived on
+    /// before anything looks at it again: a bot check or sign-in wall found
+    /// on arrival samples the account of the new document, not the old.
+    pub(super) fn accept_arrival(
+        &mut self,
+        receipt: AgentNavigationReceipt,
+        account: AgentContextAccountBinding,
+    ) -> Result<(), AgentBrowserProviderError> {
+        self.check_live()?;
+        self.validate_arrival(receipt, account)?;
         self.account_attestations.push(account.attestation());
         self.account = account;
-        self.drive(prepared.into_transport_input()).await
+        self.arrived = Some(receipt.operation());
+        Ok(())
     }
 }
 
@@ -749,7 +959,7 @@ impl WorkJournal {
     ) -> Result<(), AgentWorkFailure> {
         self.supervisor
             .record_active_navigation(
-                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
                 active,
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;
@@ -765,7 +975,7 @@ impl WorkJournal {
             .map_err(|_| AgentWorkFailure::Accounting)?;
         self.supervisor
             .record_navigation_result(
-                self.execution.as_ref().ok_or(AgentWorkFailure::Contract)?,
+                self.execution.as_ref().ok_or_else(|| crate::contract!())?,
                 receipt,
             )
             .map_err(|_| AgentWorkFailure::Accounting)?;

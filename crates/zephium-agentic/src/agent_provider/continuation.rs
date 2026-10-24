@@ -61,6 +61,9 @@ pub use observation_checkpoint::{
 /// Larger admitted observations remain valid first turns, but cannot mint a
 /// continuation seed and therefore require a fresh full observation later.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES: usize = 32 * 1024;
+/// Initial bytes a terminal extraction call retains: a listing's mapping text
+/// carries many records and is replayed only by that same extraction call.
+pub const MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES: usize = 192 * 1024;
 /// Maximum private structured transcript bytes retained by one continuation.
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 /// Maximum completed tool/result pairs retained by one continuation.
@@ -69,6 +72,9 @@ pub const MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES: usize = 256 * 1024;
 pub const MAX_AGENT_PROVIDER_CONTINUATION_TURNS: usize = 64;
 /// Transcript bytes past which the oldest looks are retired to a stub.
 const TRANSCRIPT_WORKING_BYTES: usize = 48 * 1024;
+/// Retirement goes down to this, so the next few calls only append and their
+/// shared prefix stays cached instead of changing on every call.
+const TRANSCRIPT_RETIRED_BYTES: usize = 24 * 1024;
 const RETIRED_TOOL_RESULT: &str =
     r#"{"status":"retired","note":"an earlier look; its refs are retired, use the latest look"}"#;
 
@@ -139,6 +145,25 @@ impl AgentProviderActionAuthority {
         })
     }
 
+    /// Checks a native compound primitive against the same current task vocabulary
+    /// advertised to the model. This is not effect or execution authority.
+    pub fn permits_action(
+        &self,
+        observation: &SemanticObservation,
+        action: &crate::SemanticActionProposal,
+    ) -> bool {
+        self.matches(observation)
+            && self
+                .required_effect
+                .is_none_or(|effect| effect == action.effect())
+            && self.entries.iter().any(|entry| {
+                entry.reference == action.intent().target()
+                    && entry
+                        .operations
+                        .contains(action.intent().kind().operation())
+            })
+    }
+
     /// Narrows model proposals; independent native effect assessment still applies.
     pub fn with_required_effect(mut self, effect: crate::SemanticEffectClass) -> Self {
         self.required_effect = Some(effect);
@@ -193,6 +218,7 @@ pub(super) struct AgentProviderActionTargets {
     exclusions: Vec<AgentProviderActionExclusion>,
     host_projected: bool,
     required_effect: Option<crate::SemanticEffectClass>,
+    pub(super) initial_snapshot_refused: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -235,6 +261,7 @@ impl AgentProviderActionTargets {
             guard,
             entries,
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: false,
             required_effect: None,
         })
@@ -250,6 +277,7 @@ impl AgentProviderActionTargets {
             guard: authority.guard,
             entries: authority.entries.clone(),
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: true,
             required_effect: authority.required_effect,
         })
@@ -337,6 +365,7 @@ impl AgentProviderActionTargets {
             guard: diff.current_guard(),
             entries,
             exclusions: Vec::new(),
+            initial_snapshot_refused: false,
             host_projected: false,
             required_effect: None,
         })
@@ -440,7 +469,11 @@ const _: () = {
     assert!(
         MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES
             >= super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
-                + MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+                + MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES
+    );
+    assert!(
+        MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES
+            >= MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
     );
     assert!(MAX_AGENT_PROVIDER_CONTINUATION_TURNS > 0);
 };
@@ -500,6 +533,20 @@ impl AgentProviderTranscript {
         )
     }
 
+    pub(super) fn try_initial_extraction(
+        objective: Arc<str>,
+        mapping_text: String,
+    ) -> Option<Self> {
+        Self::try_initial_bounded(
+            objective,
+            mapping_text,
+            None,
+            None,
+            None,
+            MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES,
+        )
+    }
+
     pub(super) fn try_initial_with_progress(
         objective: Arc<str>,
         initial_observation: String,
@@ -507,8 +554,26 @@ impl AgentProviderTranscript {
         inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
         action_progress: Option<AgentActionProgress>,
     ) -> Option<Self> {
+        Self::try_initial_bounded(
+            objective,
+            initial_observation,
+            navigation_checkpoint,
+            inspection_checkpoint,
+            action_progress,
+            MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES,
+        )
+    }
+
+    fn try_initial_bounded(
+        objective: Arc<str>,
+        initial_observation: String,
+        navigation_checkpoint: Option<super::request::AgentProviderNavigationContext>,
+        inspection_checkpoint: Option<super::request::AgentProviderInspectionContext>,
+        action_progress: Option<AgentActionProgress>,
+        observation_limit: usize,
+    ) -> Option<Self> {
         if objective.len() > super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES
-            || initial_observation.len() > MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES
+            || initial_observation.len() > observation_limit
             || navigation_checkpoint.as_ref().is_some_and(|checkpoint| {
                 checkpoint.text.len()
                     > super::request::MAX_AGENT_PROVIDER_NAVIGATION_CHECKPOINT_BYTES
@@ -551,7 +616,7 @@ impl AgentProviderTranscript {
         })
     }
 
-    fn try_bind(
+    pub(super) fn try_bind(
         mut self,
         correlation: AgentProviderToolCallCorrelation,
         tool_result: String,
@@ -585,11 +650,15 @@ impl AgentProviderTranscript {
     /// Earlier looks' page content is stale once newer looks exist (their
     /// refs are retired): past the working size, the oldest tool results
     /// become a short stub, the latest two kept whole, so a long look at one
-    /// page does not resend every earlier capture on each call.
+    /// page does not resend every earlier capture on each call. Retiring in
+    /// one batch down to a lower mark keeps the prefix stable for later calls.
     fn retire_to_fit(&mut self, incoming: usize) {
+        if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_WORKING_BYTES {
+            return;
+        }
         let keep = self.turns.len().saturating_sub(2);
         for turn in self.turns.iter_mut().take(keep) {
-            if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_WORKING_BYTES {
+            if self.retained_bytes.saturating_add(incoming) <= TRANSCRIPT_RETIRED_BYTES {
                 break;
             }
             if turn.tool_result.len() > RETIRED_TOOL_RESULT.len() {
@@ -632,6 +701,12 @@ impl AgentProviderTranscript {
 
     pub(super) fn action_progress(&self) -> Option<&str> {
         self.action_progress.as_ref().map(AgentActionProgress::text)
+    }
+
+    pub(super) fn action_steps(&self) -> Option<String> {
+        self.action_progress
+            .as_ref()
+            .and_then(AgentActionProgress::steps)
     }
 
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
@@ -697,6 +772,10 @@ impl AgentProviderBoundTranscript {
 
     pub(super) fn action_progress(&self) -> Option<&str> {
         self.prior.action_progress()
+    }
+
+    pub(super) fn action_steps(&self) -> Option<String> {
+        self.prior.action_steps()
     }
 
     pub(super) fn navigation_checkpoint(&self) -> Option<&str> {
@@ -835,8 +914,14 @@ impl AgentProviderContinuationSeed {
                 }
                 baseline
             }
-            AgentProviderInputEvidence::Extraction(_)
-            | AgentProviderInputEvidence::Screenshot(_) => {
+            AgentProviderInputEvidence::Screenshot(receipt) => {
+                let baseline = continuation_baseline?;
+                if !receipt.matches_baseline(&baseline) {
+                    return None;
+                }
+                baseline
+            }
+            AgentProviderInputEvidence::Extraction(_) => {
                 return None;
             }
         };
@@ -1000,11 +1085,38 @@ impl AgentProviderNavigationCheckpoint {
             || request.account().context() != successor
             || request.account().account() != receipt.account()
             || request.account().observed_at() < receipt.settled_at()
-            || observation.frames()[0].frame().origin() != &target_origin
+            || !(observation.frames()[0].frame().origin() == &target_origin
+                || landed_on_same_site(&self.target, observation))
         {
             return Err(AgentProviderContinuationError::Baseline);
         }
         Ok(())
+    }
+}
+
+/// A site load the site-session gate followed to another host of the same
+/// site, or to its brand's country domain (yelp.com to yelp.pl).
+fn landed_on_same_site(
+    target: &crate::ContextNavigationTarget,
+    observation: &crate::SemanticObservation,
+) -> bool {
+    let Some(frame) = observation.frames().first() else {
+        return false;
+    };
+    let Ok(landed) =
+        crate::ContextNavigationTarget::parse(frame.frame().origin().as_url().as_str())
+    else {
+        return false;
+    };
+    if crate::same_work_site(target, &landed) {
+        return true;
+    }
+    match (
+        crate::registrable_site(target),
+        crate::registrable_site(&landed),
+    ) {
+        (Some(from), Some(to)) => crate::brand_family(from.as_bytes(), to.as_bytes()).is_some(),
+        _ => false,
     }
 }
 
@@ -1015,6 +1127,39 @@ impl fmt::Debug for AgentProviderNavigationCheckpoint {
 }
 
 impl AgentProviderContinuation {
+    /// Binds only this call's exact form and advertised targets. Every later
+    /// primitive still requires fresh native binding and task/effect admission.
+    pub fn bind_form_targets(
+        &self,
+        form: &super::AgentBrowserFormProposal,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+    ) -> Result<super::AgentBrowserFormBinding, super::AgentBrowserFormError> {
+        use super::{AgentBrowserFormError, AgentBrowserFormFault};
+        let denied = AgentBrowserFormError {
+            field: None,
+            fault: AgentBrowserFormFault::Authority,
+        };
+        if config != &self.config
+            || !config.permits_tool(AgentBrowserToolKind::FillForm)
+            || self.tool_kind() != AgentBrowserToolKind::FillForm
+            || !self.baseline.matches(observation)
+            || super::form::decode(&self.correlation.arguments).as_ref() != Ok(form)
+        {
+            return Err(denied);
+        }
+        let targets = self
+            .transcript
+            .action_targets()
+            .filter(|targets| targets.matches(observation))
+            .ok_or(denied)?;
+        form.bind_targets(observation, |reference, kind| {
+            targets
+                .permitted_references(kind)
+                .any(|allowed| allowed == reference)
+        })
+    }
+
     /// Consumes the exact Navigate proposal and retires all old provider replay.
     /// The target must be the immutable trusted task destination, not a selector
     /// or a value inferred from page/model content by the host.
@@ -1059,7 +1204,18 @@ impl AgentProviderContinuation {
         if config != &self.config {
             return Err(AgentProviderContinuationError::Config);
         }
-        if self.correlation.kind() != AgentBrowserToolKind::Act {
+        // An action's own load, or one the page started by itself while the
+        // model looked or read: either way the document it saw is gone.
+        if !matches!(
+            self.correlation.kind(),
+            AgentBrowserToolKind::Act
+                | AgentBrowserToolKind::FillForm
+                | AgentBrowserToolKind::Snapshot
+                | AgentBrowserToolKind::Locate
+                | AgentBrowserToolKind::Read
+                | AgentBrowserToolKind::Wait
+                | AgentBrowserToolKind::Screenshot
+        ) {
             return Err(AgentProviderContinuationError::ToolKind);
         }
         if !self.baseline.matches(observation) {
@@ -1143,7 +1299,8 @@ impl AgentProviderContinuation {
         self.transcript.retained_bytes()
     }
 
-    /// Carries only content-free independently verified outcomes across observation refreshes.
+    /// Carries independently verified outcomes across observation refreshes:
+    /// a content-free host record, and the planner's own call replayed to it.
     pub fn with_verified_action_progress(
         mut self,
         result: &crate::SemanticActionResult,
@@ -1156,8 +1313,12 @@ impl AgentProviderContinuation {
             .transcript
             .action_progress
             .as_ref()
-            .map_or(0, |p| p.text().len());
-        let progress = AgentActionProgress::record(self.transcript.action_progress.take(), result)?;
+            .map_or(0, AgentActionProgress::retained_len);
+        let progress = AgentActionProgress::record(
+            self.transcript.action_progress.take(),
+            result,
+            Some(("act", self.correlation.arguments.as_str())),
+        )?;
         let retired_inspection_bytes = self
             .transcript
             .inspection_checkpoint
@@ -1170,7 +1331,7 @@ impl AgentProviderContinuation {
             .retained_bytes
             .checked_sub(previous_bytes)
             .and_then(|bytes| bytes.checked_sub(retired_inspection_bytes))
-            .and_then(|bytes| bytes.checked_add(progress.text().len()))
+            .and_then(|bytes| bytes.checked_add(progress.retained_len()))
             .filter(|bytes| *bytes <= MAX_AGENT_PROVIDER_CONTINUATION_TRANSCRIPT_BYTES)
             .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
         self.transcript.action_progress = Some(progress);
@@ -1241,12 +1402,37 @@ impl AgentProviderContinuation {
             return Err(AgentProviderContinuationError::Payload);
         }
         let self_with_progress = self.with_verified_action_progress(result)?;
+        let suggestions = typed_choices(current);
+        let suggested;
+        let guidance = if result.verified().kind == crate::SemanticActionKind::Fill
+            && !suggestions.is_empty()
+        {
+            // An airport or place field took the typed text but chose
+            // nothing: the planner scrolled on and searched the old value.
+            suggested = format!("The prior action was independently verified: the text is in the field, and the page now shows choices for it ({}): suggestions, or a calendar's days. Typing alone chooses nothing: your next step is a click on the one that matches what you meant (effect read, verification page_changed); they are already on screen, so do not scroll or look again first. The field is set only when the page then shows your choice in it. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.", suggestions.join(", "));
+            suggested.as_str()
+        } else if let Some(field) = (result.verified().kind == crate::SemanticActionKind::Click)
+            .then(|| opened_field(current))
+            .flatten()
+        {
+            // Delta's origin button opens a picker whose focused field sits
+            // at the end of the look; planners scrolled past it.
+            suggested = format!("The prior action was independently verified. It opened a field the page focused for typing, {field}: if you clicked to choose a value (a place, a date, a search), fill {field} next, then pick the matching suggestion. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs.");
+            suggested.as_str()
+        } else if result.verified().kind == crate::SemanticActionKind::Fill {
+            // Planners typed a query and then scrolled or looked again,
+            // never running it.
+            "The prior action was independently verified: the text is in the field. If it is a place, airport or date field whose suggestions are still loading, take one fresh look (snapshot initial) and click the matching suggestion. If the field searches or filters, run it now with press Enter in it (effect read, verification page_changed) or a click on its search button; do not scroll or look again first. This is the fresh post-action viewport. All prior semantic refs are retired. Use only current refs."
+        } else {
+            "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent."
+        };
         let output = serde_json::json!({
             "status": "verified",
             "update": "replace_observation",
-            "guidance": "The prior action was independently verified. This is the fresh post-action viewport: inspect it directly; another snapshot is only needed for missing details. All prior semantic refs are retired. Use only current refs. Truncation does not mean omitted content is absent.",
+            "guidance": guidance,
             "observation": payload.as_str(),
-        }).to_string();
+        })
+        .to_string();
         let (prior, _, _, correlation, transcript) = self_with_progress.into_parts();
         // Effects invalidate inspection anchors and old page replay. Keep the
         // objective and exact navigation policy binding; original run budgets
@@ -1432,6 +1618,7 @@ impl AgentProviderContinuation {
                     guard: authority.guard,
                     entries: authority.entries.clone(),
                     exclusions: Vec::new(),
+                    initial_snapshot_refused: false,
                     host_projected: true,
                     required_effect: authority.required_effect,
                 })
@@ -1578,11 +1765,11 @@ impl AgentProviderContinuation {
         // Read(initial) formats the exact acknowledged baseline, whether that
         // baseline was initial or separately captured/delivered by Snapshot.
         // It never answers an expansion request or creates new references.
-        if !matches!(
-            self.correlation.read_scope.as_ref(),
-            Some(super::AgentBrowserScopeProposal::Initial)
-        ) {
-            return Err(AgentProviderContinuationError::Scope);
+        match (self.correlation.read_scope.as_ref(), read.selected_target()) {
+            (Some(super::AgentBrowserScopeProposal::Initial), None) => {}
+            (Some(super::AgentBrowserScopeProposal::Subtree(wanted)), Some(actual))
+                if *wanted == actual && !read.has_retained_evidence() => {}
+            _ => return Err(AgentProviderContinuationError::Scope),
         }
         if !read.matches_acknowledgement(&self.baseline) {
             return Err(AgentProviderContinuationError::Baseline);
@@ -2305,8 +2492,8 @@ impl fmt::Debug for AgentProviderBoundExtractionContinuation {
 /// Move-only provider continuation bound to one exact viewport screenshot.
 ///
 /// The canonical PNG is retained only until the fixed provider body is
-/// serialized. This type cannot create another continuation or introduce
-/// opaque semantic references from pixels.
+/// serialized. A later continuation may retain only the already delivered
+/// semantic baseline; pixels cannot introduce opaque references.
 #[must_use]
 pub struct AgentProviderBoundScreenshotContinuation {
     prior_call: AgentProviderCallIdentity,
@@ -2420,6 +2607,34 @@ impl fmt::Debug for AgentProviderBoundScreenshotContinuation {
     }
 }
 
+/// The focused public text field a click left on screen.
+fn opened_field(look: &SemanticObservation) -> Option<String> {
+    use crate::SemanticRole as Role;
+    look.frames()
+        .iter()
+        .flat_map(|frame| frame.nodes())
+        .find(|node| {
+            matches!(
+                node.role(),
+                Role::Textbox | Role::Searchbox | Role::Combobox
+            ) && node.states().contains(crate::SemanticState::Focused)
+                && node.geometry().is_some()
+                && node.sensitivity() == crate::SemanticSensitivity::Public
+                && node
+                    .operations()
+                    .contains(crate::SemanticOperationClass::Fill)
+        })
+        .map(|node| node.reference().model_token())
+}
+
+fn typed_choices(look: &SemanticObservation) -> Vec<String> {
+    crate::semantic_typed_choices(look)
+        .into_iter()
+        .take(12)
+        .map(|node| node.reference().model_token())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     // Fixture constructors live with the tests so production stays panic-free.
@@ -2442,6 +2657,7 @@ mod tests {
                     })
                     .collect(),
                 exclusions: Vec::new(),
+                initial_snapshot_refused: false,
                 host_projected: false,
                 required_effect: None,
             }
@@ -2629,6 +2845,116 @@ mod tests {
         .expect("assembler")
         .finish()
         .expect("finish")
+    }
+
+    #[test]
+    fn form_fields_keep_native_identity_and_the_advertised_operation_subset() {
+        use crate::{AgentBrowserFormFault, SemanticActionKind as Action};
+        let nodes = json!([
+            {"k":1,"r":"document","o":16,"fc":true},
+            {"k":2,"p":0,"r":"textbox","n":"From","o":2,"fc":true},
+            {"k":3,"p":0,"r":"button","n":"Search","o":1,"fc":true}
+        ]);
+        let before = observation_with_nodes(context(), 10, 10, 10, nodes.clone());
+        let form = super::super::form::decode(
+            r#"{"fields":[{"target":"@a2","value":"Northport"}],"submit":"@a3"}"#,
+        )
+        .unwrap();
+        let allowed = |reference, kind| {
+            (reference == SemanticReferenceId::new(2).unwrap() && kind == Action::Fill)
+                || (reference == SemanticReferenceId::new(3).unwrap() && kind == Action::Click)
+        };
+        assert_eq!(
+            form.bind_targets(&before, |_, _| false).unwrap_err().fault,
+            AgentBrowserFormFault::Target
+        );
+        let binding = form.bind_targets(&before, allowed).unwrap();
+        let current = observation_with_nodes(context(), 11, 11, 11, nodes.clone());
+        assert_eq!(
+            binding.field_reference(0, Action::Fill, &current).unwrap(),
+            SemanticReferenceId::new(2).unwrap()
+        );
+        assert!(binding.field_reference(0, Action::Click, &current).is_err());
+        assert!(binding
+            .field_reference(usize::MAX, Action::Fill, &current)
+            .is_err());
+        assert_eq!(
+            binding.submit_reference(&current).unwrap(),
+            Some(SemanticReferenceId::new(3).unwrap())
+        );
+        for (field, value) in [("n", json!("Password")), ("k", json!(9)), ("o", json!(0))] {
+            let mut changed = nodes.clone();
+            changed[1][field] = value;
+            let changed = observation_with_nodes(context(), 12, 12, 12, changed);
+            assert!(binding.field_reference(0, Action::Fill, &changed).is_err());
+        }
+        assert!(!format!("{binding:?}").contains("From"));
+    }
+
+    #[test]
+    fn form_choice_requires_an_owned_unique_committed_option_not_typed_text() {
+        use crate::{AgentBrowserFormFault, SemanticActionIntent, SemanticActionKind as Action};
+        let node = |selected| {
+            json!([
+                {"k":1,"r":"document","fc":true},
+                {"k":2,"p":0,"r":"combobox","n":"Station","v":{"k":"text","value":"Northport"},"o":6,"fc":true},
+                {"k":3,"p":1,"r":"option","n":"Northport","s":if selected {crate::SemanticState::Selected.bit()} else {0},"fc":true},
+                {"k":4,"p":0,"r":"option","n":"Northport","fc":true}
+            ])
+        };
+        let before = observation_with_nodes(context(), 20, 20, 20, node(false));
+        let form = super::super::form::decode(
+            r#"{"fields":[{"target":"@a2","value":"Northport"}],"submit":null}"#,
+        )
+        .unwrap();
+        let binding = form
+            .bind_targets(&before, |_, kind| {
+                matches!(kind, Action::Fill | Action::Select)
+            })
+            .unwrap();
+        let action = binding
+            .field_action(0, &before)
+            .unwrap()
+            .expect("must select, despite exact typed text");
+        assert!(
+            matches!(action.intent(), SemanticActionIntent::Select { target, option }
+            if *target == SemanticReferenceId::new(2).unwrap() && *option == SemanticReferenceId::new(3).unwrap())
+        );
+        let committed = observation_with_nodes(context(), 21, 21, 21, node(true));
+        assert!(binding.field_action(0, &committed).unwrap().is_none());
+        let mut open = node(false);
+        open[1]["s"] = json!(crate::SemanticState::Expanded.bit());
+        let open = observation_with_nodes(context(), 30, 30, 30, open);
+        let mut closed = node(false);
+        closed.as_array_mut().unwrap().truncate(2);
+        let after = observation_with_nodes(context(), 31, 31, 31, closed.clone());
+        assert!(binding.choice_collapsed(0, &open, &after));
+        assert!(!binding.choice_collapsed(0, &before, &after));
+        closed[1]["v"]["value"] = json!("Different station");
+        let changed = observation_with_nodes(context(), 32, 32, 32, closed);
+        assert!(!binding.choice_collapsed(0, &open, &changed));
+        let mut visible = node(false);
+        visible[2]["n"] = json!("Northport.");
+        visible[2]["t"] = json!("Northport");
+        let visible = observation_with_nodes(context(), 33, 33, 33, visible);
+        assert!(
+            binding.field_action(0, &visible).unwrap().is_some(),
+            "exact observed visible labels also identify options"
+        );
+        let mut ambiguous = node(false);
+        ambiguous[3]["p"] = json!(1);
+        let ambiguous = observation_with_nodes(context(), 22, 22, 22, ambiguous);
+        assert_eq!(
+            binding.field_action(0, &ambiguous).unwrap_err().fault,
+            AgentBrowserFormFault::AmbiguousOption
+        );
+        let mut pending = node(false);
+        pending.as_array_mut().unwrap().remove(2);
+        let pending = observation_with_nodes(context(), 23, 23, 23, pending);
+        assert_eq!(
+            binding.field_action(0, &pending).unwrap_err().fault,
+            AgentBrowserFormFault::OptionPending
+        );
     }
 
     fn locate_result(
@@ -3203,6 +3529,220 @@ mod tests {
     }
 
     #[test]
+    fn a_typed_fields_suggestions_and_calendar_days_are_named_as_its_choices() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let picker = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"textbox","n":"Leaving from","o":11,"s":64,"b":at,"v":{"k":"text","value":"New York"}},
+                {"k":3,"p":0,"r":"dialog","n":"More details"},
+                {"k":4,"p":2,"r":"list"},
+                {"k":5,"p":3,"r":"button","n":"New York (JFK)","o":1,"b":at},
+                {"k":6,"p":0,"r":"listbox","n":"Airports"},
+                {"k":7,"p":5,"r":"option","n":"LGA","o":1,"b":at},
+                {"k":8,"p":0,"r":"dialog","n":"Cookies"},
+                {"k":9,"p":7,"r":"button","n":"Reject all","o":1,"b":at},
+                {"k":10,"p":0,"r":"button","n":"Search","o":1,"b":at}
+            ]),
+        );
+        assert_eq!(typed_choices(&picker), vec!["@a5", "@a7"]);
+        assert_eq!(opened_field(&picker).as_deref(), Some("@a2"));
+    }
+
+    #[test]
+    fn an_unchanged_look_answers_with_its_fields_empty_ones_first() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let form = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"textbox","n":"Leaving from","o":11,"b":at,"v":{"k":"text","value":"Warsaw"}},
+                {"k":3,"p":0,"r":"textbox","n":"Going to","o":11,"b":at,"v":{"k":"text","value":""}},
+                {"k":4,"p":0,"r":"button","n":"Search","o":1,"b":at}
+            ]),
+        );
+        let controls = super::observation_checkpoint::held_controls(&form);
+        assert_eq!(
+            controls["fields"],
+            json!([
+                {"ref":"@a3","role":"textbox","name":"Going to","empty":true},
+                {"ref":"@a2","role":"textbox","name":"Leaving from","value":"Warsaw"}
+            ])
+        );
+        assert_eq!(controls["choices"], json!([]));
+    }
+
+    #[test]
+    fn only_a_choice_that_clearly_is_what_was_typed_is_taken() {
+        let at = json!({"x": 10, "y": 10, "w": 80, "h": 20});
+        let airports = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"listbox","n":"Airports"},
+                {"k":3,"p":1,"r":"option","n":"JFK","t":"JFK New York-Kennedy, NY","o":1,"b":at},
+                {"k":4,"p":1,"r":"option","n":"NYC","t":"NYC New York City Area Airports, NY","o":1,"b":at},
+                {"k":5,"p":0,"r":"dialog","n":"More details"},
+                {"k":6,"p":4,"r":"list"},
+                {"k":7,"p":5,"r":"button","n":"New York (LGA - LaGuardia)","o":1,"b":at},
+                {"k":8,"p":5,"r":"button","n":"Newark (EWR - Newark Liberty Intl.)","o":1,"b":at},
+                {"k":9,"p":5,"r":"button","n":"New York (NYC - All Airports)","o":1,"b":at}
+            ]),
+        );
+        let reference = |key: usize| airports.frames()[0].nodes()[key - 1].reference();
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "JFK"),
+            Some(reference(3))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "lga"),
+            Some(reference(7))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "Newark"),
+            Some(reference(8))
+        );
+        // An exact name wins over another choice that only mentions it.
+        assert_eq!(
+            crate::semantic_sole_choice(&airports, "NYC"),
+            Some(reference(4))
+        );
+        assert_eq!(crate::semantic_sole_choice(&airports, "New York"), None);
+        assert_eq!(crate::semantic_sole_choice(&airports, "J"), None);
+
+        let calendar = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"dialog","n":"Choose dates"},
+                {"k":3,"p":1,"r":"table","n":"November 2026"},
+                {"k":4,"p":2,"r":"button","n":"Tuesday, November 10, 2026","o":1,"b":at},
+                {"k":5,"p":2,"r":"button","n":"Wednesday, November 11, 2026","o":1,"b":at},
+                {"k":6,"p":1,"r":"table","n":"December 2026"},
+                {"k":7,"p":5,"r":"button","n":"Thursday, December 10, 2026","o":1,"b":at}
+            ]),
+        );
+        let day = |key: usize| calendar.frames()[0].nodes()[key - 1].reference();
+        assert_eq!(
+            crate::semantic_sole_choice(&calendar, "2026-11-10"),
+            Some(day(4))
+        );
+        assert_eq!(
+            crate::semantic_sole_choice(&calendar, "12/10/2026"),
+            Some(day(7))
+        );
+        assert_eq!(crate::semantic_sole_choice(&calendar, "2027-11-10"), None);
+        assert_eq!(
+            crate::semantic_picker_values("2026-11-10 - 2026-12-10"),
+            vec!["2026-11-10", "2026-12-10"]
+        );
+        assert_eq!(
+            crate::semantic_picker_values("JFK - LAX"),
+            vec!["JFK - LAX"]
+        );
+
+        let set = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"button","n":"Origin, JFK, New York-Kennedy, NY","o":1,"b":at}
+            ]),
+        );
+        let origin = set.frames()[0].nodes()[1].reference();
+        assert!(crate::semantic_shows_value(&set, origin, "jfk"));
+        assert!(!crate::semantic_shows_value(&set, origin, "LAX"));
+    }
+
+    #[test]
+    fn refused_scroll_streak_removes_scroll_but_keeps_form_actions_on_that_observation() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"combobox","n":"Destination","o":11,"v":{"k":"text","value":""}},
+                {"k":3,"p":0,"r":"button","n":"Open dates","o":1}
+            ]),
+        );
+        let cfg = config(AgentProviderKind::OpenAiResponses);
+        let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        let turn = action_turn_with_targets(
+            &observed,
+            cfg.clone(),
+            targets,
+            json!({"actions":[{
+                "kind":"scroll","target":"@a1","direction":"down","amount":"page","effect":"read",
+                "wait":{"kind":"immediate"},"verification":{"kind":"scroll_position_changed"},"settle_millis":2000
+            }]}),
+        );
+        let resolution = turn
+            .resolve_action(
+                crate::SemanticActionBatchId::new(1).unwrap(),
+                &observed,
+                &[observed.frames()[0].frame().clone()],
+                &cfg,
+            )
+            .unwrap();
+        let AgentProviderActionResolution::Bound(_, continuation, context) = resolution else {
+            panic!("scroll did not bind");
+        };
+        let refusal = AgentProviderActionRefusal::unissued(
+            continuation,
+            crate::SemanticActionBindingError::AssignmentDenied,
+            context,
+        )
+        .scrolled_enough();
+        let (_, bound) = refusal
+            .bind(&observed, &cfg, "same observed form".into())
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_str(bound.latest().tool_result()).unwrap();
+        assert_eq!(result["code"], "scrolled_enough");
+        assert_eq!(result["executed"], false);
+        let targets = bound.action_targets().unwrap();
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Scroll)
+                .count(),
+            0
+        );
+        assert_eq!(
+            targets
+                .permitted_references(crate::SemanticActionKind::Fill)
+                .map(SemanticReferenceId::get)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(targets
+            .permitted_references(crate::SemanticActionKind::Click)
+            .any(|reference| reference.get() == 3));
+        assert_eq!(
+            AgentProviderActionTargets::try_from_observation(&observed)
+                .unwrap()
+                .permitted_references(crate::SemanticActionKind::Scroll)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn reading_dialog_effect_mismatch_preserves_target_for_corrected_proposal() {
         use crate::{SemanticEffectClass, SemanticOperationClass, SemanticOperations};
         let observed = observation_with_nodes(
@@ -3258,6 +3798,10 @@ mod tests {
         assert_eq!(result["executed"], false);
         assert_eq!(result["required_effect"], "read");
         assert_eq!(result["code"], "task_effect_mismatch");
+        let guidance = result["guidance"].as_str().unwrap();
+        assert!(
+            guidance.contains("with effect set to read") && !guidance.contains("required_effect")
+        );
         let targets = bound.prior.take_action_targets().unwrap();
         assert_eq!(targets.exclusion_count(), 0);
         assert_eq!(targets.required_effect(), Some(SemanticEffectClass::Read));
@@ -3280,6 +3824,213 @@ mod tests {
             corrected,
             AgentProviderActionResolution::Bound(..)
         ));
+    }
+
+    #[test]
+    fn a_select_on_a_checkbox_or_a_suggestion_binds_as_a_click_on_the_option() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},
+                {"k":2,"p":0,"r":"checkbox","n":"32 GB","o":9},
+                {"k":3,"p":0,"r":"combobox","n":"From","o":11},
+                {"k":4,"p":0,"r":"option","n":"Krakow, Poland","o":9},
+                {"k":5,"p":0,"r":"paragraph","t":"Vienna, Austria"},
+                {"k":6,"p":0,"r":"listbox","n":"Departure choices","o":8},
+                {"k":7,"p":5,"r":"option","n":"Morning","o":9},
+                {"k":8,"p":0,"r":"listbox","n":"Native choices","o":12},
+                {"k":9,"p":7,"r":"option","n":"Native option","o":9}
+            ]),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let frames = [observed.frames()[0].frame().clone()];
+        let select = |target: &str, option: &str| {
+            json!({"actions":[{
+                "kind":"select","target":target,"option":option,"effect":"local_write",
+                "settle_millis":2000,"wait":{"kind":"immediate"},
+                "verification":{"kind":"target_selection_matches_option"}
+            }]})
+        };
+        for (target, option, clicked) in [("@a2", "@a2", 2), ("@a3", "@a4", 4), ("@a6", "@a7", 7)] {
+            let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+            let resolution = action_turn_with_targets(
+                &observed,
+                config.clone(),
+                targets,
+                select(target, option),
+            )
+            .resolve_action(
+                crate::SemanticActionBatchId::new(1).unwrap(),
+                &observed,
+                &frames,
+                &config,
+            )
+            .unwrap();
+            let AgentProviderActionResolution::Bound(batch, _, _) = resolution else {
+                panic!("select on {target} was not bound as a click")
+            };
+            let action = &batch.actions()[0];
+            assert_eq!(action.kind(), crate::SemanticActionKind::Click);
+            assert_eq!(
+                action.target_reference(),
+                SemanticReferenceId::new(clicked).unwrap()
+            );
+            assert_eq!(
+                action.verification(),
+                crate::SemanticVerification::PageChanged
+            );
+            assert_eq!(action.effect(), crate::SemanticEffectClass::LocalWrite);
+        }
+        let foreign = action_turn_with_targets(
+            &observed,
+            config.clone(),
+            AgentProviderActionTargets::try_from_observation(&observed).unwrap(),
+            select("@a6", "@a4"),
+        )
+        .resolve_action(
+            crate::SemanticActionBatchId::new(1).unwrap(),
+            &observed,
+            &frames,
+            &config,
+        )
+        .unwrap();
+        assert!(
+            matches!(foreign, AgentProviderActionResolution::Refused(_)),
+            "a foreign option cannot satisfy selection of this listbox"
+        );
+        let mut denied = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        denied.exclude_for_test(
+            crate::SemanticActionKind::Select,
+            8,
+            crate::SemanticActionBindingError::Reference(
+                crate::SemanticReferenceError::OperationDenied,
+            ),
+        );
+        let resolution =
+            action_turn_with_targets(&observed, config.clone(), denied, select("@a8", "@a9"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        assert!(
+            matches!(resolution, AgentProviderActionResolution::Refused(_)),
+            "a host-refused native select cannot become an option click"
+        );
+        // A suggestion the page made no clickable control stays refused.
+        let targets = AgentProviderActionTargets::try_from_observation(&observed).unwrap();
+        let resolution =
+            action_turn_with_targets(&observed, config.clone(), targets, select("@a3", "@a5"))
+                .resolve_action(
+                    crate::SemanticActionBatchId::new(1).unwrap(),
+                    &observed,
+                    &frames,
+                    &config,
+                )
+                .unwrap();
+        assert!(matches!(
+            resolution,
+            AgentProviderActionResolution::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn no_progress_fingerprints_ignore_capture_ids_but_keep_values_targets_and_geometry() {
+        use crate::{AgentBrowserScopeProposal, AgentBrowserToolProposal};
+        let nodes = |key, value: &str, y| {
+            json!([
+                {"k":key,"r":"document","o":16},
+                {"k":key+1,"p":0,"r":"textbox","n":"Station","v":{"k":"text","value":value},"o":11,"b":{"x":0,"y":y,"w":200,"h":30}},
+                {"k":key+2,"p":0,"r":"button","n":"Refresh","o":1,"b":{"x":0,"y":100,"w":100,"h":30}}
+            ])
+        };
+        let a = observation_with_nodes(context(), 1, 1, 1, nodes(1, "old", 50));
+        let b = observation_with_nodes(context(), 2, 2, 2, nodes(91, "old", 50));
+        let changed = observation_with_nodes(context(), 3, 3, 3, nodes(1, "new", 50));
+        let scrolled = observation_with_nodes(context(), 4, 4, 4, nodes(1, "old", -50));
+        let proposal = |value: &str, millis| {
+            super::super::AgentBrowserToolCall::decode(call(1),"call_progress".into(),"act",json!({"actions":[{
+            "kind":"fill","target":"@a2","value":value,"effect":"local_write","wait":{"kind":"immediate"},"verification":{"kind":"target_value_matches_input"},"settle_millis":millis
+        }]}).to_string()).unwrap()
+        };
+        let original = proposal("new", 1000);
+        let key = original.proposal().progress_fingerprint(&a).unwrap();
+        assert_eq!(key, original.proposal().progress_fingerprint(&b).unwrap());
+        assert_eq!(
+            key,
+            proposal("new", 2000)
+                .proposal()
+                .progress_fingerprint(&a)
+                .unwrap()
+        );
+        assert_ne!(
+            key,
+            proposal("different", 1000)
+                .proposal()
+                .progress_fingerprint(&a)
+                .unwrap()
+        );
+        assert_ne!(
+            key,
+            original.proposal().progress_fingerprint(&changed).unwrap()
+        );
+        assert_ne!(
+            key,
+            original.proposal().progress_fingerprint(&scrolled).unwrap()
+        );
+        let snapshot = AgentBrowserToolProposal::Snapshot(AgentBrowserScopeProposal::Initial);
+        assert_eq!(
+            snapshot.progress_fingerprint(&a),
+            snapshot.progress_fingerprint(&b)
+        );
+        assert!(AgentBrowserToolProposal::Screenshot
+            .progress_fingerprint(&a)
+            .is_none());
+        assert!(AgentBrowserToolProposal::Extract {
+            scope: AgentBrowserScopeProposal::Initial,
+            schema: crate::SemanticExtractionSchemaId::new(1).unwrap()
+        }
+        .progress_fingerprint(&a)
+        .is_none());
+    }
+
+    #[test]
+    fn no_progress_refusal_preserves_the_exact_action_correlation_and_baseline() {
+        let observed = observation_with_nodes(
+            context(),
+            1,
+            1,
+            1,
+            json!([
+                {"k":1,"r":"document"},{"k":2,"p":0,"r":"textbox","n":"Query","v":{"k":"text","value":"old"},"o":11}
+            ]),
+        );
+        let cfg = config(AgentProviderKind::OpenAiResponses);
+        let turn = action_refusal_turn(&observed, cfg.clone(), "@a2");
+        let refusal = turn
+            .into_parts()
+            .1
+            .refuse_no_progress(&observed, &cfg)
+            .unwrap_or_else(|_| panic!("current owned proposal"));
+        let (_, transcript) = refusal
+            .bind(&observed, &cfg, "fresh bounded observation".into())
+            .unwrap();
+        let result: serde_json::Value =
+            serde_json::from_str(transcript.latest.tool_result()).unwrap();
+        assert_eq!(result["code"], "no_progress");
+        assert_eq!(result["executed"], false);
+        assert_eq!(result["observation_unchanged"], true);
+        let other = observation(context(), 2, 2, 2, "changed");
+        assert!(action_refusal_turn(&observed, cfg.clone(), "@a2")
+            .into_parts()
+            .1
+            .refuse_no_progress(&other, &cfg)
+            .is_err());
     }
 
     #[test]
@@ -3598,13 +4349,17 @@ mod tests {
                 SemanticActionBindingError::CurrentFrameCohort
             ))
         ));
-        assert!(matches!(
+        // A ref the look never showed is the model's slip: it hears so.
+        let Ok(AgentProviderActionResolution::Refused(unknown)) =
             action_refusal_turn(&initial, config.clone(), "@a99")
-                .resolve_action(batch, &initial, &frames, &config),
-            Err(AgentProviderActionResolutionError::Binding(
-                SemanticActionBindingError::Reference(SemanticReferenceError::Unknown)
-            ))
-        ));
+                .resolve_action(batch, &initial, &frames, &config)
+        else {
+            panic!("an unknown ref is refused to the model");
+        };
+        assert_eq!(
+            unknown.reason(),
+            SemanticActionBindingError::Reference(SemanticReferenceError::Unknown)
+        );
         let changed_config = config.clone().restrict_to_navigation_and_extraction();
         assert!(matches!(
             make().resolve_action(batch, &initial, &frames, &changed_config),
@@ -4373,12 +5128,18 @@ mod tests {
                     .retire_for_observation(&previous, &config)
                     .unwrap()
             };
-            assert!(
+            // A search inside a node that is no search boundary searches the
+            // document instead of refusing the inspection.
+            let redirected =
                 continuation(json!({"kind":"text_search","target":"@a2","query":"width"}))
                     .retire_for_observation(&previous, &config)
-                    .is_err()
-            );
-            for target in ["@a2", "@a99"] {
+                    .unwrap();
+            assert!(matches!(
+                redirected.expansion(),
+                Some((target, crate::SemanticExpansionKind::TextSearch(_))) if target.model_token() == "@a1"
+            ));
+            {
+                let target = "@a99";
                 let refused = || match continuation(
                     json!({"kind":"text_search","target":target,"query":"$"}),
                 )
@@ -4968,6 +5729,78 @@ mod tests {
     }
 
     #[test]
+    fn a_second_whole_look_of_an_unchanged_page_is_refused_toward_scrolling() {
+        let previous = observation(context(), 1, 1, 1, "body");
+        let current = observation(context(), 2, 2, 2, "body");
+        let history = AgentInspectionProgress::record(None, &previous, &current).unwrap();
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .with_baseline_read()
+            .with_progressive_observation();
+        let mut transcript = AgentProviderTranscript::try_initial_with_checkpoints(
+            Arc::from("Read the page"),
+            "current observation".into(),
+            None,
+            Some(super::super::request::AgentProviderInspectionContext {
+                text: history.encode(&current).unwrap(),
+                progress: history,
+            }),
+        )
+        .unwrap();
+        transcript.set_action_targets(
+            AgentProviderActionTargets::try_from_observation(&current).unwrap(),
+        );
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&current),
+        );
+        let continuation = snapshot_scope_continuation_with_transcript(
+            AgentProviderKind::OpenAiResponses,
+            baseline,
+            config.clone(),
+            json!({"kind":"initial"}),
+            transcript,
+        );
+        let AgentProviderObservationResolution::Refused(refusal) =
+            continuation.resolve_observation(&current, &config).unwrap()
+        else {
+            panic!("unchanged initial capture must be refused");
+        };
+        let (_, bound) = refusal
+            .bind(&current, &config, "same current observation".into())
+            .unwrap();
+        assert!(bound.action_targets().unwrap().initial_snapshot_refused);
+        let wire: serde_json::Value = serde_json::from_slice(
+            &super::super::request::encode_openai_continuation_body(&config, &bound).unwrap(),
+        )
+        .unwrap();
+        let snapshot = wire["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "snapshot")
+            .unwrap();
+        let scopes = snapshot["parameters"]["properties"]["scope"]["anyOf"]
+            .as_array()
+            .unwrap();
+        assert!(!scopes
+            .iter()
+            .any(|scope| scope["properties"]["kind"]["enum"][0] == "initial"));
+        assert!(scopes
+            .iter()
+            .any(|scope| scope["properties"]["kind"]["enum"][0] == "subtree"));
+        assert!(wire["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "extract"));
+        assert!(
+            !AgentProviderActionTargets::try_from_observation(&current)
+                .unwrap()
+                .initial_snapshot_refused,
+            "a fresh native observation restores its vocabulary"
+        );
+    }
+
+    #[test]
     fn exhausted_scoped_inspection_can_restore_controls_once_without_renewal() {
         let mut previous = observation(context(), 1, 1, 1, "body");
         let mut history = None;
@@ -5291,6 +6124,16 @@ mod tests {
             "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES + 1),
         )
         .is_none());
+        assert!(AgentProviderTranscript::try_initial_extraction(
+            shared_objective.clone(),
+            "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_INITIAL_OBSERVATION_BYTES + 1),
+        )
+        .is_some());
+        assert!(AgentProviderTranscript::try_initial_extraction(
+            shared_objective.clone(),
+            "x".repeat(MAX_AGENT_PROVIDER_CONTINUATION_EXTRACTION_OBSERVATION_BYTES + 1),
+        )
+        .is_none());
         assert!(AgentProviderTranscript::try_initial(
             Arc::from("x".repeat(super::super::MAX_AGENT_PROVIDER_OBJECTIVE_BYTES + 1)),
             String::new(),
@@ -5366,6 +6209,105 @@ mod tests {
         assert!(!debug.contains("private retained tool result"));
         assert!(!debug.contains("call_continuation_1"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    /// Bytes of the leading input items a call shares with the call before
+    /// it: what a provider's prefix cache can serve. Instructions and tools
+    /// are fixed for a page and precede the input on every wire.
+    fn cached_prefix(previous: &[u8], next: &[u8]) -> (usize, usize) {
+        let items = |body: &[u8]| -> Vec<String> {
+            let wire: serde_json::Value = serde_json::from_slice(body).expect("body");
+            wire["input"]
+                .as_array()
+                .expect("input")
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
+        let (previous, next) = (items(previous), items(next));
+        let shared = previous
+            .iter()
+            .zip(&next)
+            .take_while(|(a, b)| a == b)
+            .map(|(item, _)| item.len())
+            .sum();
+        (shared, next.iter().map(String::len).sum())
+    }
+
+    #[test]
+    fn verified_actions_on_one_page_extend_the_cached_prefix_instead_of_rewriting_it() {
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let diff = "d".repeat(2 * 1024);
+        let mut retained = AgentProviderTranscript::try_initial(
+            Arc::from("private objective"),
+            "o".repeat(12 * 1024),
+        )
+        .expect("bounded transcript");
+        let mut progress = None;
+        let mut previous: Option<Vec<u8>> = None;
+        let (mut shared, mut total) = (0, 0);
+        for id in 1..=8 {
+            let result = crate::semantic_action_result::tests::scroll_provider_fixture(id, true);
+            progress =
+                Some(AgentActionProgress::record(progress, &result, None).expect("progress"));
+            retained.action_progress = progress.take();
+            let bound = retained
+                .try_bind_for_test(openai_correlation("{}"), diff.clone())
+                .expect("bounded turn");
+            let body = super::super::request::encode_openai_continuation_body(&config, &bound)
+                .expect("body");
+            if let Some(previous) = &previous {
+                let (call_shared, call_total) = cached_prefix(previous, &body);
+                shared += call_shared;
+                total += call_total;
+            }
+            previous = Some(body);
+            retained = bound.into_transcript();
+            progress = retained.action_progress.take();
+        }
+        let percent = shared * 100 / total;
+        // Every earlier turn is byte-identical on the next call; only the new
+        // turn and the trailing host facts are fresh. Measured 86%; 50% while
+        // the action history preceded the turns.
+        assert!(percent >= 85, "{percent}% ({shared}/{total} bytes)");
+    }
+
+    #[test]
+    fn retiring_old_captures_keeps_the_prefix_stable_across_several_calls() {
+        let config = config(AgentProviderKind::OpenAiResponses);
+        let capture = "c".repeat(6 * 1024);
+        let mut retained = transcript();
+        let mut previous: Option<Vec<u8>> = None;
+        let (mut shared, mut total, mut rewrites) = (0, 0, 0);
+        for _ in 0..16 {
+            let bound = retained
+                .try_bind_for_test(openai_correlation("{}"), capture.clone())
+                .expect("bounded turn");
+            let body = super::super::request::encode_openai_continuation_body(&config, &bound)
+                .expect("body");
+            if let Some(previous) = &previous {
+                let (call_shared, call_total) = cached_prefix(previous, &body);
+                // A call that does not reuse its predecessor's whole input
+                // rewrote an earlier turn.
+                let before: serde_json::Value = serde_json::from_slice(previous).expect("body");
+                let before = before["input"].as_array().map_or(0, |input| {
+                    input
+                        .iter()
+                        .map(|item| item.to_string().len())
+                        .sum::<usize>()
+                });
+                rewrites += usize::from(call_shared < before);
+                shared += call_shared;
+                total += call_total;
+            }
+            previous = Some(body);
+            retained = bound.into_transcript();
+        }
+        let percent = shared * 100 / total;
+        // Measured 73% and 2 rewrites; 25% and 9 when every call retired one.
+        assert!(retained.retained_bytes <= TRANSCRIPT_WORKING_BYTES + capture.len());
+        assert!(rewrites <= 4, "{rewrites} rewrites in 15 calls");
+        assert!(percent >= 70, "{percent}% ({shared}/{total} bytes)");
     }
 
     #[test]
@@ -5602,7 +6544,8 @@ mod tests {
             .expect("diff output")
             .starts_with("ZDIFF3 "));
         let tools = wire["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 1);
+        assert_eq!(tools.len(), AgentBrowserToolKind::ALL.len() - 2);
+        assert!(tools.iter().all(|tool| tool["name"] != "fill_form"));
         assert!(tools.iter().all(|tool| tool["name"] != "back"));
         let debug = format!("{draft:?}");
         for secret in [
@@ -5872,6 +6815,64 @@ mod tests {
             wrong_continuation.bind_read(call(2), &config, &substituted_read, substituted_payload,),
             Err(AgentProviderContinuationError::Baseline)
         ));
+    }
+
+    #[test]
+    fn target_read_receipt_cannot_answer_another_target_or_whole_read() {
+        let observed = observation(context(), 1, 1, 1, "public detail");
+        let baseline = SemanticObservationAcknowledgement::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(&observed),
+        );
+        let config = config(AgentProviderKind::OpenAiResponses)
+            .restrict_to_locate_and_act()
+            .with_baseline_read();
+        for scope in [
+            json!({"kind":"initial"}),
+            json!({"kind":"subtree","target":"@a1"}),
+            json!({"kind":"subtree","target":"@a2"}),
+        ] {
+            let arguments = json!({"scope":scope}).to_string();
+            let correlation = super::super::AgentBrowserToolCall::decode_openai(
+                call(1),
+                "fc_read".into(),
+                "call_read".into(),
+                "read",
+                arguments.clone(),
+            )
+            .unwrap()
+            .into_continuation_parts()
+            .0;
+            let continuation = AgentProviderContinuationSeed {
+                call: call(1),
+                config: config.clone(),
+                baseline: baseline.clone(),
+                transcript: transcript(),
+            }
+            .join_terminal_tool(completion(call(1), arguments.len() as u32), correlation)
+            .unwrap();
+            let read = crate::read_semantic_target(
+                &observed,
+                &baseline,
+                crate::SemanticReferenceId::new(2).unwrap(),
+                crate::SemanticCaptureInstant::from_millis(1),
+                crate::SemanticReadSensitivityLimit::PublicOnly,
+                crate::SemanticReadBudget::STANDARD,
+            )
+            .unwrap();
+            let payload = encode_semantic_read(
+                &read,
+                SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(config.tokenizer())
+            .unwrap();
+            let result = continuation.bind_read(call(2), &config, &read, payload);
+            if scope["target"] == "@a2" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err(), AgentProviderContinuationError::Scope);
+            }
+        }
     }
 
     #[test]
@@ -6687,4 +7688,43 @@ pub enum AgentProviderContinuationError {
     /// Structured stateless replay exceeded its turn or retained-byte ceiling.
     #[error("agent provider continuation transcript ceiling exceeded")]
     TranscriptLimit,
+}
+
+impl super::AgentProviderRejectedAction {
+    pub(in crate::agent_provider) fn bind(
+        self,
+        observation: &SemanticObservation,
+        config: &AgentProviderCallConfig,
+        payload: String,
+    ) -> Result<
+        (AgentProviderCallIdentity, AgentProviderBoundTranscript),
+        AgentProviderContinuationError,
+    > {
+        if config != &self.continuation.config
+            || !config.permits_tool(self.continuation.tool_kind())
+        {
+            return Err(AgentProviderContinuationError::Config);
+        }
+        if !self.continuation.baseline.matches(observation) {
+            return Err(AgentProviderContinuationError::Baseline);
+        }
+        let result = serde_json::json!({"status":"invalid_tool_call", "executed":false, "guidance":self.problem}).to_string();
+        let (call, _, _, correlation, mut prior) = self.continuation.into_parts();
+        let targets = prior.take_action_targets();
+        let mut transcript = AgentProviderTranscript::try_initial_with_progress(
+            prior.objective,
+            payload,
+            prior.navigation_checkpoint,
+            prior.inspection_checkpoint,
+            prior.action_progress,
+        )
+        .ok_or(AgentProviderContinuationError::TranscriptLimit)?;
+        if let Some(targets) = targets {
+            if !targets.matches(observation) {
+                return Err(AgentProviderContinuationError::Baseline);
+            }
+            transcript.set_action_targets(targets);
+        }
+        Ok((call, transcript.try_bind(correlation, result)?))
+    }
 }

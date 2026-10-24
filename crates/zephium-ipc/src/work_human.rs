@@ -38,6 +38,11 @@ pub struct WorkHumanPageV1 {
     pub remaining_millis: u32,
     pub document_revision: String,
     pub can_continue: bool,
+    /// The person may keep a short wait (a bot check's) going a while longer.
+    pub can_extend: bool,
+    /// The page runs in Work's own website data, so a check solved here
+    /// usually carries to later pages and runs.
+    pub work_memory: bool,
 }
 /// Logical points relative to the native content view's top-left corner.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
@@ -71,4 +76,23 @@ pub struct WorkHumanResponseV1 {
     pub accepted: bool,
     pub pages: Vec<WorkHumanPageV1>,
     pub error: Option<WorkFailureV1>,
+}
+
+/// Fresh native check result; `clear` grants no actor or account authority.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkHumanCheckOutcomeV1 {
+    Waiting,
+    Clear,
+    OpenPage,
+    Unavailable,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(deny_unknown_fields)]
+pub struct WorkHumanCheckResponseV1 {
+    pub version: u16,
+    pub profile: String,
+    pub work: WorkId,
+    pub page: WorkHumanPageIdV1,
+    pub outcome: WorkHumanCheckOutcomeV1,
 }

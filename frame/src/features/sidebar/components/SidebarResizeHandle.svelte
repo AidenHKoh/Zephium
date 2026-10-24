@@ -166,7 +166,10 @@
     generation++;
     clearGuide();
     if (resizing) cancelSidebarResize();
-    queueConfiguration({ width, enabled: false, revision: configuredRevision, generation });
+    // The latest revision, not the one this handle last configured: opening a
+    // tool advances it as the handle leaves, and native refuses a stale one,
+    // which left the guide live at the old edge, inside the tool's panel.
+    queueConfiguration({ width, enabled: false, revision: sidebarResizeRevision(), generation });
   });
 </script>
 

@@ -63,14 +63,15 @@ pub(crate) async fn media_import(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
     let read = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ResourceError> {
-        let metadata = std::fs::metadata(&path).map_err(|_| ResourceError::NotFound)?;
+        let file = std::fs::File::open(&path).map_err(|_| ResourceError::NotFound)?;
+        let metadata = file.metadata().map_err(|_| ResourceError::Unavailable)?;
         if !metadata.is_file() {
             return Err(ResourceError::Invalid);
         }
         if metadata.len() > u64::from(MAX_MEDIA_FILE_BYTES) {
             return Err(ResourceError::Capacity);
         }
-        std::fs::read(&path).map_err(|_| ResourceError::Unavailable)
+        read_import_bytes(file, u64::from(MAX_MEDIA_FILE_BYTES))
     })
     .await
     .map_err(|_| ())?;
@@ -103,6 +104,21 @@ pub(crate) async fn media_import(
         ResourceResponse::Error { error } => refused(error),
         _ => refused(ResourceError::Invalid),
     }
+}
+
+fn read_import_bytes(reader: impl std::io::Read, limit: u64) -> Result<Vec<u8>, ResourceError> {
+    use std::io::Read;
+    // A selected file can grow after its metadata check. Bound the read itself
+    // and keep the same open file, rather than reopening a replaceable path.
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ResourceError::Unavailable)?;
+    if bytes.len() as u64 > limit {
+        return Err(ResourceError::Capacity);
+    }
+    Ok(bytes)
 }
 
 async fn media_asset(
@@ -307,6 +323,15 @@ fn resolve(
     query: Option<&str>,
 ) -> tauri::http::Response<Cow<'static, [u8]>> {
     let path = path.trim_start_matches('/');
+    if let Some(rest) = path.strip_prefix("record/") {
+        return serve_record_media(app, rest);
+    }
+    if let Some(rest) = path.strip_prefix("avatar/") {
+        return super::profiles::serve_avatar(app, rest);
+    }
+    if let Some(rest) = path.strip_prefix("account-avatar/") {
+        return super::account::avatar::serve(rest);
+    }
     let width = thumb::width(query);
     if let Some(rest) = path.strip_prefix("frame/") {
         return serve_page_frame(app, rest, width);
@@ -341,6 +366,49 @@ fn resolve(
         }
     }
     respond(200, bytes, mime)
+}
+
+/// Immutable native record bytes, served only through the authenticated active
+/// profile. No URL or fetch is derived from this descriptive reference.
+fn serve_record_media(app: &AppHandle, encoded: &str) -> tauri::http::Response<Cow<'static, [u8]>> {
+    use base64::Engine as _;
+    use zephium_core::work::{media::WorkRecordMediaRefV1, port::WorkReply};
+    if encoded.len() > 3072 || super::shutdown_started(app) {
+        return respond(404, Vec::new(), "text/plain");
+    }
+    let media = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()
+        .filter(|bytes| bytes.len() <= 2048)
+        .and_then(|bytes| serde_json::from_slice::<WorkRecordMediaRefV1>(&bytes).ok())
+        .filter(|media| media.validate().is_ok());
+    let (Some(media), Some(shell)) = (media, app.try_state::<zephium_app::Handle>()) else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let profile = media.profile;
+    let Some(reply) = shell.read_work_record_media(media).ok() else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let response = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(Duration::from_secs(3), reply).await
+    });
+    let Ok(Ok(response)) = response else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    if response.profile != profile {
+        return respond(404, Vec::new(), "text/plain");
+    }
+    let WorkReply::RecordMedia(bytes) = response.reply else {
+        return respond(404, Vec::new(), "text/plain");
+    };
+    let mut reply = respond(200, bytes.0, "image/png");
+    // Each request is actor-checked again after the Store callback; never
+    // bypass that check by reusing a response from another active profile.
+    reply.headers_mut().insert(
+        "Cache-Control",
+        tauri::http::HeaderValue::from_static("private, no-store"),
+    );
+    reply
 }
 
 /// `frame/<attempt>/<step>/<generation>`: the newest frame of one agent page.
@@ -588,6 +656,16 @@ fn kind_is_image(asset: &MediaAssetV1) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_read_stops_when_a_file_outgrows_its_admitted_size() {
+        assert_eq!(read_import_bytes(&b"data"[..], 4).unwrap(), b"data");
+        assert!(matches!(
+            read_import_bytes(std::io::repeat(b'x'), 4),
+            Err(ResourceError::Capacity)
+        ));
+        assert!(read_import_bytes(std::io::empty(), 4).unwrap().is_empty());
+    }
 
     #[test]
     fn image_sniffing_recognizes_only_admitted_raster_formats() {
@@ -887,6 +965,96 @@ pub(crate) async fn media_admit_remote(
     result
 }
 
+/// Names a pasted YouTube link by its video's real title and channel. One
+/// anonymous lookup from here, kept with the item; false when nothing was
+/// learned, so the card keeps its plain caption.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn link_describe(
+    caller: WebviewWindow,
+    app: AppHandle,
+    shell: State<'_, zephium_app::Handle>,
+    expected_profile: String,
+    environment: String,
+    element: String,
+) -> Result<bool, ()> {
+    if !super::authorize(&caller, super::CallerPolicy::Main, "link_describe")
+        || super::shutdown_started(&app)
+    {
+        return Ok(false);
+    }
+    let Some(profile) = profile_of(&expected_profile) else {
+        return Ok(false);
+    };
+    #[cfg(not(feature = "work-product"))]
+    {
+        let _ = (shell, profile, environment, element);
+        Ok(false)
+    }
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_core::work::environment::{WorkEnvironmentEdit, WorkEnvironmentReference};
+        use zephium_core::work::{WorkElementId, WorkEnvironmentId};
+        let (Some(environment), Some(element)) = (
+            WorkEnvironmentId::parse(&environment),
+            WorkElementId::parse(&element),
+        ) else {
+            return Ok(false);
+        };
+        let Ok(snapshot) = environment_snapshot(&shell, profile, environment).await else {
+            return Ok(false);
+        };
+        let Some(WorkEnvironmentReference::Link { url, title }) = snapshot
+            .elements
+            .iter()
+            .find(|candidate| candidate.id == element)
+            .map(|candidate| &candidate.reference)
+        else {
+            return Ok(false);
+        };
+        let host = tauri::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        // Only a title still as pasted (the bare host) is replaced.
+        if title.trim_start_matches("www.") != host.trim_start_matches("www.") {
+            return Ok(false);
+        }
+        let Some(details) = zephium_agentic::youtube_oembed::fetch(url).await else {
+            return Ok(false);
+        };
+        let title = format!("{}\n{}", details.title, details.channel);
+        // The first read may be stale by now; one fresh read settles it.
+        for attempt in 0..2 {
+            let revision = if attempt == 0 {
+                snapshot.revision
+            } else {
+                match environment_snapshot(&shell, profile, environment).await {
+                    Ok(fresh) => fresh.revision,
+                    Err(_) => return Ok(false),
+                }
+            };
+            match environment_edit(
+                &shell,
+                profile,
+                environment,
+                revision,
+                WorkEnvironmentEdit::NameLink {
+                    element,
+                    title: title.clone(),
+                },
+            )
+            .await
+            {
+                Ok(_) => return Ok(true),
+                Err(ResourceError::Conflict) => continue,
+                Err(_) => return Ok(false),
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// Closed facts about one admission, never the URL.
 #[derive(Default)]
 struct MediaAdmitTrace {
@@ -915,7 +1083,6 @@ async fn admit_remote(
     }
     #[cfg(feature = "work-product")]
     {
-        use zephium_core::work::environment::*;
         use zephium_core::work::{WorkElementId, WorkEnvironmentId};
         let (Some(environment), Some(element)) = (
             WorkEnvironmentId::parse(&environment),
@@ -943,110 +1110,181 @@ async fn admit_remote(
         if !remote_image_target(&subject.reference) {
             return refused(ResourceError::Invalid);
         }
-        let area = subject.area;
-        let bytes = match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                trace.fetch = Some(error);
-                return refused(match error {
-                    zephium_agentic::public_asset::PublicAssetError::TooLarge => {
-                        ResourceError::Capacity
-                    }
-                    _ => ResourceError::Unavailable,
-                });
-            }
-        };
-        let bytes = match tokio::task::spawn_blocking(move || fit_for_display(bytes)).await {
-            Ok(Some(bytes)) => bytes,
-            _ => return refused(ResourceError::Capacity),
-        };
-        trace.bytes = bytes.len();
-        let receiver = shell.import_media(
+        let canvas = ShellCanvas {
+            shell,
             profile,
-            MediaImport {
-                request_id: format!("media-admit-{}", ResourceId::generate()),
-                name: image_name(&parsed),
-                origin: MediaOrigin::Fetched {
-                    url: parsed.to_string(),
-                    observed_at: civil_date_today(),
+            environment,
+        };
+        let resource = {
+            let bytes =
+                match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        trace.fetch = Some(error);
+                        return refused(match error {
+                            zephium_agentic::public_asset::PublicAssetError::TooLarge => {
+                                ResourceError::Capacity
+                            }
+                            _ => ResourceError::Unavailable,
+                        });
+                    }
+                };
+            let bytes = match tokio::task::spawn_blocking(move || fit_for_display(bytes)).await {
+                Ok(Some(bytes)) => bytes,
+                _ => return refused(ResourceError::Capacity),
+            };
+            trace.bytes = bytes.len();
+            let receiver = shell.import_media(
+                profile,
+                MediaImport {
+                    request_id: format!("media-admit-{}", ResourceId::generate()),
+                    name: image_name(&parsed),
+                    origin: MediaOrigin::Fetched {
+                        url: parsed.to_string(),
+                        observed_at: civil_date_today(),
+                    },
+                    bytes: std::sync::Arc::new(bytes),
                 },
-                bytes: std::sync::Arc::new(bytes),
-            },
-        );
-        let reply =
-            tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(30)))
-                .await
-                .map_err(|_| ())?;
-        let record = match reply.map(|reply| reply.response) {
-            Ok(ResourceResponse::Applied { record, .. }) => record,
-            Ok(ResourceResponse::Error { error }) => return refused(error),
-            _ => return refused(ResourceError::OutcomeUnknown),
+            );
+            let reply =
+                tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(30)))
+                    .await
+                    .map_err(|_| ())?;
+            let record = match reply.map(|reply| reply.response) {
+                Ok(ResourceResponse::Applied { record, .. }) => record,
+                Ok(ResourceResponse::Error { error }) => return refused(error),
+                _ => return refused(ResourceError::OutcomeUnknown),
+            };
+            super::emit_media_changed(app, &profile.to_string(), &record.id, &record.revision);
+            let Some(resource) = ResourceId::parse(&record.id) else {
+                return refused(ResourceError::Invalid);
+            };
+            resource
         };
-        super::emit_media_changed(app, &profile.to_string(), &record.id, &record.revision);
-        let Some(resource) = ResourceId::parse(&record.id) else {
-            return refused(ResourceError::Invalid);
+        match attach_picture(&canvas, element, resource).await {
+            Ok(media) => Ok(MediaAdmitV1::Admitted { element: media }),
+            Err(error) => refused(error),
+        }
+    }
+}
+
+/// The canvas as the admission sees it, so the retry logic is testable
+/// without a running shell.
+#[cfg(feature = "work-product")]
+trait Canvas {
+    async fn read(
+        &self,
+    ) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError>;
+    async fn edit(
+        &self,
+        expected: zephium_core::work::WorkRevision,
+        edit: zephium_core::work::environment::WorkEnvironmentEdit,
+    ) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError>;
+}
+
+#[cfg(feature = "work-product")]
+struct ShellCanvas<'a> {
+    shell: &'a zephium_app::Handle,
+    profile: ProfileId,
+    environment: zephium_core::work::WorkEnvironmentId,
+}
+
+#[cfg(feature = "work-product")]
+impl Canvas for ShellCanvas<'_> {
+    async fn read(
+        &self,
+    ) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError> {
+        environment_snapshot(self.shell, self.profile, self.environment).await
+    }
+    async fn edit(
+        &self,
+        expected: zephium_core::work::WorkRevision,
+        edit: zephium_core::work::environment::WorkEnvironmentEdit,
+    ) -> Result<zephium_core::work::environment::WorkEnvironmentSnapshot, ResourceError> {
+        environment_edit(self.shell, self.profile, self.environment, expected, edit).await
+    }
+}
+
+/// Puts the picture on the canvas and relates the subject to it. Each step
+/// is checked against a fresh read, so a lost compare-and-set race, or an
+/// earlier attempt that added the element but not the relation, completes
+/// instead of duplicating or failing.
+#[cfg(feature = "work-product")]
+async fn attach_picture(
+    canvas: &impl Canvas,
+    subject: zephium_core::work::WorkElementId,
+    resource: ResourceId,
+) -> Result<zephium_core::work::WorkElementId, ResourceError> {
+    use zephium_core::work::environment::*;
+    const ATTEMPTS: usize = 3;
+    let reference = WorkEnvironmentReference::Resource { resource };
+    for _ in 0..ATTEMPTS {
+        let mut snapshot = canvas.read().await?;
+        let Some(area) = snapshot
+            .elements
+            .iter()
+            .find(|candidate| candidate.id == subject)
+            .map(|candidate| candidate.area)
+        else {
+            return Err(ResourceError::NotFound);
         };
-        let reference = WorkEnvironmentReference::Resource { resource };
-        let current = match snapshot
+        let media = match snapshot
             .elements
             .iter()
             .find(|candidate| candidate.reference == reference)
         {
-            Some(existing) => (snapshot.clone(), existing.id),
+            Some(existing) => existing.id,
             None => {
-                let added = match environment_edit(
-                    shell,
-                    profile,
-                    environment,
-                    snapshot.revision,
-                    WorkEnvironmentEdit::Add {
-                        reference: reference.clone(),
-                        area,
-                    },
-                )
-                .await
+                let added = match canvas
+                    .edit(
+                        snapshot.revision,
+                        WorkEnvironmentEdit::Add {
+                            reference: reference.clone(),
+                            area,
+                        },
+                    )
+                    .await
                 {
                     Ok(added) => added,
-                    Err(error) => return refused(error),
+                    Err(ResourceError::Conflict) => continue,
+                    Err(error) => return Err(error),
                 };
                 let Some(media) = added
                     .elements
                     .iter()
                     .find(|candidate| candidate.reference == reference)
+                    .map(|candidate| candidate.id)
                 else {
-                    return refused(ResourceError::OutcomeUnknown);
+                    return Err(ResourceError::OutcomeUnknown);
                 };
-                let id = media.id;
-                (added, id)
+                snapshot = added;
+                media
             }
         };
-        let (snapshot, media_element) = current;
-        let related = snapshot.relations.iter().any(|relation| {
-            relation.from == element
-                && relation.to == media_element
+        if snapshot.relations.iter().any(|relation| {
+            relation.from == subject
+                && relation.to == media
                 && relation.kind == WorkRelationKind::Uses
-        });
-        if !related
-            && environment_edit(
-                shell,
-                profile,
-                environment,
+        }) {
+            return Ok(media);
+        }
+        match canvas
+            .edit(
                 snapshot.revision,
                 WorkEnvironmentEdit::Relate {
-                    from: element,
-                    to: media_element,
+                    from: subject,
+                    to: media,
                     relation: WorkRelationKind::Uses,
                 },
             )
             .await
-            .is_err()
         {
-            return refused(ResourceError::Conflict);
+            Ok(_) => return Ok(media),
+            Err(ResourceError::Conflict) => continue,
+            Err(error) => return Err(error),
         }
-        Ok(MediaAdmitV1::Admitted {
-            element: media_element,
-        })
     }
+    Err(ResourceError::Conflict)
 }
 
 /// A fetched picture as the canvas shows it: at most 1600 px on its long
@@ -1194,5 +1432,154 @@ mod date_tests {
         assert!(today.starts_with("20"));
         assert_eq!(&today[4..5], "-");
         assert_eq!(&today[7..8], "-");
+    }
+}
+
+#[cfg(all(test, feature = "work-product"))]
+mod attach_tests {
+    use super::{attach_picture, Canvas, ResourceError};
+    use std::sync::Mutex;
+    use zephium_core::ids::ResourceId;
+    use zephium_core::work::environment::*;
+    use zephium_core::work::{WorkElementId, WorkRevision};
+
+    /// A canvas that applies the real pure edit and can lose the next
+    /// compare-and-set to a concurrent writer.
+    struct Fake {
+        snapshot: Mutex<WorkEnvironmentSnapshot>,
+        lose: Mutex<usize>,
+        fail_relate: Mutex<usize>,
+        edits: Mutex<usize>,
+        next: Mutex<u128>,
+    }
+
+    impl Fake {
+        fn new(lose: usize, fail_relate: usize) -> Self {
+            let mut snapshot =
+                WorkEnvironmentSnapshot::create(1.into(), 2.into(), 3.into(), "Workspace".into())
+                    .unwrap();
+            snapshot.elements.push(WorkEnvironmentElement {
+                id: 10.into(),
+                reference: WorkEnvironmentReference::Link {
+                    url: "https://example.com/a".into(),
+                    title: "a".into(),
+                },
+                area: None,
+            });
+            Self {
+                snapshot: Mutex::new(snapshot),
+                lose: Mutex::new(lose),
+                fail_relate: Mutex::new(fail_relate),
+                edits: Mutex::new(0),
+                next: Mutex::new(100),
+            }
+        }
+    }
+
+    impl Canvas for Fake {
+        async fn read(&self) -> Result<WorkEnvironmentSnapshot, ResourceError> {
+            Ok(self.snapshot.lock().unwrap().clone())
+        }
+        async fn edit(
+            &self,
+            expected: WorkRevision,
+            edit: WorkEnvironmentEdit,
+        ) -> Result<WorkEnvironmentSnapshot, ResourceError> {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            {
+                let mut lose = self.lose.lock().unwrap();
+                if *lose > 0 {
+                    *lose -= 1;
+                    snapshot.revision = snapshot.revision.next().unwrap();
+                    return Err(ResourceError::Conflict);
+                }
+            }
+            if matches!(edit, WorkEnvironmentEdit::Relate { .. }) {
+                let mut fail = self.fail_relate.lock().unwrap();
+                if *fail > 0 {
+                    *fail -= 1;
+                    return Err(ResourceError::Conflict);
+                }
+            }
+            if snapshot.revision != expected {
+                return Err(ResourceError::Conflict);
+            }
+            let id = {
+                let mut next = self.next.lock().unwrap();
+                *next += 1;
+                *next
+            };
+            let mut applied = snapshot
+                .edit(edit, WorkElementId::from(id), id.into(), id.into())
+                .map_err(|_| ResourceError::Conflict)?;
+            applied.revision = applied.revision.next().unwrap();
+            *snapshot = applied.clone();
+            *self.edits.lock().unwrap() += 1;
+            Ok(applied)
+        }
+    }
+
+    fn uses(fake: &Fake) -> usize {
+        fake.snapshot.lock().unwrap().relations.len()
+    }
+    fn pictures(fake: &Fake) -> usize {
+        fake.snapshot
+            .lock()
+            .unwrap()
+            .elements
+            .iter()
+            .filter(|e| matches!(e.reference, WorkEnvironmentReference::Resource { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_revision_miss_rereads_and_completes() {
+        let fake = Fake::new(1, 0);
+        assert!(attach_picture(&fake, 10.into(), ResourceId::from(7))
+            .await
+            .is_ok());
+        assert_eq!((pictures(&fake), uses(&fake)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_relate_that_failed_after_the_add_completes_without_a_duplicate() {
+        let fake = Fake::new(0, 1);
+        let media = attach_picture(&fake, 10.into(), ResourceId::from(7))
+            .await
+            .unwrap();
+        assert_eq!((pictures(&fake), uses(&fake)), (1, 1));
+        let again = attach_picture(&fake, 10.into(), ResourceId::from(7))
+            .await
+            .unwrap();
+        assert_eq!(again, media);
+        assert_eq!((pictures(&fake), uses(&fake)), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn an_existing_relation_is_success_without_edits() {
+        let fake = Fake::new(0, 0);
+        attach_picture(&fake, 10.into(), ResourceId::from(7))
+            .await
+            .unwrap();
+        let before = *fake.edits.lock().unwrap();
+        attach_picture(&fake, 10.into(), ResourceId::from(7))
+            .await
+            .unwrap();
+        assert_eq!(*fake.edits.lock().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn persistent_conflict_gives_up_after_bounded_attempts() {
+        let fake = Fake::new(10, 0);
+        let result = attach_picture(&fake, 10.into(), ResourceId::from(7)).await;
+        assert_eq!(result, Err(ResourceError::Conflict));
+        assert_eq!(*fake.lose.lock().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_missing_subject_is_not_found() {
+        let fake = Fake::new(0, 0);
+        let result = attach_picture(&fake, 99.into(), ResourceId::from(7)).await;
+        assert_eq!(result, Err(ResourceError::NotFound));
     }
 }

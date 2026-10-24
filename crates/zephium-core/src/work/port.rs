@@ -5,12 +5,26 @@ use super::*;
 
 #[derive(Clone)]
 pub enum WorkRequest {
+    /// Native-only immutable enrichment after source extraction succeeded.
+    PutRecordMedia {
+        media: media::WorkRecordMediaRefV1,
+        png: Vec<u8>,
+    },
+    /// Native-only read; never decoded from the model tool vocabulary.
+    ReadRecordMedia {
+        media: media::WorkRecordMediaRefV1,
+    },
     /// The person's memory, a work's consent to their history, notes and
     /// tabs, and history search for the agent's context tools.
     Personal(super::personal::WorkPersonalRequest),
     /// The profile's standing site answers; `set` changes one first (None clears it).
     SiteAccess {
         set: Option<(String, Option<super::sites::WorkSiteAccessV1>)>,
+    },
+    /// Screenshot-only standing consent at canonical origins, independently
+    /// persisted from account/session access. False removes an existing record.
+    ScreenshotAccess {
+        set: Option<(String, bool)>,
     },
     /// Host-only context read, bound to an existing resource revision and profile.
     ReadMediaContext {
@@ -36,8 +50,9 @@ pub enum WorkRequest {
         id: WorkId,
         link: artifact::WorkEvidenceLink,
     },
-    /// Owner drop notification. Exact attempt matching replaces user CAS; this
-    /// can only record uncertainty, never start work or publish a result.
+    /// Owner drop notification. Exact attempt matching replaces user CAS.
+    /// Closes uncertainty or retains an already finished answer; never starts
+    /// work or adds result objects.
     RuntimeAbandon {
         id: WorkId,
         execution: WorkExecutionId,
@@ -45,6 +60,15 @@ pub enum WorkRequest {
     },
     RuntimeRead {
         id: WorkId,
+    },
+    /// Application-actor attestation that this execution has no pending or live
+    /// driver. Never decoded from IPC; preserves the person's original
+    /// AcknowledgeInterruption command identity and receipt.
+    AcknowledgeOrphan {
+        id: WorkId,
+        expected: WorkRevision,
+        command: WorkCommandId,
+        execution: WorkExecutionId,
     },
     RuntimeCommand {
         id: WorkId,
@@ -109,6 +133,14 @@ impl WorkRequest {
             evidence.evidence.validate()?;
         }
         match self {
+            Self::PutRecordMedia { media, png } => {
+                media.validate()?;
+                if png.is_empty() || png.len() > media::MAX_RECORD_MEDIA_BYTES {
+                    return Err(WorkError::Capacity);
+                }
+                Ok(())
+            }
+            Self::ReadRecordMedia { media } => media.validate(),
             Self::RuntimeUpdate {
                 update: runtime::WorkRuntimeUpdate::PageTitle { title, .. },
                 ..
@@ -133,6 +165,9 @@ impl WorkRequest {
             Self::SiteAccess { set } => set
                 .as_ref()
                 .map_or(Ok(()), |(site, _)| super::sites::validate_site(site)),
+            Self::ScreenshotAccess { set } => set.as_ref().map_or(Ok(()), |(origin, _)| {
+                super::screenshots::validate_origin(origin)
+            }),
             Self::Environment { call, .. } => call.validate(),
             Self::AuthoringCommand { intent, .. } => intent.validate(),
             Self::RuntimeCommand {
@@ -303,8 +338,11 @@ impl std::fmt::Debug for WorkSummary {
 }
 #[derive(Clone, Debug)]
 pub enum WorkReply {
+    RecordMediaStored(media::WorkRecordMediaRefV1),
+    RecordMedia(WorkMediaContext),
     Personal(super::personal::WorkPersonalReply),
     SiteAccess(Vec<super::sites::WorkSiteEntryV1>),
+    ScreenshotAccess(Vec<super::screenshots::WorkScreenshotSiteV1>),
     MediaContext(WorkMediaContext),
     Environment(environment::WorkEnvironmentReply),
     AuthoringCommand(authoring::WorkAuthoringReceipt),

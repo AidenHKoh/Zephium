@@ -351,7 +351,9 @@ impl WorkResourceOwner {
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
-        self.construct_isolated(id, context, storage, target, policy, false, None, None, now)
+        self.construct_isolated(
+            id, context, storage, target, policy, false, false, None, None, None, None, now,
+        )
     }
     #[allow(clippy::too_many_arguments)]
     fn construct_isolated(
@@ -362,7 +364,10 @@ impl WorkResourceOwner {
         target: ContextNavigationTarget,
         policy: zephium_agentic::WorkBrowserDocumentPolicy,
         isolated_public: bool,
+        work_website_data: bool,
+        anonymous_read_authority: Option<zephium_agentic::WorkBrowserAnonymousReadAuthority>,
         anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+        redirect: Option<zephium_agentic::WorkBrowserRedirect>,
         construction_window: Option<(
             zephium_agentic::WorkBrowserConstructionAttempt,
             std::time::Instant,
@@ -372,18 +377,46 @@ impl WorkResourceOwner {
         if !self.shared.global_current() {
             return Err(Refusal::Uncertain);
         }
-        let request = self.shared.lock_rows()?.construct_document_with_isolation(
-            id,
-            context,
-            storage,
-            target,
-            policy,
-            isolated_public,
-            now,
-        )?;
+        let request = if let Some(proof) = anonymous_read_authority {
+            self.shared
+                .lock_rows()?
+                .construct_document_with_original_read(
+                    id,
+                    context,
+                    storage,
+                    target,
+                    policy,
+                    isolated_public,
+                    proof,
+                    now,
+                )?
+        } else {
+            self.shared.lock_rows()?.construct_document_with_isolation(
+                id,
+                context,
+                storage,
+                target,
+                policy,
+                isolated_public,
+                now,
+            )?
+        };
+        let request = if work_website_data {
+            request
+                .with_work_website_data()
+                .map_err(|_| Refusal::Uncertain)?
+        } else {
+            request
+        };
         let request = match anonymous_session {
             Some(session) => request
                 .with_anonymous_session(session)
+                .map_err(|_| Refusal::Uncertain)?,
+            None => request,
+        };
+        let request = match redirect {
+            Some(redirect) => request
+                .with_redirect(redirect)
                 .map_err(|_| Refusal::Uncertain)?,
             None => request,
         };
@@ -479,6 +512,31 @@ impl WorkResourceOwner {
         }
         let request = self.shared.lock_rows()?.destroy(join)?;
         PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+    }
+
+    fn media_lifecycle(
+        &self,
+        join: &WorkBrowserResourceJoin,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> Result<(PendingLifecycle, zephium_agentic::WorkBrowserMediaProgress), Refusal> {
+        let resource = self.shared.resource(join)?;
+        self.shared.current(&resource)?;
+        if resource.flights.load(Ordering::Acquire) != 0
+            || resource.orphaned_actions.load(Ordering::Acquire) != 0
+            || !resource.reusable.load(Ordering::Acquire)
+        {
+            return Err(Refusal::Busy);
+        }
+        let (request, progress) = self
+            .shared
+            .lock_rows()?
+            .read_record_media(join, plans, fetch_mode, now, deadline)?;
+        resource.reusable.store(false, Ordering::Release);
+        PendingLifecycle::dispatch(self.shared.clone(), resource, request, None, None)
+            .map(|pending| (pending, progress))
     }
 
     fn human_lifecycle(

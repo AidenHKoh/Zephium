@@ -184,7 +184,11 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "lease.deadline().millis().saturating_sub(now.millis())",
             // 99bf594a: dispatch waits for the runtime to park, then arms the successor;
             // each stage rechecks its own lease authority.
-            "resource.navigation=Some(WorkNavigation{task,timer,deadline,stage:WorkNavigationStage::Parking,})",
+            "resource.navigation=Some(WorkNavigation{task,timer,deadline,stage:WorkNavigationStage::Parking,departure,})",
+            // d4b32b9c: a failed load returns to its departure only under the same
+            // health, deadline and dispatch-lease checks as the original navigation.
+            "iferased||!self.guard.is_healthy()||now>=lease.deadline()||!self.guard.navigation_dispatch_current(&lease,operation,now){returnfalse;}",
+            "gate.arm_departure(source,operation,departure.clone()).is_ok()",
             "WorkNavigationStage::Parking=>self.guard.navigation_dispatch_current(&lease,operation,now)",
             "WorkNavigationStage::Navigating=>self.guard.navigation_completion_current(&lease,operation,now)",
             "view.semantic_runtime_parked()",
@@ -200,8 +204,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
         "crates/zephium-app/src/work_resources_product.rs",
         &[
             // b8bf7f37: the actor also carries the durable human wait; a continuation must have one.
-            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,waiting,)",
-            "letwaiting=waiting.ok_or(AgentWorkFailure::Contract)?;StagedActor::try_new(input,browser,runtime,provider,credential,audit,task,Some(waiting),)",
+            "letspec=input.retained_resource_spec()?", "StagedActor::try_new(input,browser,runtime,provider,access,audit,task,waiting,)",
+            "letwaiting=waiting.ok_or(AgentWorkFailure::Contract)?;StagedActor::try_new(input,browser,runtime,provider,access,audit,task,Some(waiting),)",
             "spec.identity.profile()!=profile.profile()", "spec.storage!=profile.storage_class()",
             "!std::ptr::addr_eq(Arc::as_ptr(&journal),Arc::as_ptr(&audit))",
             "Arc::ptr_eq(engine,&prepared.engine)",
@@ -253,8 +257,23 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "invoke_owned_unit_callback(navigation_invariant_failure.as_ref(),navigation_callback_panicked.as_ref(),);navigation_semantic.cancel();",
             "ifwork_location.as_ref().is_some_and(|gate|gate.failed()){",
             "work_location_semantic.revoke_document_authority();",
+            // Work's own store is persistent, carries exactly the identifier
+            // derived for its profile, and is never the profile's own store.
+            "persistent&&identifier==Some(expected)&&identifier!=Some(profile.bytes())",
+            "Some(expected)=>{work_store_matches(profile,&actual_store)&&Retained::as_ptr(&actual_store)==Retained::as_ptr(expected)}",
         ],
         &[],
+    ),
+    (
+        // Work's own website data replaces per-run ephemeral storage for pages
+        // without the person's session (2026-10-09): a stable, hash-derived
+        // identifier per profile that can never equal the profile's own.
+        "crates/zephium-engine/src/work_website_data.rs",
+        &[
+            "Sha256::new().chain_update(DOMAIN).chain_update(profile.bytes())",
+            "ifid==profile.bytes(){id[15]^=1;}",
+        ],
+        &["dataStoreForIdentifier", "ProfileId::generate()"],
     ),
     (
         "crates/zephium-app/src/work_resources_probe.rs",
@@ -433,7 +452,7 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "ifretained.is_some()&&(extraction_schema.is_none()||(actions_before_extraction&&!retained.as_ref().is_some_and(|browser|browser.supports_actions()))||subtree_extraction||navigation_target.is_some()||navigation_route.is_some()||(navigation_discovery.is_some()&&!retained.as_ref().is_some_and(|browser|browser.supports_navigation()))||(viewport_screenshot&&!retained.as_ref().is_some_and(|browser|browser.supports_screenshots())))",
             "resources:retained.is_none().then(||WorkContextResources{",
             "ifstate.native.retained.is_some(){journal.emit(AgentWorkEventKind::ContextActive)?;self.start_session()?;self.browser_loop(worker,browser).await?;returnself.close_retained(worker,None).await;}",
-            "state.transport.take().ok_or(AgentWorkFailure::Contract)?",
+            "state.transport.take().ok_or_else(||crate::contract!())?",
             "worker.try_claim_scoped_terminal(class)",
             "claim.commit(delivery,settlement,provider)",
             "state.native.retained.take()",
@@ -495,12 +514,19 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "policy==Some(drained.policy())",
             "active.extraction.is_none()", "!active.handle.has_pending_events()",
             "prior.as_bytes()[48..64]==request.run.bytes()",
-            "staged.lease.deadline()<=now", "flight.reconciliations>=4",
+            "staged.lease.deadline()<=now", "flight.reconciliations>=MAX_RECONCILIATIONS",
             "self.dispatch_attempt(flight.request,flight.phase,flight.reconciliations+1)",
             "self.owner.locally_retired()", "self.flight.is_none()", "self.unstarted.is_none()",
             "self.destruction_settled=true", "Err(Refusal::Busy)=>returnOk(false)",
             // 24832e90: readiness moved into native_audit_ready and grouped pages wait for their turn.
-            "fnnative_audit_ready(&self)->bool{self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.unstarted.is_none()&&self.final_scoped_recovery_is_classified())}",
+            // A never-started actor whose row is classified, or that never had one, now takes
+            // its audit and ends unclean like a classified scoped recovery: holding it forever
+            // kept its group's native seat, so the run's later pages waited out their turn.
+            "fnnative_audit_ready(&self)->bool{self.local_shutdown_settled()||(self.destroyed&&self.owner.locally_retired()&&self.unexpected_native.is_none()&&self.finally_unclean())}",
+            "fnfinally_unclean(&self)->bool{ifself.unstarted.is_some(){self.final_unstarted_is_classified()}else{self.final_scoped_recovery_is_classified()}}",
+            // Only an actor the journal never admitted, with nothing in its audit ledger, is released.
+            "ifself.record.is_some()||self.flight.is_some()||self.persistence_failure.is_some(){return;}",
+            ".is_ok_and(|status|status.pending()==0&&status.in_flight()==0)",
             "ifself.grouped&&!self.group_shutdown{returnOk(false);}ifdeadline.is_some_and(|deadline|Instant::now()>=deadline)||!self.native_audit_ready(){returnOk(false);}",
             "RetainedNativeShutdown::new(&self.owner)?", "shutdown.settle(event)",
             "and_then(RetainedNativeShutdown::next_deadline)",
@@ -781,7 +807,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "construction_pending:true",
             "state.phase==Phase::Constructing&&state.construction_pending&&!state.uncertain",
             // a866eb38: human handoff delivery is a fourth owned callback debt.
-            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.human_delivery.is_none()&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
+            // ad2ef7cb: an in-flight media delivery also keeps the resource busy.
+            "!state.construction_pending&&state.retirement_delivery.is_none()&&state.human_delivery.is_none()&&!state.media_delivery&&state.reads==0&&state.navigation.is_none()&&state.action.is_none()&&state.callbacks==0&&!state.notification_pending",
             "letremove=guard.construction_returned()",
             "self.admission.work_construction_returned(&guard)",
             "state.phase=Phase::Revoking",
@@ -807,9 +834,9 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "drop(state);letnotified=notification.is_none_or(|notification|notification.notify())",
             "if!notified{state.uncertain=true;",
             "ifexact&&permit_released&&state.retirement_delivery.as_ref()==Some(lease){",
-            "self.permit.release();ifletSome(operation)=human{self.guard.finish_human_delivery(", "ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
+            "self.permit.release();ifmedia{self.guard.finish_media_delivery(callback_returned,self.permit.released&&self.permit.admission.counts().is_some(),);}ifletSome(operation)=human{self.guard.finish_human_delivery(","ifletSome(lease)=&revocation{self.guard.finish_revocation_delivery(",
             "self.permit.released&&self.permit.admission.counts().is_some()",
-            "(construction||revocation.is_some()||human.is_some())&&self.guard.destruction_started()",
+            "(construction||revocation.is_some()||human.is_some()||media)&&self.guard.destruction_started()",
             "Arc::ptr_eq(current,guard)",
             "ingress.rows.len()>=MAX_LIVE_CONTEXTS",
             ">=zephium_agentic::MAX_EXECUTING_CONTEXTS",
@@ -859,6 +886,8 @@ const ADAPTER_RULES: &[(&str, &[&str], &[&str])] = &[
             "native_resource.reclassify(NativeResourceClass::AgentContext)",
             "retirement_clean:false",
             "crate::platform::imp::build_owned_work_view(",
+            "letstore=ifguard.work_website_data(){Some(self.work_data_store(profile)?)}",
+            "!=Some(&super::profiles::ProfilePersistenceClass::Durable)",
             "resource_retained:true",
             "guard.lease_drained(lease)",
             "guard.callbacks_drained()",
@@ -976,12 +1005,39 @@ const GROUP_HANDLE: [&str; 5] = [
     "pub(crate) fn is_sealed(&self) -> bool {",
 ];
 
+// Admits the retained adapter's private image broker (ad2ef7cb): it holds the
+// port but answers only the two lease-bound screenshot-source calls.
+const IMAGE_BROKER: [&str; 4] = [
+    "struct RetainedImageSource {\n    port: Arc<dyn AgentBrowserPort>,\n    lease: WorkBrowserExecutionLease,\n}",
+    "self.port\n            .work_screenshot_public_candidate(&self.lease, context)",
+    "self.port.claim_work_screenshot_source(&self.lease, image)",
+    "port: self.browser.shared.port.clone(),",
+];
+
 fn adapter_source(path: &str, source: String) -> Result<String, String> {
     if path.ends_with("work_resources_application.rs") {
         admit_group_handle(&source)
+    } else if path.ends_with("work_resources_controller.rs") {
+        admit_image_broker(&source)
     } else {
         Ok(source)
     }
+}
+
+fn admit_image_broker(source: &str) -> Result<String, String> {
+    let mut source = source.to_owned();
+    for item in IMAGE_BROKER {
+        if source.matches(item).count() != 1 {
+            return Err(format!("Work retained image broker drifted: {item}"));
+        }
+        source = source.replacen(item, "", 1);
+    }
+    if source.contains("self.port") {
+        return Err(
+            "Work retained image broker reaches its port beyond the two reviewed calls".into(),
+        );
+    }
+    Ok(source)
 }
 
 fn admit_group_handle(source: &str) -> Result<String, String> {

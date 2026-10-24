@@ -94,17 +94,42 @@ const PERSONAL: [&str; 5] = [
 /// person's own apps when the request is not about their apps or their day.
 /// A workflow the person started keeps its own skill.
 pub fn for_request(skills: Vec<Skill>, request: &str, started: Option<&str>) -> Vec<Skill> {
-    if about_own_apps(request) {
-        return skills;
-    }
+    let own = about_own_apps(request);
+    let day = own && about_the_day(request);
     skills
         .into_iter()
-        .filter(|skill| !PERSONAL.contains(&skill.name.as_str()) || started == Some(&skill.name))
+        .filter(|skill| {
+            let name = skill.name.as_str();
+            started == Some(name)
+                || !PERSONAL.contains(&name)
+                || (own && (day || !ACROSS_APPS.contains(&name)))
+        })
         .collect()
 }
 
+/// Skills that gather the person's day across their apps: a request about
+/// one app ("check my Slack") reads that app instead.
+const ACROSS_APPS: [&str; 2] = ["plan-my-day", "today-from-my-messages"];
+
+/// "Plan my day", "what do I have to do today", "my messages".
+fn about_the_day(request: &str) -> bool {
+    const PHRASES: [&str; 9] = [
+        "my day",
+        "today",
+        "tomorrow",
+        "this week",
+        "my messages",
+        "my tasks",
+        "to do",
+        "todo",
+        "unread",
+    ];
+    let request = request.to_lowercase();
+    PHRASES.iter().any(|phrase| request.contains(phrase))
+}
+
 /// "Plan my day", "what's new in my Slack", "my inbox", "prep my next meeting".
-fn about_own_apps(request: &str) -> bool {
+pub(crate) fn about_own_apps(request: &str) -> bool {
     const PHRASES: [&str; 14] = [
         "my day",
         "today",
@@ -308,17 +333,20 @@ mod tests {
         let open = names("Show me the best that you can do", None);
         assert!(!open.iter().any(|name| name == "plan-my-day"));
         assert!(open.iter().any(|name| name == "show-what-you-can-do"));
-        for mine in [
-            "Plan my day",
-            "What's new in my Slack?",
-            "Go through my inbox",
-            "Prep my next meeting",
+        for (mine, skill) in [
+            ("Plan my day", "plan-my-day"),
+            ("What's on my plate today?", "today-from-my-messages"),
+            ("Go through my inbox", "inbox-triage"),
+            ("Prep my next meeting", "meeting-prep"),
         ] {
-            assert!(
-                names(mine, None).iter().any(|name| name == "plan-my-day"),
-                "{mine}"
-            );
+            assert!(names(mine, None).iter().any(|name| name == skill), "{mine}");
         }
+        let one_app = names("Open my slack, check what I have there", None);
+        assert!(!one_app.iter().any(|name| name == "today-from-my-messages"));
+        assert!(!one_app.iter().any(|name| name == "plan-my-day"));
+        assert!(names("What do I have to do today from Slack?", None)
+            .iter()
+            .any(|name| name == "today-from-my-messages"));
         assert!(names("Hi", Some("plan-my-day"))
             .iter()
             .any(|name| name == "plan-my-day"));

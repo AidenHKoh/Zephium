@@ -2,16 +2,23 @@
   import Icon from "$shared/ui/Icon";
   import type { CanvasItem, PartPage } from "../../lib/canvas-model";
   import { PART, partLead, rowKey, stackSize } from "../../lib/run/part-size";
-  import { reasonBadge } from "../../lib/work-human";
-  import { CommandLineIcon, FileEditIcon, File01Icon, Search01Icon } from "../../lib/icons";
+  import {
+    ArrowUpRight01Icon,
+    CommandLineIcon,
+    FileEditIcon,
+    File01Icon,
+    Search01Icon,
+  } from "../../lib/icons";
   import { askCard, partContent } from "./slots";
   import { needWords } from "../../lib/run/need";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import HostGlyph from "../cards/HostGlyph.svelte";
   import PageFace from "./PageFace.svelte";
+  import NeedsYou from "./NeedsYou.svelte";
   import PartMark from "../presence/PartMark.svelte";
   import PartAgent from "../presence/PartAgent.svelte";
+  import { resultLabel } from "../../lib/run/result-label";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -20,6 +27,7 @@
     onopen,
     onlist,
     onneed,
+    onwait,
   }: {
     item: CanvasItem;
     selected: boolean;
@@ -29,19 +37,38 @@
     onlist: () => void;
     /** Meets the part's need: `sign_in` opens the site, `again` runs the part again. */
     onneed?: (how: "meet" | "again") => void;
+    /** Keeps the run waiting on one of the part's pages a while longer. */
+    onwait?: (page: string) => void;
   } = $props();
 
   const part = $derived(item.part!);
   const shape = $derived(part.shape);
-  /** The page it is on now leads, then the newest. */
+  const waits = (page: PartPage) => page.human?.phase === "waiting_for_human";
+  /** A page waiting on the person leads, then the page it is on now, then the newest. */
   const ordered = $derived(
-    [...part.pages].reverse().sort((a, b) => Number(b.live) - Number(a.live)),
+    [...part.pages]
+      .reverse()
+      .sort((a, b) => Number(waits(b)) - Number(waits(a)) || Number(b.live) - Number(a.live)),
   );
+  /** The front window, when the run waits on the person there. */
+  const waiting = $derived(ordered[0] && waits(ordered[0]) ? ordered[0] : null);
+  /** A middle dot stays with the words before it, so no line starts with one. */
+  const keepDots = (text: string) => text.replaceAll(" · ", "\u00a0· ");
+  const siteOf = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./u, "");
+    } catch {
+      return (part.host ?? "").replace(/^www\./u, "");
+    }
+  };
   const shown = $derived(ordered.slice(0, PART.shown));
   const stack = $derived(stackSize(part.pages.length));
   const working = $derived(part.state === "running" || part.state === "waiting");
   const cited = $derived(part.cited ?? []);
   const more = $derived(Math.max(0, (part.citedCount ?? 0) - cited.length));
+  /** Results the run opened already stand as pages beside the list: it names only the rest, and counts those. */
+  const opened = $derived(cited.filter((row) => row.opened).length);
+  const passed = $derived(cited.filter((row) => !row.opened));
   /** Folded, each window behind the front one peeks out right and below it. */
   const placeOf = (index: number) =>
     `translate(${index * PART.behindX}px, ${index * PART.behindY}px)`;
@@ -63,10 +90,23 @@
   const needSaid = $derived.by(() => {
     if (!need) return null;
     // A sign-in opened: what is left is to run the part again.
-    if (need.kind === "sign_in" && signing)
+    if (need.kind === "sign_in" && !need.past && signing)
       return { text: m.work_need_signed_in({ site: need.target }), action: m.work_need_again() };
     return needWords(need, part.title, "row");
   });
+  /** A check or a sign-in the part still needs the person for, as the same card a waiting page gets. */
+  const asked = $derived(
+    (need?.kind === "check" || need?.kind === "sign_in") &&
+      !need.past &&
+      !(need.kind === "sign_in" && signing),
+  );
+  function meet() {
+    if (need?.kind === "sign_in" && !need.past && !signing) {
+      signing = true;
+      onneed?.("meet");
+    } else
+      onneed?.(need?.kind === "sign_in" || need?.kind === "retry" || need?.past ? "again" : "meet");
+  }
   const board = getContext<BoardActions | undefined>(canvasBoard);
   // The row's own height: the taller of its name and its work, so rows never overlap.
   let labelBody = $state<HTMLElement>();
@@ -117,20 +157,26 @@
       <PartMark {part} />
       <strong>{part.title}</strong>
     </button>
-    {#if needSaid}<p class="summary need-text">{needSaid.text}</p>
-      <button
-        type="button"
-        class="need nodrag nopan"
-        onclick={(event) => {
-          event.stopPropagation();
-          if (need?.kind === "sign_in" && !signing) {
-            signing = true;
-            onneed?.("meet");
-          } else onneed?.(need?.kind === "sign_in" || need?.kind === "retry" ? "again" : "meet");
-        }}>{needSaid.action}</button
-      >
+    {#if waiting?.human}<NeedsYou
+        inline
+        page={waiting.human}
+        host={siteOf(waiting.url)}
+        url={waiting.url}
+        pending={part.pending}
+        onopen={() => onopen(waiting.id)}
+        onwait={onwait ? () => onwait?.(waiting.id) : undefined}
+      />
+    {:else if asked && need}<NeedsYou
+        inline
+        reason={need.kind === "sign_in" ? "sign_in" : "challenge"}
+        host={siteOf(need.address ?? "")}
+        url={need.address ?? ""}
+        onopen={meet}
+      />
+    {:else if needSaid}<p class="summary need-text">{needSaid.text}</p>
+      <button type="button" class="need nodrag nopan" onclick={meet}>{needSaid.action}</button>
     {:else if part.summary}<p class="summary" class:turn={part.state === "waiting"}>
-        {part.summary}
+        {keepDots(part.summary)}
       </p>{/if}
   </div>
 
@@ -163,6 +209,7 @@
     <div
       class="stack"
       class:fans={shown.length > 1}
+      class:holding={!!waiting?.human}
       style:inset-inline-start="{partLead}px"
       style:inline-size="{stack.width}px"
       style:block-size="{stack.height}px"
@@ -173,6 +220,44 @@
       {#if part.pages.length > 1}<span class="count" style:inset-inline-start="{stack.width}px"
           >{part.pages.length}</span
         >{/if}
+    </div>
+  {:else if shape === "sources" && part.search}
+    <div class="slot" style:inset-inline-start="{partLead}px">
+      <ul class="results" bind:this={workBody}>
+        {#if part.query}<li class="query" title={part.query}>
+            <Icon icon={Search01Icon} size={13} /><span class="words">{part.query}</span>
+            {#if part.queries}<span class="again">+{part.queries - 1}</span>{/if}
+          </li>{/if}
+        {#if opened}<li class="rest opened-count">
+            <Icon icon={ArrowUpRight01Icon} size={12} />{m.work_part_opened_count({
+              count: opened,
+            })}
+          </li>{/if}
+        {#each passed as row (row.key)}{@const label = resultLabel(row, part.oneSite)}
+          <li>
+            <button
+              type="button"
+              class="row nodrag"
+              title={row.title || row.url}
+              onclick={(event) => {
+                event.stopPropagation();
+                onlist();
+              }}
+            >
+              <span class="site-mark"
+                ><HostGlyph host={row.where} url={row.url} size={14} initial={false} /></span
+              >
+              <span class="result">{label.text}</span>
+              {#if label.site}<span class="where">{label.site}</span>{/if}
+            </button>
+          </li>{:else}{#if working && !opened}{#each [0, 1, 2] as index (index)}<li
+                class="pending"
+                style:inline-size="{100 - index * 18}%"
+                style:--delay="{index * 120}ms"
+                aria-hidden="true"
+              ></li>{/each}{/if}{/each}
+        {#if more}<li class="rest">{m.work_part_more_results({ count: more })}</li>{/if}
+      </ul>
     </div>
   {:else if shape === "sources"}
     <div class="slot" style:inset-inline-start="{partLead}px">
@@ -223,23 +308,27 @@
       frame={page.frame}
       host={part.host ?? ""}
       live={page.live}
+      still={waits(page)}
     />
-    {#if page.human?.phase === "waiting_for_human"}<span class="needs"
-        ><span class="why">{reasonBadge(page.human.reason)}</span><span
-          class="help"
-          role="presentation">{m.work_human_help()}</span
-        ></span
-      >{/if}
   </button>
 {/snippet}
 
 <style>
+  /* The row's box is larger than what it draws: only what is drawn takes the pointer, so
+     the empty space around the windows pans the canvas like any other. */
   .part {
     position: relative;
     box-sizing: border-box;
     inline-size: 100%;
     block-size: 100%;
     color: var(--color-text);
+    pointer-events: none;
+  }
+
+  .label,
+  .page,
+  .slot > :global(*) {
+    pointer-events: auto;
   }
 
   .label {
@@ -398,6 +487,14 @@
       translate var(--motion-base) var(--ease-spring);
   }
 
+  /* A lifted window keeps the strip it rose from: at its lower edge the pointer
+     would otherwise fall off it, drop it, meet it again, and flicker. */
+  .fans .page:hover::after {
+    position: absolute;
+    inset: 100% 0 -3px;
+    content: "";
+  }
+
   .count {
     position: absolute;
     inset-block-start: 0;
@@ -412,7 +509,6 @@
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     line-height: 16px;
-    pointer-events: none;
     transition: opacity var(--motion-fast) var(--ease-out);
   }
 
@@ -420,28 +516,15 @@
     opacity: 0;
   }
 
-  .needs {
-    position: absolute;
-    inset: auto 8px 8px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    padding: 4px 4px 4px 10px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-float);
-    box-shadow: var(--shadow-menu);
-    color: var(--color-text);
-    font-size: var(--text-label);
-    font-weight: 600;
-    line-height: 16px;
+  /* The windows stay folded while the run waits: the need in the row speaks for the front one. */
+  .stack.holding .page,
+  .stack.holding .page:hover {
+    transform: var(--place);
+    translate: none;
   }
 
-  .help {
-    padding: 3px 10px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-lit);
-    color: var(--color-on-lit);
+  .stack.holding .count {
+    opacity: 1;
   }
 
   .lines {
@@ -475,6 +558,107 @@
 
   .lines .rest {
     padding-inline-start: 21px;
+  }
+
+  /* A search's results: the ones the run opened are pages beside it, so only the rest are listed. */
+  .results {
+    display: flex;
+    flex-direction: column;
+    inline-size: 320px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  /* What it searched for, set like the field it was typed into. */
+  .query {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    block-size: 30px;
+    margin-block-end: 4px;
+    padding: 0 10px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    color: var(--color-muted);
+  }
+
+  .words {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .query .again {
+    flex: none;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    inline-size: 100%;
+    block-size: 28px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: var(--radius-inset);
+    background: transparent;
+    color: var(--color-text);
+    font: inherit;
+    text-align: start;
+    cursor: default;
+    transition: opacity var(--motion-base) var(--ease-out);
+  }
+
+  .row:hover {
+    background: var(--color-control-hover);
+  }
+
+  .result {
+    flex: 1;
+    min-inline-size: 0;
+    overflow: hidden;
+    font-size: var(--text-body);
+    white-space: nowrap;
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  }
+
+  .where {
+    flex: none;
+    max-inline-size: 40%;
+    overflow: hidden;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Results on their way: quiet bars that breathe until the engine answers. */
+  .pending {
+    block-size: 12px;
+    margin: 8px 6px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+    animation: breathe 1.4s var(--ease-in-out) var(--delay) infinite;
+  }
+
+  @keyframes breathe {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pending {
+      animation: none;
+    }
   }
 
   .cited {
@@ -535,9 +719,18 @@
     mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
   }
 
+  .results .rest,
   .cited .rest {
     padding: 4px 6px 0 28px;
     color: var(--color-muted);
     font-size: var(--text-label);
+  }
+
+  .results .opened-count {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-block-end: 2px;
+    padding-inline-start: 6px;
   }
 </style>

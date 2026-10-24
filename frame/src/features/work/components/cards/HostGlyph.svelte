@@ -76,7 +76,12 @@
   onMount(() => {
     if (file || mark || !probe) return;
     const origin = siteOrigin(url || host);
-    if (origin) probe(origin);
+    if (!origin) return;
+    probe(origin);
+    // aws.amazon.com may serve no icon of its own; amazon.com's then stands.
+    const bare = new URL(origin).hostname.replace(/^www\./iu, "");
+    const site = registrableSite(bare);
+    if (site !== bare) probe(`https://${site}`);
   });
 </script>
 

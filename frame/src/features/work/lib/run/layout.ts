@@ -3,12 +3,14 @@ import { branch, merge, type Point } from "./lines";
 
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
- * at x = 0, the parts start 96 past the request, the result 96 past the
- * widest part row. The parts stand as a column centred on the request, so
- * parallel work forks from one point, up and down alike, and merges the same
- * way into the result. The run's spine runs through the request's first line,
- * the middle of the fork and the answer's headline. Its Sources stand under
- * its result.
+ * at x = 0, then the run's work in the order it happened, one column per
+ * stretch of time (work that overlapped stands together), each 96 past the
+ * last, and the result 96 past the last column. The request, every column
+ * and the result's headline begin level at the run's top and grow downward, so
+ * a tall result never moves the work and tall work never moves the request;
+ * parallel work forks from the request's line, each column's work merges and
+ * forks on into the next, and the last merges into the result. Its Sources
+ * stand under its result.
  */
 export const RUN = {
   inputs: 200,
@@ -30,6 +32,8 @@ export const RUN = {
   spine: 32,
   /** A part's name sits 12 under its row's top. */
   labelMid: 12,
+  /** A part's mark stands centred this far in from its row's left. */
+  markMid: 7,
   /** The answer's headline centre, under the result's top. */
   resultMid: 14,
   /** Lines stop short of what they join. */
@@ -39,6 +43,17 @@ export const RUN = {
 
 const snap = (value: number) => Math.ceil(value / 8) * 8;
 
+/**
+ * A short digest of an id. A line between two cards is named by both, and two
+ * full part ids run past the canvas's id limit, which drops the line.
+ */
+function digest(id: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < id.length; index++)
+    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193);
+  return (hash >>> 0).toString(36);
+}
+
 type Sized = { id: string; width: number; height: number };
 type RunRow = {
   part: Sized;
@@ -46,6 +61,10 @@ type RunRow = {
   found: readonly Sized[];
   /** The part's work reaches the result. */
   feeds: boolean;
+  /** Its column: later work stands further right; one not yet placed stands in the newest. */
+  phase?: number;
+  /** The row just above it whose work it carries on: joined down from it, not forked to beside it. */
+  after?: string;
 };
 export type RunInputs = {
   /** The request, and where its first line of words ends, when that is short of its column. */
@@ -89,64 +108,127 @@ export type RunPlace = {
 
 const ORIGIN = { source: { x: 0, y: 0 }, target: { x: 0, y: 0 } };
 
-export function placeRun(top: number, run: RunInputs): RunPlace {
+type RowEnd = {
+  row: RunRow;
+  end: Point;
+  last: string;
+  lastRect: Rect;
+  /** The row above carries on into it: no fork reaches it. */
+  joined: boolean;
+  /** The row below carries it on: its line leaves through that row. */
+  carried: boolean;
+};
+
+/** One column of rows from its top-left: where each row and what it found stand. */
+function placeColumn(rows: readonly RunRow[], x: number, top: number) {
   const rects: Record<string, Rect> = {};
   const lines: RunLine[] = [];
-  const partsX = RUN.request + RUN.fork;
-  let y = top + RUN.spine - RUN.labelMid;
-  let widest = 0;
-  const rowEnds: { row: RunRow; end: Point; last: string; lastRect: Rect }[] = [];
-  for (const row of run.rows) {
+  const ends: RowEnd[] = [];
+  const labels: number[] = [];
+  let y = top;
+  let right = x;
+  for (const [index, row] of rows.entries()) {
     const rowTop = y;
-    rects[row.part.id] = { x: partsX, y: rowTop, width: row.part.width, height: row.part.height };
-    const start = snap(partsX + row.part.width + RUN.found);
-    let x = start;
+    const above = rows[index - 1];
+    const joined = !!above && row.after === above.part.id;
+    if (joined) {
+      const from = rects[above.part.id]!;
+      const at = x + RUN.markMid;
+      lines.push({
+        id: `line:${row.part.id}`,
+        kind: "part",
+        source: above.part.id,
+        target: row.part.id,
+        points: [
+          { x: at, y: from.y + from.height + RUN.air },
+          { x: at, y: rowTop - RUN.air },
+        ],
+        from: { x: RUN.markMid, y: from.height + RUN.air },
+        to: { x: RUN.markMid, y: -RUN.air },
+        laid: ORIGIN,
+      });
+    }
+    rects[row.part.id] = { x, y: rowTop, width: row.part.width, height: row.part.height };
+    labels.push(rowTop + RUN.labelMid);
+    const start = snap(x + row.part.width + RUN.found);
+    let at = start;
     let lineTop = rowTop;
     let lineHeight = 0;
     let height = row.part.height;
     let last = row.part.id;
-    let farthest = partsX + row.part.width;
+    let farthest = x + row.part.width;
     // What a part found runs along its row, and wraps under itself rather than pushing the result off the view.
     for (const found of row.found) {
-      if (x > start && x + found.width - start > RUN.foundRow) {
+      if (at > start && at + found.width - start > RUN.foundRow) {
         lineTop = snap(lineTop + lineHeight + RUN.foundGap);
-        x = start;
+        at = start;
         lineHeight = 0;
       }
-      rects[found.id] = { x, y: lineTop, width: found.width, height: found.height };
+      rects[found.id] = { x: at, y: lineTop, width: found.width, height: found.height };
       if (lineTop === rowTop) last = found.id;
-      farthest = Math.max(farthest, x + found.width);
-      x = snap(x + found.width + RUN.foundGap);
+      farthest = Math.max(farthest, at + found.width);
+      at = snap(at + found.width + RUN.foundGap);
       lineHeight = Math.max(lineHeight, found.height);
       height = Math.max(height, lineTop - rowTop + found.height);
     }
     const first = row.found[0] ? rects[row.found[0].id] : undefined;
     // The part's work is joined to what it found, straight along the row.
     if (first) {
-      const y = rowTop + RUN.labelMid;
-      const from = { x: partsX + row.part.width + RUN.air, y };
+      const ly = rowTop + RUN.labelMid;
       lines.push({
         id: `found:${row.part.id}`,
         kind: "found",
         source: row.part.id,
         target: row.found[0]!.id,
-        points: [from, { x: first.x - RUN.air, y }],
+        points: [
+          { x: x + row.part.width + RUN.air, y: ly },
+          { x: first.x - RUN.air, y: ly },
+        ],
         from: { x: row.part.width + RUN.air, y: RUN.labelMid },
         to: { x: -RUN.air, y: RUN.labelMid },
         laid: ORIGIN,
       });
     }
     const lastRect = rects[last]!;
-    const right = lastRect.x + lastRect.width;
-    widest = Math.max(widest, farthest - partsX);
-    rowEnds.push({ row, end: { x: right + RUN.air, y: rowTop + RUN.labelMid }, last, lastRect });
+    right = Math.max(right, farthest);
+    ends.push({
+      row,
+      end: { x: lastRect.x + lastRect.width + RUN.air, y: rowTop + RUN.labelMid },
+      last,
+      lastRect,
+      joined,
+      carried: rows[index + 1]?.after === row.part.id,
+    });
     y = snap(rowTop + height + RUN.rowGap);
   }
-  const partsBottom = run.rows.length ? y - RUN.rowGap : top;
-  const labels = run.rows.map((row) => rects[row.part.id]!.y + RUN.labelMid);
-  const spine = labels.length
-    ? Math.max(top + RUN.spine, Math.round((labels[0]! + labels.at(-1)!) / 8) * 4)
-    : top + RUN.spine;
+  return { rects, lines, ends, labels, width: right - x, bottom: y - RUN.rowGap };
+}
+
+export function placeRun(top: number, run: RunInputs): RunPlace {
+  const rects: Record<string, Rect> = {};
+  const lines: RunLine[] = [];
+  const partsX = RUN.request + RUN.fork;
+  const known = run.rows.flatMap((row) => (row.phase === undefined ? [] : [row.phase]));
+  // A row whose column is not known yet stands in the newest, never back at the first.
+  const newest = known.length ? Math.max(...known) : 0;
+  const phaseOf = (row: RunRow) => row.phase ?? newest;
+  const phases = [...new Set(run.rows.map(phaseOf))].sort((a, b) => a - b);
+  const groups = phases.map((phase) => run.rows.filter((row) => phaseOf(row) === phase));
+  // Every column and the request begin at the run's top; the result starts there too.
+  const first = top + RUN.spine - RUN.labelMid;
+  const spine = top + RUN.spine;
+  const columns: (ReturnType<typeof placeColumn> & { x: number })[] = [];
+  let x = partsX;
+  groups.forEach((rows) => {
+    const column = placeColumn(rows, x, first);
+    Object.assign(rects, column.rects);
+    lines.push(...column.lines);
+    columns.push({ ...column, x });
+    x = snap(x + column.width + RUN.fork);
+  });
+  const labels = columns.flatMap((column) => column.labels);
+  const partsBottom = columns.length ? Math.max(...columns.map((column) => column.bottom)) : top;
+  const lastColumn = columns.at(-1);
   const request = { x: 0, y: spine - RUN.spine, width: RUN.request, height: run.request.height };
   // Lines leave from the end of the words, never from the column's edge past a short request.
   const requestEnd = Math.min(RUN.request, run.request.end ?? RUN.request);
@@ -183,8 +265,10 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   }
 
   // Without parts the answer stands a fork's width past the words, joined to them by one line.
-  const resultX = run.rows.length ? snap(partsX + widest + RUN.feed) : snap(requestEnd + RUN.fork);
-  const resultTop = spine - RUN.resultMid;
+  const resultX = lastColumn
+    ? snap(lastColumn.x + lastColumn.width + RUN.feed)
+    : snap(requestEnd + RUN.fork);
+  const resultTop = (labels.length ? Math.min(spine, ...labels) : spine) - RUN.resultMid;
   let blocks = resultTop;
   if (run.head) {
     rects[run.head.id] = {
@@ -201,11 +285,12 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
   const resultId = run.head?.id ?? Object.keys(run.board.at)[0];
   let resultRight = resultX + Math.max(run.head?.width ?? 0, run.board.width);
 
-  // A request's line branches to the head of every row; each row's end merges into the result.
+  // The request's line branches to the head of every row of the first column a fork reaches.
   const start = { x: requestEnd + RUN.air, y: spine };
-  const partEnds = labels.map((y) => ({ x: partsX - RUN.air, y }));
+  const firstRows = (columns[0]?.ends ?? []).filter((entry) => !entry.joined);
+  const partEnds = firstRows.map((entry) => ({ x: partsX - RUN.air, y: entry.end.y }));
   branch(start, RUN.request + RUN.fork / 2, partEnds).forEach((points, index) => {
-    const row = run.rows[index]!;
+    const { row } = firstRows[index]!;
     lines.push({
       id: `line:${row.part.id}`,
       kind: "part",
@@ -217,11 +302,45 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
       laid: ORIGIN,
     });
   });
+  // Each column's work merges on the spine and forks on into the next column.
+  columns.slice(1).forEach((column, index) => {
+    const leaving = columns[index]!.ends.filter((entry) => !entry.carried);
+    const reached = column.ends.filter((entry) => !entry.joined);
+    const junction = { x: column.x - RUN.fork / 2, y: spine };
+    const merged = merge(
+      leaving.map((entry) => entry.end),
+      junction.x,
+      junction,
+    );
+    const forked = branch(
+      junction,
+      junction.x,
+      reached.map((entry) => ({ x: column.x - RUN.air, y: entry.end.y })),
+    );
+    leaving.forEach((entry, a) => {
+      reached.forEach((next, b) => {
+        lines.push({
+          id: `step:${digest(entry.row.part.id)}:${digest(next.row.part.id)}`,
+          kind: "part",
+          source: entry.last,
+          target: next.row.part.id,
+          points: [...merged[a]!, ...forked[b]!.slice(1)],
+          from: { x: entry.lastRect.width + RUN.air, y: entry.end.y - entry.lastRect.y },
+          to: { x: -RUN.air, y: RUN.labelMid },
+          laid: ORIGIN,
+        });
+      });
+    });
+  });
   if (resultId) {
-    const into = { x: resultX - RUN.air, y: spine };
     const result = rects[resultId]!;
-    const to = { x: -RUN.air, y: spine - result.y };
-    const feeding = rowEnds.filter((entry) => entry.row.feeds);
+    const into = { x: resultX - RUN.air, y: resultTop + RUN.resultMid };
+    const to = { x: -RUN.air, y: into.y - result.y };
+    // The last column's work reaches the result; earlier columns reach it through the later ones.
+    const leaving = lastColumn?.ends.filter((entry) => !entry.carried) ?? [];
+    const last = leaving.filter((entry) => entry.row.feeds);
+    // A line never runs level through a column to reach an earlier one's work, so a last column that feeds nothing stands for the run's end.
+    const feeding = last.length ? last : leaving;
     const ends = feeding.map((entry) => entry.end);
     merge(ends, resultX - RUN.feed / 2, into).forEach((points, index) => {
       const entry = feeding[index]!;
@@ -241,7 +360,7 @@ export function placeRun(top: number, run: RunInputs): RunPlace {
     });
     if (!run.rows.length)
       lines.push({
-        id: `line:${run.request.id}:${resultId}`,
+        id: `line:${run.request.id}:${digest(resultId)}`,
         kind: "part",
         source: run.request.id,
         target: resultId,

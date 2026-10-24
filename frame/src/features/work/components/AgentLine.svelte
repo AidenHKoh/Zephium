@@ -1,15 +1,17 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import type { WorkSession } from "$domain/work";
-  import type { WorkHumanReasonV1 } from "$shared/ipc/bindings";
+  import { commands } from "$shared/ipc/bindings";
+  import type { WorkHumanReasonV1, WorkModelFaultV1 } from "$shared/ipc/bindings";
   import { currentActivity } from "$domain/work";
-  import { agentLine, endingNote, isLive } from "../lib/agent-steps";
-  import { cardCountdown, reasonSentence } from "../lib/work-human";
+  import { agentLine, endingFault, endingNote, isLive } from "../lib/agent-steps";
+  import { dailyResetTime } from "../lib/daily-reset";
+  import { cardCountdown } from "../lib/work-human";
   import type { WorkHumanSession } from "$domain/work-human";
   import RunAsks from "./asks/RunAsks.svelte";
-  import { asksOf, openAsks } from "./asks/asks";
-  import { preparationFailure } from "../lib/preparation-failure";
+  import { askPart, asksOf, openAsks } from "./asks/asks";
   import { fileName } from "../lib/work-files";
+  import { effected } from "../lib/run/parts";
   import type { CanvasItem } from "../lib/canvas-model";
   import { Character, Orb, Shimmer, type Mood } from "$shared/ui/presence";
   import HostGlyph, { siteMark } from "./cards/HostGlyph.svelte";
@@ -35,7 +37,6 @@
     onwaitingpage,
     onreview,
     onsteered,
-    onsignin,
     human = null,
     onopenstep,
     working = [],
@@ -64,6 +65,8 @@
       host: string;
       reason: WorkHumanReasonV1;
       remaining: number;
+      /** The wait is a short one the person may keep going. */
+      canExtend?: boolean;
     } | null;
     /** One line about something the person asked for that did not land. */
     problem?: string | null;
@@ -77,8 +80,6 @@
     onreview?: (step: string) => void;
     /** The draft was handed to the agent or queued; clear the composer. */
     onsteered?: () => void;
-    /** A read met a sign-in wall: stop there and open the page to sign in. */
-    onsignin?: (card: string) => void;
     /** The work's held pages, for the asks a sign-in wall puts. */
     human?: WorkHumanSession | null;
     /** Opens the page an ask is about, in the centre. */
@@ -183,32 +184,33 @@
       return undefined;
     return { id: step.id, prompt: step.kind.prompt, options: step.kind.options };
   });
-  /** The run's open asks stand in the island as cards; the line's own question gives way. */
-  const asking = $derived.by(() => {
-    if (!execution || !work) return false;
+  const openNow = $derived.by(() => {
+    if (!execution || !work) return [];
     const held = human ? (human.pages.get(work.id) ?? []) : [];
-    return openAsks(asksOf(execution, session.pages, held)).length > 0;
+    return openAsks(asksOf(execution, session.pages, held));
+  });
+  /** An ask with no place on the canvas stands in the island as a card; the line's own question gives way. */
+  const asking = $derived(openNow.some((ask) => !askPart(ask)));
+  /**
+   * An ask on a site's card is answered there and only there; the island just
+   * says so and points at it.
+   */
+  const askedOnCanvas = $derived.by(() => {
+    for (const ask of openNow) {
+      const card = askPart(ask);
+      if (card)
+        return { card, host: "host" in ask ? ask.host : "site" in ask ? ask.site : undefined };
+    }
+    return null;
   });
   const question = $derived(asking ? undefined : (questions.at(-1) ?? stoppedQuestion));
   const failure = $derived(
-    preparationFailure(run?.state) ??
-      (run?.state.kind === "settled" && run.state.response.reply.kind === "error"
+    run?.state.kind === "refused"
+      ? run.state.error
+      : run?.state.kind === "settled" && run.state.response.reply.kind === "error"
         ? run.state.response.reply.error
-        : null),
+        : null,
   );
-  const approval = $derived(work ? session.operations.latest(work.id, "prepare_plan") : undefined);
-  const approvalDraft = $derived.by(() => {
-    const state = approval?.state;
-    const reply =
-      state?.kind === "settled"
-        ? state.response.reply
-        : state?.kind === "planned" && state.response.outcome.kind === "settled"
-          ? state.response.outcome.response.reply
-          : null;
-    return reply?.kind === "approval_draft" && reply.expected_revision === work?.revision
-      ? reply
-      : null;
-  });
   const intervention = $derived(execution?.intervention ?? null);
   /** Why the agent stopped for a person, in the person's words. */
   const interventionLabel = $derived.by(() => {
@@ -247,11 +249,30 @@
     profile_unavailable: m.work_line_unavailable,
     outcome_unknown: m.work_line_unknown,
   };
+  /**
+   * A refused request says why for a moment, then the run's own words return:
+   * it never stands for good over a run that answered. With no run to tell
+   * instead, it stays.
+   */
+  const REFUSAL_MS = 6000;
+  const refusal = $derived(failure ?? session.failure);
+  const refusalKey = $derived(refusal ? `${run?.id ?? ""}:${refusal}` : null);
+  let refusalTold = $state<string | null>(null);
+  $effect(() => {
+    const key = refusalKey;
+    if (!key) return;
+    const timer = setTimeout(() => (refusalTold = key), REFUSAL_MS);
+    return () => clearTimeout(timer);
+  });
+  const refused = $derived(
+    refusalKey && (!execution || refusalTold !== refusalKey) ? refusal : null,
+  );
   /** Two or three words while it works; one quiet sentence once it stops. */
   const headline = $derived.by(() => {
-    if (waiting) return reasonSentence(waiting.reason, waiting.host);
+    if (waiting) return m.work_line_waiting_on({ site: waiting.host });
+    if (askedOnCanvas?.host) return m.work_line_waiting_on({ site: askedOnCanvas.host });
+    if (askedOnCanvas) return m.work_line_waiting_for_you();
     if (intervention) return interventionLabel;
-    const refused = failure ?? session.failure;
     if (refused) return refusals[refused]?.() ?? m.work_line_failed();
     if (interrupted) return m.work_line_interrupted();
     if (stoppedQuestion) return m.work_line_waiting_for_you();
@@ -279,8 +300,48 @@
         return run?.state.kind === "pending" ? m.work_line_thinking() : m.work_line_ready();
     }
   });
+  /** A model refusal the person can fix says so in their words, with the fix. */
+  const fault = $derived(execution && !live ? endingFault(execution) : null);
+  const faultLines: Partial<Record<WorkModelFaultV1, () => string>> = {
+    hosted_usage: m.work_fault_hosted_usage,
+    plan_required: m.work_fault_plan_required,
+    billing_review: m.work_fault_billing_review,
+    daily_limit: () => m.work_fault_daily_limit({ time: dailyResetTime() }),
+    free_usage_paused: m.work_fault_free_usage_paused,
+    hosted_busy: m.work_fault_hosted_busy,
+    hosted_paused: m.work_fault_hosted_paused,
+    signed_out: m.work_fault_signed_out,
+    missing_key: m.work_fault_missing_key,
+    key_refused: m.work_fault_key_refused,
+    provider_credit: m.work_fault_provider_credit,
+  };
+  const faultFix = $derived.by(() => {
+    switch (fault) {
+      case "hosted_usage":
+        return { label: m.work_fault_fix_plan(), command: "settings.account" };
+      case "plan_required":
+      case "free_usage_paused":
+        return { label: m.work_fault_fix_plans(), command: "settings.account" };
+      case "billing_review":
+        return { label: m.work_fault_fix_account(), command: "settings.account" };
+      case "daily_limit":
+        return { label: m.work_fault_fix_limit(), command: "settings.account" };
+      case "hosted_paused":
+        return { label: m.work_fault_fix_key(), command: "settings.ai" };
+      case "signed_out":
+        return { label: m.work_fault_fix_sign_in(), command: "settings.account" };
+      case "missing_key":
+      case "key_refused":
+      case "provider_credit":
+        return { label: m.work_model_manage(), command: "settings.ai" };
+      default:
+        return null;
+    }
+  });
   /** Why the run ended early, in Rust's closed words: the note its last unfinished step left. */
-  const ending = $derived(execution ? endingNote(execution) : null);
+  const ending = $derived(
+    (fault && faultLines[fault]?.()) ?? (execution ? endingNote(execution) : null),
+  );
   /**
    * A part's need speaks for the run only when the run gave no answer: an
    * answered run says what it found and still offers the part's one remedy.
@@ -299,8 +360,14 @@
   /** A short run's one remedy, or Try again for one that simply stopped. */
   const remedy = $derived.by(() => {
     if (live || !newest || !execution || question) return null;
+    if (faultFix)
+      return {
+        label: faultFix.label,
+        run: () => void commands.runCommand(faultFix.command),
+      };
     if (ended) return { label: ended.action, run: ended.onact };
-    if (["failed", "interrupted"].includes(execution.status))
+    // Never a whole new try once an approved send or purchase may have happened.
+    if (["failed", "interrupted"].includes(execution.status) && !execution.steps?.some(effected))
       return {
         label: m.work_need_again(),
         run: () => void session.continueWith(m.work_line_try_again_request()),
@@ -308,7 +375,7 @@
     return null;
   });
   const mark = $derived(
-    waiting || question || proposal || asking
+    waiting || question || proposal || asking || askedOnCanvas
       ? ("waiting" as const)
       : live
         ? ("live" as const)
@@ -377,7 +444,6 @@
     computer: "working",
     connection: "working",
   };
-  const signInWall = $derived(waiting?.reason === "sign_in" && !!onsignin);
   const followups = $derived(settled && newest ? session.followups.slice(0, 3) : []);
   const writeupOffer = $derived(settled && newest ? writeup : undefined);
   const nextRows = $derived(followups.length > 0 || !!writeupOffer);
@@ -580,6 +646,7 @@
             {human}
             placement="island"
             seed={agents[0]?.agent?.seed ?? 0}
+            homeless
             onopenpage={(step) => onopenstep?.(step)}
           />
         </div>{/if}
@@ -606,8 +673,8 @@
               class="words waiting"
               onclick={() => onwaitingpage?.(waiting.card)}
             >
-              {headline}{#if cardCountdown(waiting.remaining)}<span class="left"
-                  >{cardCountdown(waiting.remaining)}</span
+              <span class="said-title">{headline}</span>{#if cardCountdown(waiting.remaining)}<span
+                  class="left">{cardCountdown(waiting.remaining)}</span
                 >{/if}
             </button>
           {:else if problem}
@@ -651,13 +718,12 @@
               title={m.work_line_steer_hint()}
               onclick={() => void steer()}>{m.work_line_steer()}</button
             >
-          {:else if signInWall && waiting}
+          {:else if waiting || askedOnCanvas}
             <button
               type="button"
               class="action"
-              disabled={blocked}
-              onclick={() => onsignin?.(waiting.card)}
-              >{m.work_line_sign_in({ host: waiting.host })}</button
+              onclick={() => onwaitingpage?.(waiting?.card ?? askedOnCanvas?.card ?? "")}
+              >{m.work_line_show()}</button
             >
           {:else if proposal}
             <button
@@ -682,19 +748,6 @@
               aria-expanded={panel === "next"}
               onclick={() => (want = want === "next" ? null : "next")}
               >{m.work_line_next()}<Icon icon={ArrowDown01Icon} size={12} /></button
-            >
-          {:else if approvalDraft && !live}
-            <button
-              type="button"
-              class="action"
-              disabled={blocked}
-              onclick={() => {
-                if (approvalDraft)
-                  void session.execute(
-                    { kind: "approve", spec: approvalDraft.spec },
-                    approvalDraft.expected_revision,
-                  );
-              }}>{m.work_line_approve()}</button
             >
           {/if}
           {#if live}
@@ -881,6 +934,8 @@
   /* A line that points somewhere reads as a link, not as another button. */
   button.waiting {
     display: inline-flex;
+    min-inline-size: 0;
+    max-inline-size: 100%;
     align-items: baseline;
     gap: 6px;
     padding: 0;
@@ -889,14 +944,22 @@
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
-    text-decoration: underline;
-    text-decoration-color: var(--color-border-strong);
-    text-underline-offset: 3px;
     cursor: default;
   }
 
-  button.waiting:hover {
-    text-decoration-color: var(--color-lit);
+  /* It pans to the page; the lit button beside it is the action. */
+  .said-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--motion-fast) var(--ease-out);
+  }
+
+  button.waiting:hover .said-title {
+    text-decoration-color: var(--color-border-strong);
   }
 
   /* What the person asked for and did not land: said once, gone when read. */
@@ -924,8 +987,8 @@
 
   button.waiting .left {
     color: var(--color-muted);
+    flex: none;
     font-variant-numeric: tabular-nums;
-    text-decoration: none;
   }
 
   .draft {

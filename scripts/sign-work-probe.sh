@@ -2,7 +2,13 @@
 set -eu
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-probe="$repo/target/debug/macos-terra-agentic-probe"
+target=${CARGO_TARGET_DIR:-/private/tmp/zephium-engine-target}
+case "$target" in /*) ;; *) target="$repo/$target" ;; esac
+probe=${1:-"$target/debug/macos-terra-agentic-probe"}
+if [ "$#" -gt 1 ]; then
+    echo 'Usage: sign-work-probe.sh [private-probe-path]' >&2
+    exit 1
+fi
 keychain="$HOME/Library/Keychains/login.keychain-db"
 
 if [ "$(uname -s)" != Darwin ] || [ ! -f "$probe" ] || [ -L "$probe" ]; then

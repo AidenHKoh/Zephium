@@ -1,5 +1,6 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
+mod archive;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
@@ -22,6 +23,7 @@ mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
+mod profile_roster;
 mod projections;
 mod scope;
 mod search;
@@ -168,11 +170,15 @@ impl AgentLifecycleOwner {
 
 mod browser_pages;
 mod kept_sites;
+mod spaces;
 mod work_pane;
 
 /// Pages a run may queue for a seat in its page group at once.
 #[cfg(feature = "work-execution")]
 const MAX_QUEUED_PAGES: usize = 8;
+/// Passes one wake makes over the page lane while its turns keep moving.
+#[cfg(feature = "work-execution")]
+const MAX_PAGE_LANE_PASSES: usize = 4;
 
 #[cfg(feature = "work-execution")]
 fn trace_refusal(
@@ -180,8 +186,8 @@ fn trace_refusal(
     lane: crate::work_resources::product::RetainedLaneFacts,
 ) {
     crate::work_trace::record(format_args!(
-        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
-        lane.live, lane.settled, lane.lost, lane.queued, lane.group_failed, lane.group_sealed
+        "work: phase=page_lane event=refused cause={cause:?} live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
+        lane.live, lane.settled, lane.lost, lane.queued, lane.unsettled, lane.group_failed, lane.group_sealed
     ));
 }
 
@@ -221,6 +227,8 @@ pub struct Shell {
     zoom: ZoomState,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    roster: profile_roster::RosterState,
+    space_memory: spaces::SpaceMemory,
     /// Sites allowed to open a kind of application link without asking,
     /// for this run only.
     external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
@@ -238,6 +246,8 @@ pub struct Shell {
     browser_return_revision: u64,
     browser_after_return: Option<Box<Command>>,
     browser_return_ready: bool,
+    /// Set while the window lays out for a return that a queued command is about to change.
+    browser_return_hidden: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
@@ -453,6 +463,8 @@ impl Shell {
             zoom: ZoomState::default(),
             divider: None,
             private: None,
+            roster: profile_roster::RosterState::default(),
+            space_memory: spaces::SpaceMemory::default(),
             external_apps_allowed: std::collections::HashSet::new(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
@@ -465,6 +477,7 @@ impl Shell {
             browser_return_revision: 0,
             browser_after_return: None,
             browser_return_ready: false,
+            browser_return_hidden: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
@@ -750,6 +763,33 @@ impl Shell {
             Command::RenameFocusedProfile(name) => {
                 let _ = self.operation_rename_focused_profile(&name);
             }
+            Command::CreateProfile {
+                name,
+                avatar,
+                photo,
+                switch,
+            } => {
+                let _ = self.operation_create_profile(&name, avatar, photo, switch);
+            }
+            Command::SwitchProfile(profile) => {
+                let _ = self.operation_switch_profile(profile);
+            }
+            Command::RenameProfile { profile, name } => {
+                let _ = self.operation_rename_profile(profile, &name);
+            }
+            Command::SetProfileAvatar {
+                profile,
+                avatar,
+                photo,
+            } => {
+                let _ = self.operation_set_profile_avatar(profile, avatar, photo);
+            }
+            Command::ProfileAvatarPhoto { profile, reply } => {
+                self.profile_avatar_photo(profile, reply);
+            }
+            Command::Profiles { reply } => {
+                let _ = reply.try_send(self.profiles_view());
+            }
             Command::Close(id) => {
                 let _ = self.operation_close(id);
             }
@@ -779,6 +819,9 @@ impl Shell {
             }
             Command::TabAction { id, action } => {
                 let _ = self.operation_tab_action(id, action);
+            }
+            Command::Space(command) => {
+                let _ = self.operation_space(*command);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
@@ -1015,10 +1058,14 @@ impl Shell {
             }
             Command::DragOver { point } => {
                 if let Some(win) = self.windows.focused().map(|w| w.id) {
-                    let zone = point
+                    let preview = point
                         .and_then(|(x, y)| self.resolve_drop(x, y))
-                        .map(|d| d.zone);
-                    let _ = self.engine.set_drop_indicator(win, zone);
+                        .map(|drop| zephium_core::ports::engine::DropPreview {
+                            tab: drop.tab,
+                            zone: drop.zone,
+                            shift: drop.shift,
+                        });
+                    let _ = self.engine.set_drop_indicator(win, preview);
                 }
             }
             Command::DropTab { id, x, y } => {
@@ -1073,8 +1120,9 @@ impl Shell {
                 context,
                 action,
                 background,
+                replace,
             } => {
-                let _ = self.operation_run_search_action(*context, action, background);
+                let _ = self.operation_run_search_action(*context, action, background, replace);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);
@@ -1083,6 +1131,10 @@ impl Shell {
             Command::Find(request) => self.find_in_page(request),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
+            }
+            #[cfg(feature = "work-planning")]
+            Command::SetWorkScreenshots(change) => {
+                let _ = self.operation_set_work_screenshots(change);
             }
             // These mutations are accepted only through `Command::Operation`
             // so every foreground request has one truthful terminal identity.
@@ -1126,6 +1178,14 @@ impl Shell {
             Command::WindowTabs { profile, reply } => {
                 let _ = reply.send(self.window_tabs(profile));
             }
+            Command::OpenBackgroundTab {
+                profile,
+                space,
+                after,
+                url,
+                focus,
+                done,
+            } => done.finish(self.open_page_tab(profile, space, after, &url, focus)),
             Command::FaviconPoll { id, attempt } => self.poll_favicon(id, attempt),
             Command::PresentationFallback {
                 id,
@@ -1202,6 +1262,7 @@ impl Shell {
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
+                self.archive_idle_tabs();
                 if self.maintain_views() {
                     self.project_items();
                 }
@@ -1291,15 +1352,21 @@ impl Shell {
         // A page without a seat waits for one, in order, within its own
         // bounded wait: a full or sealed group of its run, or another run's
         // pages still closing, give way once their members have closed.
+        // A member whose record cannot be saved never closes, so nothing
+        // waiting behind it would sit down: it is refused at once instead.
         if !seated {
-            if self.queued_pages.len() < MAX_QUEUED_PAGES {
+            if lane.unsettled > 0 {
+                trace_refusal(Refusal::Unsettled, lane);
+                work.refuse(Refusal::Unsettled, lane);
+            } else if self.queued_pages.len() < MAX_QUEUED_PAGES {
                 if work.begin_wait() {
                     crate::work_trace::record(format_args!(
-                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} group_failed={} group_sealed={}",
+                        "work: phase=page_lane event=waiting live={} settled={} lost={} queued={} unsettled={} group_failed={} group_sealed={}",
                         lane.live,
                         lane.settled,
                         lane.lost,
                         lane.queued,
+                        lane.unsettled,
                         lane.group_failed,
                         lane.group_sealed
                     ));
@@ -1349,6 +1416,7 @@ impl Shell {
                     .count(),
             ),
             queued: count(self.queued_pages.len()),
+            unsettled: count(self.unsettled_pages()),
             group_failed: self
                 .retained_page_runtime
                 .as_ref()
@@ -1358,6 +1426,16 @@ impl Shell {
                 .as_ref()
                 .is_some_and(|group| group.is_sealed()),
         }
+    }
+
+    /// Live and graveyarded pages whose record cannot be saved.
+    #[cfg(feature = "work-execution")]
+    fn unsettled_pages(&self) -> usize {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .filter(|work| work.durably_unsettled())
+            .count()
     }
 
     /// Queued pages take seats in order as they free; a page that can sit
@@ -1458,36 +1536,66 @@ impl Shell {
         }
     }
 
+    /// What one pass over the page lane can change that lets another pass
+    /// hand on the audit turn or seat a queued page.
+    #[cfg(feature = "work-execution")]
+    fn page_lane_turn(&self) -> (usize, usize, usize, usize, usize, bool) {
+        (
+            self.retained_pages.len(),
+            self.retained_graveyard.len(),
+            self.queued_pages.len(),
+            self.retained_pages
+                .iter()
+                .chain(&self.retained_graveyard)
+                .filter(|work| work.holds_native_audit() || work.holds_seat())
+                .count(),
+            self.unsettled_pages(),
+            self.retained_page_runtime.is_some(),
+        )
+    }
+
     #[cfg(feature = "work-execution")]
     fn poll_work(&mut self) {
-        self.grant_native_audit();
-        self.admit_queued_pages();
-        for page in &mut self.retained_pages {
-            page.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(page.next_deadline());
+        // A member whose audit ends during a pass hands the turn on, and a
+        // group that closes seats the pages queued behind it, in this same
+        // wake: no later wake is owed to the lane, so none may be waited for.
+        for _ in 0..MAX_PAGE_LANE_PASSES {
+            let turn = self.page_lane_turn();
+            self.grant_native_audit();
+            self.admit_queued_pages();
+            for page in &mut self.retained_pages {
+                page.poll();
+            }
+            self.retire_settled_pages();
+            self.retained_graveyard.retain(|work| !work.is_closed());
+            for work in &mut self.retained_graveyard {
+                work.poll();
+            }
+            if self.page_lane_turn() == turn {
+                break;
             }
         }
-        self.retire_settled_pages();
         if let Some(work) = &mut self.retained_work {
             work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
-        }
-        self.retained_graveyard.retain(|work| !work.is_closed());
-        for work in &mut self.retained_graveyard {
-            work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
         }
         if let Some(work) = &mut self.work {
             work.poll();
-            if let Some(queue) = &self.self_queue {
-                queue.schedule_work(work.next_deadline());
-            }
         }
+        // The timer holds one deadline: the earliest any owner still needs.
+        if let Some(queue) = &self.self_queue {
+            queue.schedule_work(self.next_work_deadline());
+        }
+    }
+
+    #[cfg(feature = "work-execution")]
+    fn next_work_deadline(&self) -> Option<std::time::Instant> {
+        self.retained_pages
+            .iter()
+            .chain(&self.retained_graveyard)
+            .chain(self.retained_work.as_deref())
+            .filter_map(crate::work_resources::product::ProductWork::next_deadline)
+            .chain(self.work.as_ref().and_then(|work| work.next_deadline()))
+            .min()
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
@@ -1976,3 +2084,5 @@ mod work_planning_tests;
 mod work_product_tests;
 #[cfg(all(test, feature = "work-runtime"))]
 mod work_runtime_tests;
+#[cfg(all(test, feature = "work-runtime"))]
+mod work_stop_tests;

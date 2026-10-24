@@ -288,7 +288,14 @@ async fn synthesis_case(
             assert_eq!(attempt.usage.unwrap().model_tokens, 300);
         }
         2 | 4 | 5 => {
-            assert_eq!(execution.status, WorkExecutionStatus::Interrupted);
+            assert_eq!(
+                execution.status,
+                if mode == 5 {
+                    WorkExecutionStatus::Cancelled
+                } else {
+                    WorkExecutionStatus::Interrupted
+                }
+            );
             assert_eq!(attempt.status, WorkAttemptStatus::OutcomeUnknown);
             assert!(attempt.usage.is_none());
             assert!(execution.artifacts.is_empty());
@@ -776,6 +783,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::BeginAgent {
                     grant: WorkAgentGrantV1 {
+                        draft: None,
                         lead: None,
                         provider: WorkSearchProvider::OpenAi,
                         model: PUBLIC_SEARCH_MODEL.into(),
@@ -786,6 +794,7 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         accounts: Vec::new(),
                         private: false,
                         skill: None,
+                        search_fallback: None,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -822,7 +831,10 @@ async fn rejected_final_output_cannot_finish_on_earlier_partial_artifacts() {
                         },
                     }],
                     held_back: false,
+                    committed: Vec::new(),
                     rerun: false,
+                    search: None,
+                    redirect: None,
                 })
             },
             |_| {},
@@ -908,6 +920,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                 command: WorkCommandId::generate(),
                 intent: WorkRuntimeIntent::BeginAgent {
                     grant: WorkAgentGrantV1 {
+                        draft: None,
                         lead: None,
                         provider: WorkSearchProvider::OpenAi,
                         model: PUBLIC_SEARCH_MODEL.into(),
@@ -918,6 +931,7 @@ async fn a_run_that_runs_out_of_time_says_so() {
                         accounts: Vec::new(),
                         private: false,
                         skill: None,
+                        search_fallback: None,
                     },
                     limits: WorkExecutionLimits {
                         model_tokens: 100_000,
@@ -944,7 +958,10 @@ async fn a_run_that_runs_out_of_time_says_so() {
                     helped: false,
                     artifacts: vec![],
                     held_back: false,
+                    committed: Vec::new(),
                     rerun: false,
+                    search: None,
+                    redirect: None,
                 })
             },
             |_| {},

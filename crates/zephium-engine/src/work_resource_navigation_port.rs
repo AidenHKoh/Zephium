@@ -40,6 +40,8 @@ impl WorkResourceGuard {
         }
         state.navigation = Some(request.operation());
         state.observed = None;
+        drop(state);
+        self.invalidate_image_sources();
         Ok(())
     }
     fn admit_navigation(
@@ -75,6 +77,8 @@ impl WorkResourceGuard {
         }
         state.navigation = Some(request.navigation().operation());
         state.observed = None;
+        drop(state);
+        self.invalidate_image_sources();
         Ok(())
     }
     fn navigation_current(

@@ -2,11 +2,15 @@
   import * as m from "$shared/i18n/messages";
   import { surface as browser } from "$domain/surface";
   import * as settings from "../lib/settings-state.svelte";
-  import { groups, sections } from "../lib/settings-model";
+  import { groups, shownSections } from "../lib/settings-model";
   import Icon from "$shared/ui/Icon";
-  import { ArrowLeft02Icon, Search01Icon } from "@hugeicons/core-free-icons";
+  import IconButton from "$shared/ui/IconButton";
+  import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import { untrack } from "svelte";
   import { captureFrom, playTo, type Origin } from "$shared/lib/plate-glide";
+
+  // The account mirror stays out of the browser's startup graph.
+  const identity = import("./SettingsIdentity.svelte");
 
   // The current page's plate travels to the next one, as a tab's does.
   let nav = $state<HTMLElement>();
@@ -36,11 +40,19 @@
   data-glide-host
   aria-label={m.settings_title()}
 >
-  <button type="button" class="settings-back" onclick={() => void browser.open(null)}
-    ><Icon icon={ArrowLeft02Icon} size={15} />{m.settings_back()}</button
-  >
+  <!-- A panel beside the rail, headed like every tool's: closing it returns
+       to the page the rail still shows. -->
+  <header class="settings-panel-header">
+    <h2>{m.settings_title()}</h2>
+    <IconButton
+      icon={Cancel01Icon}
+      label={m.settings_back()}
+      onclick={() => void browser.close()}
+    />
+  </header>
+  {#await identity then { default: SettingsIdentity }}<SettingsIdentity />{/await}
   <div class="settings-sidebar-search">
-    <Icon icon={Search01Icon} size={15} /><input
+    <Icon icon={Search01Icon} size={14} /><input
       type="search"
       aria-label={m.settings_search()}
       placeholder={m.settings_search()}
@@ -51,7 +63,7 @@
   <div class="settings-navigation-list" data-glide-scroller>
     {#each groups as group (group.id)}<div class="settings-nav-group">
         <h2>{group.label()}</h2>
-        {#each sections.filter((item) => item.group === group.id) as item (item.id)}<button
+        {#each shownSections().filter((item) => item.group === group.id) as item (item.id)}<button
             type="button"
             class="settings-nav-item"
             data-plate

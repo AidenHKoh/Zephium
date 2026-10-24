@@ -12,6 +12,7 @@ pub(super) fn install_profile(shell: &mut Shell, profile: ProfileId, spaces: &[S
             id: space,
             profile,
             name: format!("Space {space}"),
+            look: Default::default(),
         }));
     }
 }

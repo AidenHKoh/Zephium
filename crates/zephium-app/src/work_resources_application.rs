@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::task::Waker;
 use std::time::{Duration, Instant};
 use zephium_agent_controller::*;
-use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
+use zephium_agent_provider_transport::AgentProviderTransportConfig;
 use zephium_agent_runtime::*;
 
 #[path = "work_resources_human.rs"]
@@ -54,18 +54,18 @@ impl StagedActor {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: zephium_agent_provider_transport::AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
-        Self::for_probe_human(input, browser, transport, credential, audit, task, None)
+        Self::for_probe_human(input, browser, transport, access, audit, task, None)
     }
     #[cfg(all(test, feature = "work-execution-probe"))]
     pub(super) fn for_probe_human(
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: zephium_agent_provider_transport::AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         waiting: Option<AgentWorkWaitingForHuman>,
@@ -77,7 +77,7 @@ impl StagedActor {
                 input,
                 browser,
                 transport,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -86,7 +86,7 @@ impl StagedActor {
                 input,
                 browser,
                 transport,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -108,7 +108,7 @@ impl StagedActor {
         browser: Box<dyn AgentWorkRetainedBrowser>,
         config: AgentRuntimeConfig,
         provider: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         waiting: Option<AgentWorkWaitingForHuman>,
@@ -120,7 +120,7 @@ impl StagedActor {
                 input,
                 browser,
                 provider,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -129,7 +129,7 @@ impl StagedActor {
                 input,
                 browser,
                 provider,
-                credential,
+                access,
                 audit.clone(),
                 task,
             )
@@ -176,7 +176,8 @@ pub(super) enum AdmissionPhase {
 }
 
 /// Original request and callback slot stay owned even after timeout/refusal.
-/// There is no read-back shortcut, automatic retry or decoded-record admission.
+/// There is no read-back shortcut or decoded-record admission. An uncertain
+/// flight is resent only as the same exact request, after `deadline`.
 struct JournalFlight {
     request: DurableRequest,
     result: Arc<Mutex<Option<Result<DurableReply, AgentWorkJournalError>>>>,
@@ -315,6 +316,8 @@ impl RetainedWorkGroup {
 }
 
 pub(super) struct RetainedWork {
+    media: Option<MediaReadState>,
+    media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
     runtime_group: Option<RetainedWorkGroup>,
     // Outlives the group itself: a page that left its group still audits
     // native state only when the Shell hands it the one audit turn.
@@ -354,6 +357,8 @@ pub(super) struct RetainedWork {
     destroyed: bool,
     unexpected_native: Option<ContextNativeEvent>,
     native_shutdown: Option<RetainedNativeShutdown>,
+    /// Where the native gate saw a public first load redirected.
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
 }
 impl RetainedWork {
     /// The newest canvas frame of this resource's page, if the engine hosts one.
@@ -406,6 +411,8 @@ impl RetainedWork {
         waker: Waker,
     ) -> Self {
         Self {
+            media: None,
+            media_result: None,
             runtime_group: None,
             grouped: false,
             group_shutdown: false,
@@ -443,6 +450,7 @@ impl RetainedWork {
             destroyed: false,
             unexpected_native: None,
             native_shutdown: None,
+            redirect: None,
         }
     }
 
@@ -489,7 +497,7 @@ impl RetainedWork {
             || self.staged.is_some()
             || self.unstarted.is_some()
             || !self.events.is_empty()
-            || self.inventory.len() == MAX_DURABLE_AGENT_WORK_RUNS
+            || self.storage_full()
         {
             return false;
         }
@@ -617,6 +625,18 @@ impl RetainedWork {
         {
             group.fail();
         }
+        // A lost document whose first load the gate refused as a redirect
+        // was redirected; its owner reads the destination from the slot.
+        let failure = if failure == AgentWorkFailure::ContextLost
+            && self
+                .redirect
+                .as_ref()
+                .is_some_and(|redirect| redirect.destination().is_some())
+        {
+            AgentWorkFailure::Redirected
+        } else {
+            failure
+        };
         self.failure.get_or_insert(failure);
         self.phase = AdmissionPhase::Uncertain;
         self.stopping = true;
@@ -645,24 +665,34 @@ impl RetainedWork {
     ) -> Result<(), AgentWorkJournalError> {
         match (request, reply) {
             (AgentWorkJournalRequest::Claim, AgentWorkJournalReply::Claimed { owner, records }) => {
-                if records.len() > MAX_DURABLE_AGENT_WORK_RUNS
+                if records.len() > zephium_agentic::MAX_AGENT_WORK_INVENTORY
                     || records
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())
-                    || records.iter().any(|record| {
-                        !(historical_record_admissible(*record)
-                            || self
-                                .runtime_group
-                                .as_ref()
-                                .is_some_and(|group| group.owns_running(owner, *record))
-                            || (reviewable(record.disposition()) && record.incarnation() == owner))
-                    })
                 {
-                    // Malformed or unreviewable recovery facts cannot admit work.
+                    // A malformed inventory leaves the claim itself unsettled.
                     self.inventory = records;
                     #[cfg(feature = "work-execution-probe")]
                     self.public_claim_refusal_diagnostic();
                     return Err(AgentWorkJournalError::Conflict);
+                }
+                if records.iter().any(|record| {
+                    !(historical_record_admissible(*record)
+                        || self
+                            .runtime_group
+                            .as_ref()
+                            .is_some_and(|group| group.owns_running(owner, *record))
+                        || (reviewable(record.disposition()) && record.incarnation() == owner))
+                }) {
+                    // Unreviewable recovery facts, or a failed group's rows,
+                    // refuse this page. The claim itself settled and the page
+                    // wrote nothing, so it closes like any page refused before
+                    // admission instead of holding an unsettled Store request.
+                    self.inventory = records;
+                    #[cfg(feature = "work-execution-probe")]
+                    self.public_claim_refusal_diagnostic();
+                    self.fail(AgentWorkFailure::Contract);
+                    return Ok(());
                 }
                 self.incarnation = Some(owner);
                 self.inventory = records;
@@ -687,15 +717,7 @@ impl RetainedWork {
                 if let Some(group) = &self.runtime_group {
                     group.remember(self.resource.identity().context(), record)?;
                 }
-                if let Some(previous) = self
-                    .inventory
-                    .iter_mut()
-                    .find(|old| old.key() == record.key())
-                {
-                    *previous = record;
-                } else if self.inventory.len() < MAX_DURABLE_AGENT_WORK_RUNS {
-                    self.inventory.push(record);
-                } else {
+                if !zephium_agentic::remember_agent_work_record(&mut self.inventory, record) {
                     return Err(AgentWorkJournalError::Capacity);
                 }
                 if phase == AdmissionPhase::Reviewing {
@@ -786,6 +808,9 @@ impl RetainedWork {
         Ok(())
     }
 
+    pub(super) fn set_redirect(&mut self, redirect: zephium_agentic::WorkBrowserRedirect) {
+        self.redirect = Some(redirect);
+    }
     pub(super) fn set_runtime_group(&mut self, group: RetainedWorkGroup) {
         self.runtime_group = Some(group);
         self.grouped = true;
@@ -856,6 +881,7 @@ impl RetainedWork {
     fn poll_before(&mut self, now: AgentPolicyInstant, deadline: Option<Instant>) {
         self.rearm();
         self.poll_human(now);
+        self.poll_media(now);
         if let Some(mut construction) = self.construction.take() {
             match construction.poll(now) {
                 Ok(None) => self.construction = Some(construction),
@@ -882,6 +908,20 @@ impl RetainedWork {
                 .lock()
                 .map(|mut slot| slot.take())
                 .map_err(|_| ());
+            #[cfg(test)]
+            let reply = match reply {
+                Ok(Some(Ok(_)))
+                    if UNCONFIRMED_TERMINALS.load(Ordering::Acquire)
+                        && matches!(
+                            &flight.request,
+                            DurableRequest::Journal(AgentWorkJournalRequest::CompareAndSet(mutation))
+                                if mutation.next().disposition().is_terminal()
+                        ) =>
+                {
+                    Ok(Some(Err(AgentWorkJournalError::Uncertain)))
+                }
+                reply => reply,
+            };
             let mut retain = false;
             let result = match reply {
                 Ok(Some(Ok(reply))) => match (&flight.request, reply) {
@@ -949,6 +989,8 @@ impl RetainedWork {
                     self.persistence_failure.get_or_insert(error);
                     self.fail(AgentWorkFailure::Contract);
                     flight.uncertain = true;
+                    flight.deadline =
+                        Instant::now() + reconciliation_backoff(flight.reconciliations);
                     // Retain the exact unsettled request even after a malformed ACK.
                     retain = true;
                 }
@@ -959,6 +1001,17 @@ impl RetainedWork {
                 self.persistence_failure = None;
             }
         }
+        // A late reply to the original request still settles it until the
+        // resend is due. The resend is the same exact idempotent request; it
+        // keeps the sticky stop and never lets native proof precede its ACK.
+        if self
+            .flight
+            .as_ref()
+            .is_some_and(|flight| flight.uncertain && Instant::now() >= flight.deadline)
+        {
+            self.reconcile();
+        }
+
         if let Some(mut acquisition) = self.acquisition.take() {
             match acquisition.poll(now) {
                 Ok(None) => self.acquisition = Some(acquisition),
@@ -1041,6 +1094,7 @@ impl RetainedWork {
                     match lifecycle.drain_until(drain_deadline) {
                         AgentRuntimeScopedDrain::Drained(drained) => active.drained = Some(drained),
                         AgentRuntimeScopedDrain::Unproven => {
+                            crate::diagnostic!("work: phase=page event=terminal_refused stage=scoped_drain; content=redacted");
                             failure = Some(AgentWorkFailure::Contract)
                         }
                     }
@@ -1053,6 +1107,14 @@ impl RetainedWork {
                         }) => {
                             active.accepted = Some(settlement);
                             active.extraction = Some(extraction);
+                        }
+                        Some(AgentWorkRetainedOutcome::Recovery(recovery)) => {
+                            crate::diagnostic!(
+                                "work: phase=page event=retained_recovery failure={:?} cleanup_failure={:?}; content=redacted",
+                                recovery.failure(),
+                                recovery.cleanup_failure()
+                            );
+                            active.outcome = Some(AgentWorkRetainedOutcome::Recovery(recovery));
                         }
                         outcome => active.outcome = outcome,
                     }
@@ -1129,6 +1191,14 @@ impl RetainedWork {
                                             terminal, profile, result,
                                         )
                                     });
+                                #[cfg(test)]
+                                let publication = publication.and_then(|publication| {
+                                    if REFUSE_PUBLICATION.swap(false, Ordering::AcqRel) {
+                                        Err(AgentWorkJournalError::Uncertain)
+                                    } else {
+                                        Ok(publication)
+                                    }
+                                });
                                 match publication {
                                     Ok(publication) => self.dispatch_attempt(
                                         DurableRequest::Artifact(
@@ -1139,16 +1209,39 @@ impl RetainedWork {
                                         self.phase,
                                         0,
                                     ),
+                                    // Nothing reached the Store: the result cannot be
+                                    // archived, so the run is no success. Classify its
+                                    // exact Running row like a run stopped before it
+                                    // could finish, through the same resent CAS.
                                     Err(error) => {
-                                        self.persistence_failure = Some(error);
-                                        self.fail(AgentWorkFailure::Contract);
+                                        crate::diagnostic!("work: phase=page event=terminal_refused stage=artifact_publication error={error:?}; content=redacted");
+                                        self.fail(AgentWorkFailure::ArtifactPublication(error));
+                                        match AgentWorkJournalMutation::transition(
+                                            record,
+                                            AgentWorkDisposition::FailedClosed,
+                                        ) {
+                                            Ok(mutation) => {
+                                                self.phase = AdmissionPhase::Closing;
+                                                self.dispatch(
+                                                    AgentWorkJournalRequest::CompareAndSet(
+                                                        mutation,
+                                                    ),
+                                                );
+                                            }
+                                            Err(error) => {
+                                                self.persistence_failure = Some(error);
+                                            }
+                                        }
                                     }
                                 }
                             } else {
                                 self.dispatch(AgentWorkJournalRequest::CompareAndSet(terminal));
                             }
                         }
-                        Err(_) => self.fail(AgentWorkFailure::Contract),
+                        Err(error) => {
+                            crate::diagnostic!("work: phase=page event=terminal_refused stage=journal_terminal error={error:?}; content=redacted");
+                            self.fail(AgentWorkFailure::Contract)
+                        }
                     }
                 }
             }
@@ -1184,6 +1277,7 @@ impl RetainedWork {
                 }
             }
         }
+        self.release_unadmitted_recovery();
         // A hard-deadline/spawn refusal can occur after Running ACK but before
         // an ActiveActor exists. Persist no-replay classification, not success
         // or revocation, from that exact acknowledged predecessor too.
@@ -1206,6 +1300,24 @@ impl RetainedWork {
                         self.persistence_failure = Some(error);
                     }
                 }
+            }
+        }
+    }
+
+    /// A staged actor the journal never admitted leaves only its dormant
+    /// controller's recovery: no row to classify, no native operation and,
+    /// when its ledger recorded nothing, no audit to deliver. Holding it would
+    /// keep the page from ever settling, and with it the group's native seat.
+    fn release_unadmitted_recovery(&mut self) {
+        if self.record.is_some() || self.flight.is_some() || self.persistence_failure.is_some() {
+            return;
+        }
+        if let Some(AgentWorkRetainedOutcome::Recovery(recovery)) = self.unstarted.as_mut() {
+            if recovery
+                .audit_status()
+                .is_ok_and(|status| status.pending() == 0 && status.in_flight() == 0)
+            {
+                drop(self.unstarted.take());
             }
         }
     }
@@ -1247,6 +1359,12 @@ impl RetainedWork {
         self.phase
     }
 
+    /// Live and debt-bearing runs fill the Store: no page may be admitted
+    /// until the person settles recovery history.
+    fn storage_full(&self) -> bool {
+        zephium_agentic::outstanding_agent_work_runs(&self.inventory) >= MAX_DURABLE_AGENT_WORK_RUNS
+    }
+
     pub(super) fn failures(&self) -> (Option<AgentWorkFailure>, Option<AgentWorkJournalError>) {
         // A proved unsuccessful actor outcome is not coordinator uncertainty.
         // Project its original cause without calling fail(), changing phase,
@@ -1257,7 +1375,11 @@ impl RetainedWork {
                 AgentWorkRetainedOutcome::ClosedUnsuccessfully(closed) => Some(closed.failure()),
                 _ => None,
             });
-        (failure, self.persistence_failure)
+        let persistence = self.persistence_failure.or_else(|| {
+            self.storage_full()
+                .then_some(AgentWorkJournalError::Capacity)
+        });
+        (failure, persistence)
     }
 
     pub(super) fn record(&self) -> Option<AgentWorkRecord> {
@@ -1397,6 +1519,9 @@ impl RetainedWork {
 
     /// Revokes actor execution only. It grants no rendering or human-input right.
     pub(super) fn cancel(&mut self) {
+        if let Some(media) = &self.media {
+            media.progress.cancel();
+        }
         if self.active.is_none()
             || self.request.is_some()
             || self.acquisition.is_some()
@@ -1411,14 +1536,15 @@ impl RetainedWork {
         }
     }
 
-    /// Explicit bounded reconciliation of the original exact idempotent request.
-    /// Old callbacks retain their own disconnected slots; none can select a new
-    /// worker or clear the sticky stop. A Store read is not used as an ACK.
+    /// Bounded reconciliation of the original exact idempotent request, due
+    /// on its own after a backoff or asked for explicitly. Old callbacks keep
+    /// their own disconnected slots; none can select a new worker or clear the
+    /// sticky stop. A Store read is not used as an ACK.
     pub(super) fn reconcile(&mut self) -> bool {
         let Some(flight) = self.flight.take() else {
             return false;
         };
-        if !flight.uncertain || flight.reconciliations >= 4 {
+        if !flight.uncertain || flight.reconciliations >= MAX_RECONCILIATIONS {
             self.flight = Some(flight);
             return false;
         }
@@ -1460,7 +1586,7 @@ impl RetainedWork {
         self.owner.drain_abandoned(now)?;
         if self.destroyed {
             let native_clean = self.poll_native_shutdown(deadline)?;
-            if native_clean && self.final_scoped_recovery_is_classified() {
+            if native_clean && self.finally_unclean() {
                 self.diagnose_classified_recovery_shutdown(deadline);
                 return Err(Refusal::Uncertain);
             }
@@ -1502,7 +1628,7 @@ impl RetainedWork {
         self.owner.seal_resources()?;
         self.destroyed = true;
         let native_clean = self.poll_native_shutdown(deadline)?;
-        if native_clean && self.final_scoped_recovery_is_classified() {
+        if native_clean && self.finally_unclean() {
             self.diagnose_classified_recovery_shutdown(deadline);
             return Err(Refusal::Uncertain);
         }
@@ -1540,6 +1666,27 @@ impl RetainedWork {
             })
     }
 
+    /// A staged actor that never ran keeps its recovery owner once the
+    /// journal holds no unsettled request for it: either no row, or its row
+    /// classified FailedClosed. Like a classified scoped recovery, nothing in
+    /// this process can make it clean, so the page ends unclean, not never.
+    fn final_unstarted_is_classified(&self) -> bool {
+        self.unstarted.is_some()
+            && self.flight.is_none()
+            && self.persistence_failure.is_none()
+            && self
+                .record
+                .is_none_or(|record| record.disposition().is_terminal())
+    }
+
+    fn finally_unclean(&self) -> bool {
+        if self.unstarted.is_some() {
+            self.final_unstarted_is_classified()
+        } else {
+            self.final_scoped_recovery_is_classified()
+        }
+    }
+
     fn local_shutdown_settled(&self) -> bool {
         self.destroyed
             && self.owner.locally_retired()
@@ -1571,8 +1718,7 @@ impl RetainedWork {
             || (self.destroyed
                 && self.owner.locally_retired()
                 && self.unexpected_native.is_none()
-                && self.unstarted.is_none()
-                && self.final_scoped_recovery_is_classified())
+                && self.finally_unclean())
     }
     /// A grouped page that could start its native audit once given the turn.
     pub(super) fn awaits_group_audit(&self) -> bool {
@@ -1587,6 +1733,17 @@ impl RetainedWork {
             self.grouped && self.group_shutdown && self.native_audit_ready(),
             RetainedNativeShutdown::in_flight,
         )
+    }
+    /// Its row cannot be classified in this process any more: its exact
+    /// request stayed uncertain past every resend, or it failed with nothing
+    /// to send. It keeps that request and its debt for a late acknowledgement
+    /// or restart recovery, and so its native seat: its native audit never
+    /// precedes the classification.
+    pub(super) fn durably_unsettled(&self) -> bool {
+        self.persistence_failure.is_some()
+            && self.flight.as_ref().is_none_or(|flight| {
+                flight.uncertain && flight.reconciliations >= MAX_RECONCILIATIONS
+            })
     }
     /// Its audit ended; nothing further can close it cleanly for the group.
     pub(super) fn native_audit_settled(&self) -> bool {
@@ -1680,7 +1837,7 @@ impl RetainedWork {
     pub(super) fn next_deadline(&self) -> Option<Instant> {
         self.flight
             .as_ref()
-            .filter(|flight| !flight.uncertain)
+            .filter(|flight| !flight.uncertain || flight.reconciliations < MAX_RECONCILIATIONS)
             .map(|flight| flight.deadline)
             .into_iter()
             .chain(self.staged.as_ref().map(|staged| staged.deadline))
@@ -1693,8 +1850,27 @@ impl RetainedWork {
     }
 }
 
-/// A fresh native resource may coexist with explicitly reviewed historical
-/// uncertainty. This predicate never permits reuse of an active execution owner.
+/// Refuses the next terminal publication before it reaches the Store.
+#[cfg(test)]
+pub(in crate::work_resources) static REFUSE_PUBLICATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Reads every terminal journal acknowledgement as uncertain.
+#[cfg(test)]
+pub(in crate::work_resources) static UNCONFIRMED_TERMINALS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const MAX_RECONCILIATIONS: u8 = 4;
+
+/// Half a second, doubling: the last resend leaves within about 15 s of the
+/// first uncertainty, past a Store that is only slow, not one that is gone.
+fn reconciliation_backoff(reconciliations: u8) -> Duration {
+    RECONCILIATION_BACKOFF * (1 << reconciliations.min(MAX_RECONCILIATIONS))
+}
+#[cfg(not(test))]
+const RECONCILIATION_BACKOFF: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const RECONCILIATION_BACKOFF: Duration = Duration::from_millis(20);
+
 /// A record whose actor is gone and whose debt stays historical: a prior
 /// process's interruption, or this process's own scoped recovery.
 pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
@@ -1703,13 +1879,102 @@ pub(super) fn reviewable(disposition: AgentWorkDisposition) -> bool {
         AgentWorkDisposition::Interrupted | AgentWorkDisposition::RecoveryRequired
     )
 }
+/// A fresh native resource may coexist with explicitly classified historical
+/// uncertainty. This predicate never permits reuse of an active execution owner.
+///
+/// FailedClosed is the no-replay classification of an actor the journal
+/// admitted but never started: stopped or out of time between the Admitted
+/// and Running acknowledgements, or refused at spawn. It is terminal, so no
+/// review can follow it, and its UNKNOWN debt stays history like a reviewed
+/// row's. Refusing it would refuse every later claim in this Store for good.
 fn historical_record_admissible(record: AgentWorkRecord) -> bool {
     record.disposition().is_terminal()
         && (record.debt() == AgentWorkDebt::NONE
             || matches!(
                 record.disposition(),
-                AgentWorkDisposition::FreshAdmissionRequired | AgentWorkDisposition::Rejected
+                AgentWorkDisposition::FreshAdmissionRequired
+                    | AgentWorkDisposition::Rejected
+                    | AgentWorkDisposition::FailedClosed
             ))
+}
+
+struct MediaReadState {
+    pending: PendingLifecycle,
+    progress: zephium_agentic::WorkBrowserMediaProgress,
+    deadline: AgentPolicyInstant,
+    published: bool,
+}
+impl RetainedWork {
+    pub(super) fn read_media(
+        &mut self,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
+        now: AgentPolicyInstant,
+        deadline: AgentPolicyInstant,
+    ) -> bool {
+        if self.media.is_some()
+            || self.stopping
+            || self.phase != AdmissionPhase::Terminal
+            || self
+                .record
+                .is_none_or(|record| record.disposition() != AgentWorkDisposition::Succeeded)
+            || self.artifact.is_none()
+        {
+            return false;
+        }
+        let Ok((pending, progress)) =
+            self.owner
+                .media_lifecycle(&self.resource, plans, fetch_mode, now, deadline)
+        else {
+            return false;
+        };
+        progress.set_public_asset_waker(self.waker.clone());
+        self.media = Some(MediaReadState {
+            pending,
+            progress,
+            deadline,
+            published: false,
+        });
+        true
+    }
+    fn poll_media(&mut self, now: AgentPolicyInstant) {
+        let Some(mut media) = self.media.take() else {
+            return;
+        };
+        if self.stopping || now >= media.deadline {
+            media.progress.cancel();
+            if !media.published {
+                media.published = true;
+                self.media_result = Some(Vec::new());
+            }
+        }
+        match media.pending.poll(now) {
+            Ok(None) => self.media = Some(media),
+            Ok(Some(LifecycleResult::Event(WorkBrowserResourceEvent::Retained(resource))))
+                if resource == self.resource =>
+            {
+                if !media.published {
+                    self.media_result = Some(media.progress.take_result().unwrap_or_default());
+                }
+            }
+            _ => {
+                media.progress.cancel();
+                if !media.published {
+                    self.media_result = Some(Vec::new());
+                }
+            }
+        }
+    }
+    pub(super) fn take_public_asset(
+        &self,
+    ) -> Option<zephium_agentic::WorkBrowserPublicAssetRequest> {
+        self.media.as_ref()?.progress.take_public_asset()
+    }
+    pub(super) fn take_media_result(
+        &mut self,
+    ) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
+        self.media_result.take()
+    }
 }
 
 #[cfg(test)]

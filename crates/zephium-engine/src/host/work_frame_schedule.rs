@@ -23,7 +23,6 @@ impl WorkFrameSchedule {
         self.requested = true;
     }
 
-    #[cfg(any(test, target_os = "windows"))]
     pub(super) fn request_after(&mut self, deadline: Instant) {
         self.request();
         self.not_before = Some(deadline);

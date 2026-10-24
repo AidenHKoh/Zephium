@@ -3,8 +3,10 @@
 //! the canvas, and records every step durably through the attempt, so the
 //! frame's subscriptions see it as it happens. The model only proposes;
 //! Rust admits every tool call.
+pub(crate) mod blocks;
 mod call;
 mod folders;
+mod found;
 mod hands;
 mod lead;
 pub mod objects;
@@ -12,12 +14,14 @@ mod parts;
 mod project;
 mod prompt;
 mod recipes;
+mod records;
 pub mod registry;
 pub(crate) mod route;
 mod run;
 mod schema;
 pub mod skills;
 pub mod tools;
+mod value_sources;
 
 use std::future::Future;
 use std::time::Duration;
@@ -35,7 +39,27 @@ use crate::work_runtime::{
 };
 
 /// Closed loop facts for development logs; never model, page or person text.
-#[derive(Clone, Copy, Debug)]
+/// A schema path of at most 48 path characters, kept inline so a diagnostic
+/// stays `Copy`.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct SchemaPath([u8; 48], u8);
+
+impl SchemaPath {
+    pub(crate) fn new(path: &str) -> Option<Self> {
+        let bytes = path.as_bytes();
+        let mut inline = [0; 48];
+        inline.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        Some(Self(inline, bytes.len() as u8))
+    }
+}
+
+impl std::fmt::Debug for SchemaPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(std::str::from_utf8(&self.0[..usize::from(self.1)]).unwrap_or("?"))
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum WorkLeadDiagnostic {
     Stopped {
         cause: crate::work_runtime::WorkCancelCause,
@@ -51,6 +75,7 @@ pub enum WorkLeadDiagnostic {
     Turn {
         turn: u8,
         calls: usize,
+        tool_kinds: Box<[Option<&'static str>; 16]>,
         tokens: u32,
         cost_micro_usd: u32,
         input: u32,
@@ -60,6 +85,19 @@ pub enum WorkLeadDiagnostic {
         tools_chars: u32,
         context_chars: u32,
         conversation_chars: u32,
+    },
+    /// Logical call duration includes retries; the first text/tool/search
+    /// event is not network time to first byte.
+    ModelSettled {
+        role: zephium_core::work::model::WorkModelRole,
+        stop: zephium_core::work::model::WorkModelStop,
+        elapsed_ms: u64,
+        first_event_ms: Option<u64>,
+        output_tokens: u64,
+        reasoning_tokens: u64,
+    },
+    ReplyPublished {
+        generation_pending: bool,
     },
     ModelRefused {
         error: zephium_core::work::model::WorkModelError,
@@ -71,6 +109,9 @@ pub enum WorkLeadDiagnostic {
     },
     ObjectRefused {
         reason: Option<objects::ObjectRefusal>,
+        /// The schema path the refusal names (`steps[3].detail`), when its
+        /// words name one; only path characters, never a value.
+        at: Option<SchemaPath>,
     },
     /// A batch of searches, page reads or file steps settled.
     Fetched {
@@ -148,11 +189,17 @@ impl WorkLeadService {
             return Err(WorkError::Invalid);
         }
         grant.lead = Some(models.lead.entry.model.clone());
+        if let Some((provider, model)) = search.grant() {
+            grant.provider = provider;
+            grant.model = model;
+            grant.search_fallback = search.fallback();
+        }
         grant.max_turns = u8::MAX;
         grant.max_steps = u8::MAX;
         grant.validate()?;
         let work = command.work;
         let command_id = command.command;
+        let block_selection = selection.clone();
         let (request, bodies, tabs) = match selection {
             Some(selection) => {
                 let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
@@ -181,6 +228,8 @@ impl WorkLeadService {
             None => (command.into_request()?, Vec::new(), Vec::new()),
         };
         request.validate()?;
+        let starting =
+            crate::work_runtime::WorkStartingAgent::acquire(&self.handle, profile, work)?;
         let submitted = crate::work_runtime::admitted(|| {
             self.handle
                 .submit_work_document(request.clone(), Some(profile))
@@ -204,7 +253,10 @@ impl WorkLeadService {
             return Err(WorkError::Invalid);
         }
         if replayed {
-            return Ok(*projection);
+            drop(starting);
+            let mut projection = *projection;
+            crate::work_runtime::project_driver_liveness(profile, &mut projection);
+            return Ok(projection);
         }
         let execution = projection
             .executions
@@ -227,6 +279,7 @@ impl WorkLeadService {
                 node,
             )
             .await?;
+        drop(starting);
         observe(attempt.observer());
         let original = attempt.attempt();
         let limits = attempt.specification().limits;
@@ -242,6 +295,7 @@ impl WorkLeadService {
             self.diagnostic,
         );
         let objective = attempt.disclosure_objective()?;
+        run.blocks.bind(block_selection, &objective);
         let named = if grant.private {
             Vec::new()
         } else {
@@ -249,6 +303,21 @@ impl WorkLeadService {
         };
         run.allow_links_in(&objective);
         run.trust_sites_in(&objective);
+        let earlier: Vec<&WorkExecutionFact> = projection
+            .executions
+            .iter()
+            .filter(|e| e.id != receipt.execution)
+            .collect();
+        for site_text in earlier_site_texts(&earlier) {
+            run.trust_named(site_text);
+        }
+        // A site an earlier request of this work already worked in as the
+        // person was let in by them: a follow-up does not ask again.
+        for site in entered_sites(&earlier) {
+            if run.entry_answer(&site).is_none() {
+                run.set_entry(&site, crate::work_sites::EntryAnswer::Allow);
+            }
+        }
         for body in &bodies {
             run.allow_links_in(&body.text);
         }
@@ -278,6 +347,9 @@ impl WorkLeadService {
             &grant,
         );
         context.push_str(&folders::context(&run, &named));
+        if run.blocks.available() {
+            context.push_str("\nCanvas blocks: read_block resolves only the specifically requested checklist, table or calendar. Read it before revise_block; do not inspect unrelated blocks or replace unseen rows. If several match, ask the person to select one.\n");
+        }
         if unnamed {
             context.push_str("\nThe work has no name yet: finish names it with title.\n");
         }
@@ -311,7 +383,18 @@ impl WorkLeadService {
         lead.name_work = unnamed;
         let outcome = lead.drive().await;
         drop(lead);
-        let status = conclude(&run, outcome).await?;
+        let status = match conclude(&run, outcome).await {
+            Ok(status) => status,
+            Err(error) => {
+                crate::work_trace::record(format_args!(
+                    "work: phase=lead stage=conclude_refused error={error:?}"
+                ));
+                return attempt
+                    .recover_owned()
+                    .await
+                    .map(|settlement| settlement.into_projection());
+            }
+        };
         let usage = settled_usage(&run, status).await;
         if let Ok(execution) = run.execution().await {
             let used = run.used();
@@ -360,6 +443,9 @@ async fn conclude(
         Err(_) => WorkAttemptStatus::Failed,
     };
     let execution = run.execution().await?;
+    if execution.status == WorkExecutionStatus::Cancelled {
+        return Ok(WorkAttemptStatus::Cancelled);
+    }
     let out_of_time = run.stop_cause() == Some(crate::work_runtime::WorkCancelCause::Deadline);
     let note = run.stop_note();
     for step in execution
@@ -367,16 +453,24 @@ async fn conclude(
         .iter()
         .filter(|step| step.status == WorkStepStatus::Running)
     {
-        let settled = match step.kind {
-            WorkStepKindV1::Search { .. }
-            | WorkStepKindV1::Read { .. }
-            | WorkStepKindV1::Discover { .. } => WorkStepStatus::OutcomeUnknown,
-            _ => WorkStepStatus::Cancelled,
-        };
+        let settled = step.interruption_status();
         run.settle(step.id, settled, None, Some(note.into()), None)
             .await?;
-        if settled == WorkStepStatus::OutcomeUnknown && !out_of_time {
-            status = WorkAttemptStatus::OutcomeUnknown;
+        if settled == WorkStepStatus::OutcomeUnknown {
+            // A lost optional page does not revoke the lead's published answer
+            // or override a person's Stop. Keep uncertain accounting explicit.
+            let limits = run.limits();
+            run.charge(WorkUsage {
+                model_tokens: limits.model_tokens,
+                cost_micro_usd: limits.cost_micro_usd,
+                operations: 0,
+                accounting: WorkUsageAccounting::ConservativeReservation,
+            });
+            if step.has_unconfirmed_effect()
+                || (status == WorkAttemptStatus::Failed && !out_of_time)
+            {
+                status = WorkAttemptStatus::OutcomeUnknown;
+            }
         }
     }
     for part in execution.parts.iter().filter(|p| !p.state.terminal()) {
@@ -574,6 +668,44 @@ fn answered(execution: &WorkExecutionFact) -> impl Iterator<Item = (&str, &str)>
     })
 }
 
+/// The words of this work's earlier requests, and the entry questions the
+/// person let through, which name the sites the work already entered.
+fn earlier_site_texts<'a>(earlier: &[&'a WorkExecutionFact]) -> Vec<&'a str> {
+    let mut texts = Vec::new();
+    for execution in earlier {
+        texts.extend(execution.spec.request.as_deref());
+        for step in &execution.steps {
+            if let WorkStepKindV1::Ask {
+                prompt,
+                options,
+                answer: Some(answer),
+                purpose: Some(WorkAskPurposeV1::Entry),
+            } = &step.kind
+            {
+                if crate::work_sites::entry_answer_to(options, answer)
+                    != crate::work_sites::EntryAnswer::NotNow
+                {
+                    texts.push(prompt.as_str());
+                }
+            }
+        }
+    }
+    texts
+}
+
+/// The sites earlier requests of this work opened in the person's session.
+fn entered_sites(earlier: &[&WorkExecutionFact]) -> Vec<String> {
+    let mut sites: Vec<String> = earlier
+        .iter()
+        .flat_map(|execution| &execution.steps)
+        .filter_map(|step| step.account.as_ref())
+        .filter_map(|account| crate::work_sites::site_of(&format!("https://{}/", account.host)))
+        .collect();
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
 /// "Continue", "go on", "keep going": a request to finish the last one.
 fn continues(objective: &str) -> bool {
     let words: String = objective
@@ -614,12 +746,20 @@ fn context_text(
     grant: &WorkAgentGrantV1,
 ) -> String {
     let mut out = format!("Request: {objective}\nNow: {}\n", prompt::now_line());
+    if let Some(draft) = grant.draft {
+        out.push_str(&format!(
+            "The person pressed Send on draft {draft}: this request sends it. Start the part for its destination with start_part's draft set to {draft}.\n"
+        ));
+    }
     let earlier: Vec<&WorkExecutionFact> = projection
         .executions
         .iter()
         .filter(|e| e.id != current)
         .collect();
     out.push_str(&earlier_text(objective, &earlier));
+    out.push_str(&crate::work_agent::WorkAgentService::site_blocker_context(
+        projection,
+    ));
     let canvas = objects::view(&objects::canvas(projection, current));
     if !canvas.is_empty() {
         out.push_str("\nOn the canvas (read_canvas returns an object's data):\n");
@@ -682,6 +822,44 @@ mod tests {
             "user_artifacts": [], "steps": steps, "parts": parts, "inputs": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_follow_up_is_let_into_the_sites_earlier_requests_worked_in_as_the_person() {
+        let earlier = execution(
+            "01M3RV9DBTWYS7770BES8YYKT1",
+            "Create a task in Todoist",
+            "completed",
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT2", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "read", "url": "https://app.todoist.com/app"},
+                 "account": {"host": "app.todoist.com", "badge": true}},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT3", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "read", "url": "https://www.example.com/"}}
+            ]),
+            json!([]),
+        );
+        assert_eq!(entered_sites(&[&earlier]), ["todoist.com"]);
+    }
+
+    #[test]
+    fn sites_the_work_already_entered_stay_trusted_in_a_follow_up() {
+        let earlier = execution(
+            "01M3RV9DBTWYS7770BES8YYKT1",
+            "Create a task to buy milk in my Todoist",
+            "completed",
+            json!([
+                {"id": "01M3RV9DBTWYS7770BES8YYKT2", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "Work in your Slack?", "options": ["Allow", "Always for Slack", "Not now"], "answer": "Allow", "purpose": "entry"}},
+                {"id": "01M3RV9DBTWYS7770BES8YYKT3", "turn": 1, "status": "succeeded",
+                 "kind": {"kind": "ask", "prompt": "Work in your Notion?", "options": ["Allow", "Always for Notion", "Not now"], "answer": "Not now", "purpose": "entry"}}
+            ]),
+            json!([]),
+        );
+        let texts = earlier_site_texts(&[&earlier]);
+        assert!(texts.contains(&"Create a task to buy milk in my Todoist"));
+        assert!(texts.contains(&"Work in your Slack?"));
+        assert!(!texts.contains(&"Work in your Notion?"));
     }
 
     #[test]

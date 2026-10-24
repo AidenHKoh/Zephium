@@ -6,14 +6,17 @@
     hint,
     error,
     value = $bindable(""),
+    size = "regular",
     class: className = "",
     ...rest
-  }: Omit<HTMLInputAttributes, "value"> & {
+  }: Omit<HTMLInputAttributes, "value" | "size"> & {
     label: string;
     labelHidden?: boolean;
     hint?: string;
     error?: string;
     value?: string;
+    /** Large stands beside a large button, as in a sign-in form. */
+    size?: "regular" | "large";
   } = $props();
   const uid = $props.id();
 </script>
@@ -27,6 +30,7 @@
     aria-invalid={error ? true : undefined}
     aria-describedby={error || hint ? `${uid}-help` : undefined}
     class="ui-input"
+    data-size={size === "large" ? "large" : undefined}
   />
   {#if error || hint}<p id={`${uid}-help`} class="ui-help" data-error={!!error}>
       {error || hint}
@@ -54,17 +58,24 @@
     width: 100%;
     min-width: 0;
     min-height: var(--field-height);
-    padding: 5px 14px;
+    padding: 0 var(--control-inset);
     border: 0;
-    border-radius: var(--radius-control);
+    border-radius: var(--radius-field);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
-    font-size: var(--text-body);
-    line-height: 20px;
+    font-size: var(--text-label);
+    line-height: 16px;
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
       box-shadow var(--motion-instant) var(--ease-smooth);
+  }
+
+  .ui-input[data-size="large"] {
+    min-height: var(--control-large);
+    padding: 0 16px;
+    border-radius: var(--radius-control-large);
+    font-size: var(--text-body);
   }
 
   .ui-input::placeholder {

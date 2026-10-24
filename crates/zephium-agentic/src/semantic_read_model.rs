@@ -579,6 +579,20 @@ pub fn encode_semantic_read(
                 checked_write(&mut output, format_args!("{value}"))?;
             }
         }
+        if let Some(root) = fragment.record_root() {
+            checked_write(&mut output, format_args!(" card={}", root.get()))?;
+        }
+        for (state, label) in [
+            (crate::SemanticState::Selected, "selected"),
+            (crate::SemanticState::Checked, "checked"),
+        ] {
+            if fragment.provenance().observation() == read.observation()
+                && fragment.provenance().observation_generation() == read.observation_generation()
+                && fragment.states().contains(state)
+            {
+                checked_write(&mut output, format_args!(" {label}=true"))?;
+            }
+        }
         if !all_fields_unproven && !fragment.provenance().fields_complete() {
             checked_write(&mut output, format_args!(" fields_complete=unproven"))?;
         }
@@ -727,6 +741,7 @@ const fn field_label(field: SemanticReadField) -> &'static str {
         SemanticReadField::LinkDestination => "link_destination",
         SemanticReadField::ImageSource => "image_source",
         SemanticReadField::DocumentAddress => "document_address",
+        SemanticReadField::ViewportImage => "viewport_image",
     }
 }
 
@@ -740,7 +755,8 @@ const fn field_matches_content(field: SemanticReadField, content: SemanticReadCo
             SemanticReadField::TextValue
                 | SemanticReadField::LinkDestination
                 | SemanticReadField::ImageSource
-                | SemanticReadField::DocumentAddress,
+                | SemanticReadField::DocumentAddress
+                | SemanticReadField::ViewportImage,
             SemanticReadContent::ValuePreview(_)
         ) | (
             SemanticReadField::BooleanValue,

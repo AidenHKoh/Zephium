@@ -253,8 +253,8 @@
         </div>
       {/each}
       {#if shown === "env"}<p class="fault" role="alert">{FAULTS.env()}</p>{/if}
-      <button type="button" class="add-variable" onclick={addVariable}
-        ><Icon icon={Add01Icon} size={13} />{m.connections_env_add()}</button
+      <Button variant="ghost" class="add-variable" onclick={addVariable}
+        ><Icon icon={Add01Icon} size={13} />{m.connections_env_add()}</Button
       >
     </div>
   {/if}
@@ -402,23 +402,8 @@
     color: var(--color-text);
   }
 
-  .add-variable {
-    display: inline-flex;
-    align-items: center;
+  .editor :global(.add-variable) {
     justify-self: start;
-    gap: 6px;
-    padding: 3px 8px 3px 6px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-muted);
-    font: inherit;
-    font-size: var(--text-label);
-  }
-
-  .add-variable:hover {
-    background: var(--color-fill-hover);
-    color: var(--color-text);
   }
 
   .fault {
@@ -428,8 +413,7 @@
   }
 
   .preset:focus-visible,
-  .square:focus-visible,
-  .add-variable:focus-visible {
+  .square:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 1px;
   }

@@ -129,15 +129,16 @@
 
 {#snippet subject(index: number, size: number)}
   {@const row = object.rows[index]}
-  {#if row?.entity?.picture}<img
-      class="picture"
-      src={row.entity.picture.src}
-      alt=""
-      decoding="async"
-      loading="lazy"
-      width={size + 8}
-      height={size + 8}
-    />{:else if isZephium(row?.cells[0] ?? "")}<ZephiumMark {size} />{:else if logo(index)}<Mark
+  {#if row?.entity?.picture}<span class="picture"
+      ><img
+        src={row.entity.picture.src}
+        alt=""
+        decoding="async"
+        loading="lazy"
+        width={size + 8}
+        height={size + 8}
+      /></span
+    >{:else if isZephium(row?.cells[0] ?? "")}<ZephiumMark {size} />{:else if logo(index)}<Mark
       address={logo(index)!}
       {size}
     />{/if}
@@ -157,7 +158,7 @@
         value={score.value}
         max={score.max}
         label={m.work_object_rating({ value: score.value, max: score.max })}
-      />{:else}<span class="text">{text}</span>{/if}
+      />{:else}<span class="text" title={text}>{text}</span>{/if}
   {:else if column.kind === "entity"}
     {@const known = vendorHost(undefined, text)}
     <span class="subject"
@@ -178,7 +179,7 @@
       }}><Mark address={text} size={14} /><span>{host(text)}</span></a
     >
   {:else if numeric(column)}<span class="figure" class:best={marked}>{figure(column, text)}</span>
-  {:else}<span class="text">{text}</span>{/if}
+  {:else}<span class="text" title={text}>{text}</span>{/if}
 {/snippet}
 
 {#if facing}
@@ -299,18 +300,30 @@
   }
 
   .picture {
+    display: inline-flex;
     flex: none;
+    overflow: hidden;
     border-radius: var(--radius-inset);
+    background: var(--color-fill);
+  }
+
+  /* A row thumbnail is a few dozen pixels: a photo fills its square, whatever it shows. */
+  .picture img {
+    display: block;
     object-fit: cover;
   }
 
   .text {
-    display: block;
     min-inline-size: 12ch;
     max-inline-size: 34ch;
     color: var(--color-label-secondary);
     overflow-wrap: break-word;
     text-wrap: pretty;
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
   }
 
   /* Columns that run on past the edge fade into it; the subject column stays. */
@@ -439,7 +452,6 @@
 
   .face :global(.picture) {
     border-radius: var(--radius-inset);
-    object-fit: cover;
   }
 
   .who {

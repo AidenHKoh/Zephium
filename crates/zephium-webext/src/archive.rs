@@ -155,7 +155,7 @@ fn plan(archive: &mut ZipArchive<Cursor<&[u8]>>) -> Result<Vec<Entry>, ArchiveEr
     let mut entries = Vec::with_capacity(archive.len());
     for index in 0..archive.len() {
         let file = archive.by_index_raw(index)?;
-        let name = file.name().to_owned();
+        let name = file.name()?.into_owned();
         let mode = file.unix_mode().unwrap_or(0) & S_IFMT;
         let is_dir = name.ends_with('/') || mode == S_IFDIR;
         let path = validate_path(name.strip_suffix('/').unwrap_or(&name))
@@ -469,8 +469,10 @@ mod tests {
             ..Limits::default()
         };
         let (_temp, dest, result) = extract_to_temp(&zip, &limits);
+        // Our limit, or zip's own check of the declared size, refuses it.
         assert!(
-            matches!(result, Err(ArchiveError::FileTooLarge(_))),
+            matches!(&result, Err(ArchiveError::FileTooLarge(_)))
+                || matches!(&result, Err(ArchiveError::Io(error)) if error.kind() == io::ErrorKind::InvalidData),
             "{result:?}"
         );
         assert!(!dest.exists());

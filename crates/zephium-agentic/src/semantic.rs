@@ -502,7 +502,7 @@ impl SemanticText {
     }
 }
 
-fn invalid_semantic_char(character: char) -> bool {
+pub(crate) fn invalid_semantic_char(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
@@ -1081,6 +1081,7 @@ impl SemanticFormFacts {
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticNode {
     key: SemanticNodeKey,
+    approval_identity: Option<crate::semantic_approval::SemanticApprovalIdentity>,
     parent: Option<u16>,
     depth: u8,
     role: SemanticRole,
@@ -1212,6 +1213,12 @@ impl SemanticNode {
         self.reference
     }
 
+    pub(crate) const fn approval_identity(
+        &self,
+    ) -> Option<crate::semantic_approval::SemanticApprovalIdentity> {
+        self.approval_identity
+    }
+
     pub(crate) const fn key(&self) -> SemanticNodeKey {
         self.key
     }
@@ -1244,6 +1251,7 @@ impl fmt::Debug for SemanticNode {
 
 pub(crate) struct SemanticNodeInput {
     pub(crate) key: SemanticNodeKey,
+    pub(crate) approval_identity: Option<crate::semantic_approval::SemanticApprovalIdentity>,
     pub(crate) parent: Option<u16>,
     pub(crate) depth: u8,
     pub(crate) role: SemanticRole,
@@ -1269,6 +1277,7 @@ pub(crate) struct SemanticNodeInput {
 /// One exact bounded semantic frame snapshot.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SemanticSnapshot {
+    pub(crate) media: Vec<crate::SemanticMediaEvidence>,
     pub(crate) scroll_sample: Option<crate::semantic_wire::ScrollSample>,
     pub(crate) page_dialog_sample: Option<crate::semantic_wire::PageDialogSample>,
     invocation: SemanticInvocationId,
@@ -1284,6 +1293,11 @@ impl SemanticSnapshot {
     pub(crate) fn retain_model_prefix(&mut self, count: usize) {
         self.nodes.truncate(count);
         self.references.truncate(count);
+        let kept: Vec<_> = self.nodes.iter().map(SemanticNode::reference).collect();
+        self.media.retain(|media| kept.contains(&media.reference()));
+        for media in &mut self.media {
+            media.retain_references(&kept);
+        }
         self.completeness =
             SemanticCompleteness::Truncated(SemanticTruncation::ModelProjectionLimit);
         self.total_text_bytes = self
@@ -1308,18 +1322,18 @@ impl SemanticSnapshot {
             .sum::<usize>() as u32;
     }
 
-    /// Local positive evidence can survive unrelated field clipping. Any
-    /// structural/global truncation still refuses action evidence, and legacy
-    /// records without an explicit local witness remain closed on FieldLimit.
+    /// Local positive evidence survives truncation elsewhere in the look: a
+    /// big page is always cut somewhere, and the runtime marks every record it
+    /// clipped or left gathering text as incomplete. Records without an
+    /// explicit local witness stay closed on any truncation.
     pub(crate) fn has_complete_node_fields(&self, key: SemanticNodeKey) -> bool {
         match self.completeness {
             SemanticCompleteness::Complete => true,
-            SemanticCompleteness::Truncated(SemanticTruncation::FieldLimit) => self
+            SemanticCompleteness::Truncated(_) => self
                 .nodes
                 .iter()
                 .find(|node| node.key == key)
                 .is_some_and(|node| node.fields_complete == Some(true)),
-            SemanticCompleteness::Truncated(_) => false,
         }
     }
     /// Exact native invocation correlation.
@@ -1345,6 +1359,11 @@ impl SemanticSnapshot {
     /// Complete bounded node cohort in deterministic preorder.
     pub fn nodes(&self) -> &[SemanticNode] {
         &self.nodes
+    }
+
+    /// Bounded historical media associations sampled in this exact document.
+    pub fn media(&self) -> &[crate::SemanticMediaEvidence] {
+        &self.media
     }
 
     /// Total retained page-derived UTF-8 bytes.
@@ -1472,6 +1491,7 @@ impl SemanticSnapshot {
             });
             nodes.push(SemanticNode {
                 key: input.key,
+                approval_identity: input.approval_identity,
                 parent: input.parent,
                 depth: input.depth,
                 role: input.role,
@@ -1500,6 +1520,7 @@ impl SemanticSnapshot {
             frame,
             generation,
             completeness,
+            media: Vec::new(),
             page_dialog_sample: None,
             scroll_sample: None,
             nodes,
@@ -1625,6 +1646,7 @@ mod tests {
 
     fn node(operations: SemanticOperations) -> SemanticNodeInput {
         SemanticNodeInput {
+            approval_identity: None,
             key: SemanticNodeKey::new(10).expect("key"),
             parent: None,
             depth: 0,

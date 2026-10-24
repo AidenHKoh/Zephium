@@ -1,3 +1,4 @@
+import type { WorkPicture } from "$domain/resources";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, EvidenceReference, SubjectView } from "$shared/ui/data/Artifact";
@@ -23,7 +24,6 @@ type CanvasKind =
   | "media"
   | "objective"
   | "request"
-  | "responsibility"
   | "result"
   | "subject"
   | "sources"
@@ -52,8 +52,6 @@ export type CanvasItem = {
   artifact?: ArtifactView;
   layout?: "artifact";
   actionLabel?: string;
-  /** Planned output names only; these are not produced artifact resources. */
-  responsibility?: { outputs: string[] };
   subject?: SubjectView;
   /** What the run established about a subject, price first. */
   facts?: { label: string; value: string }[];
@@ -69,6 +67,8 @@ export type CanvasItem = {
   trail?: readonly TrailLine[];
   /** A lane card's size, set by its lane rather than saved. */
   size?: CanvasSize;
+  /** The person's own object this card draws: its resource, which edits write to. */
+  owned?: string;
   /** Transient agent presence: its orb's seed, what it does, where it stands, what it says. */
   agent?: {
     seed: number;
@@ -151,7 +151,7 @@ export type CanvasItem = {
   /** An admitted media asset; the image URL is derived from profile and digest. */
   media?: { profile: string; asset: MediaAssetV1 };
   /** An admitted image related to this element, shown as its picture. */
-  image?: { profile: string; digest: string };
+  image?: WorkPicture;
 };
 /** A part's row head as the canvas shows it. */
 export type PartView = {
@@ -172,8 +172,15 @@ export type PartView = {
   /** While it works, what it is doing now, in words. */
   now?: string;
   pages: readonly PartPage[];
-  /** What a search part cited, first few. */
-  cited?: readonly { key: string; url: string; where: string; title: string }[];
+  /** What a search part cited, first few; a web search's results, marked when the run opened them. */
+  cited?: readonly { key: string; url: string; where: string; title: string; opened?: boolean }[];
+  /** The rows are one web search's results, not the sites research cited. */
+  search?: boolean;
+  /** Every result is on one site: its mark says so, so no row repeats its name. */
+  oneSite?: boolean;
+  /** What the run searched for, and how many searches the row stands for. */
+  query?: string;
+  queries?: number;
   /** Everything it cited, for the count past the first few. */
   citedCount?: number;
   /** The connection a connection part works through, for its mark. */
@@ -187,12 +194,22 @@ export type PartView = {
   ask?: { props: Record<string, unknown> };
   /** What the part needs from the person to do its job, and its one action. */
   need?: PartNeed;
+  /** Pages of the site its waiting page is on that wait behind that one, counted with it. */
+  pending?: number;
   /** Notes it handed the lead, read in its opened view. */
   notes?: readonly ObjectView[];
 };
 /** A part's need as its row says it: a sentence and the action that meets it. */
 export type PartNeed = {
-  kind: "sign_in" | "allow_site" | "allow_folder" | "use_connection" | "connect" | "retry";
+  kind:
+    | "sign_in"
+    | "check"
+    | "allow_site"
+    | "allow_folder"
+    | "choose_folder"
+    | "use_connection"
+    | "connect"
+    | "retry";
   /** The site, folder or connection it concerns, as a person names it. */
   target: string;
   /** The page to open for a sign-in, the folder to allow. */
@@ -202,6 +219,8 @@ export type PartNeed = {
     "couldnt_read" | "signed_out" | "blocked_by_check" | "not_found" | "site_error" | "no_answer";
   /** The site a connection would stand in for, as a person names it. */
   site?: string;
+  /** The run has settled: a check or a sign-in is told as what happened, not as what it waits on. */
+  past?: true;
 };
 /** One page of a part, as its row shows it. */
 export type PartPage = {
@@ -214,6 +233,8 @@ export type PartPage = {
   live: boolean;
   /** Set while the run is holding this page open for a person. */
   human?: HumanPage;
+  /** The page was read. */
+  read?: boolean;
   /** Read with the person's signed-in session: the host it was granted on. */
   account?: string;
   /** An open tab the request was shown, not read. */
@@ -248,7 +269,6 @@ const QUIET = new Set<CanvasKind | undefined>([
   "result",
   "agent",
   "page",
-  "responsibility",
   "block",
   "head",
   "trail",
@@ -334,7 +354,7 @@ const validAreaSize = (s: CanvasSize | undefined): s is CanvasSize =>
   s.height <= 8192;
 const CANVAS_ITEM_LIMIT = 500;
 const CANVAS_LINK_LIMIT = 2000;
-const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
+export const TEXT_LIMIT = { id: 128, title: 512, detail: 2048, kind: 128, status: 256 } as const;
 
 /** Clips to a whole character: a cut never splits a surrogate pair. */
 export function clipText(value: string, max: number): string {
@@ -512,7 +532,6 @@ export function reconcileNodes(
         node.data.when === item.when &&
         JSON.stringify(node.data.object) === JSON.stringify(item.object) &&
         JSON.stringify(node.data.facts) === JSON.stringify(item.facts) &&
-        JSON.stringify(node.data.responsibility) === JSON.stringify(item.responsibility) &&
         JSON.stringify(node.data.block) === JSON.stringify(item.block) &&
         JSON.stringify(node.data.trail) === JSON.stringify(item.trail) &&
         JSON.stringify(node.data.size) === JSON.stringify(item.size);

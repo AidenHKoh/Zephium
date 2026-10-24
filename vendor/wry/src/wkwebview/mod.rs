@@ -18,6 +18,8 @@ mod util;
 mod ios;
 
 mod class;
+#[cfg(target_os = "macos")]
+mod cursor_guard;
 pub(crate) use class::wry_navigation_delegate::BlockedLoadCounter;
 pub use class::wry_web_view::WryWebView;
 #[cfg(target_os = "macos")]
@@ -423,6 +425,8 @@ impl InnerWebView {
     let mtm = MainThreadMarker::new().ok_or(Error::NotMainThread)?;
 
     #[cfg(target_os = "macos")]
+    cursor_guard::install();
+    #[cfg(target_os = "macos")]
     let focuses_during_initial_construction = attributes.focuses_during_initial_construction();
     #[cfg(target_os = "macos")]
     let app = NSApplication::sharedApplication(mtm);
@@ -551,6 +555,10 @@ impl InnerWebView {
         context_menu_handler: pl_attrs.context_menu_handler,
         #[cfg(target_os = "ios")]
         input_accessory_view_builder: pl_attrs.input_accessory_view_builder,
+        #[cfg(target_os = "macos")]
+        parked_tracking: Default::default(),
+        #[cfg(target_os = "macos")]
+        skips_hit_test: Default::default(),
         custom_protocol_task_ids: Default::default(),
         custom_protocol_admission: (0..protocol_count)
           .map(|_| {
@@ -849,6 +857,8 @@ impl InnerWebView {
           attributes.download_completed_handler,
           #[cfg(target_os = "macos")]
           pl_attrs.native_download_handler,
+          #[cfg(target_os = "macos")]
+          attributes.credential_challenge_denied_handler.clone(),
           mtm,
         );
         Some(delegate)
@@ -869,6 +879,8 @@ impl InnerWebView {
         attributes.apple_navigation_action_handler,
         #[cfg(target_os = "macos")]
         attributes.main_frame_navigation_attempt_handler,
+        #[cfg(target_os = "macos")]
+        attributes.credential_challenge_denied_handler,
         download_delegate.clone(),
         attributes.on_page_load_handler,
         attributes.navigation_event_handler,

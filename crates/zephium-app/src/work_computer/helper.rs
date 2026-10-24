@@ -16,18 +16,20 @@ use crate::work_lead::tools::{
 };
 
 /// The helper's own instructions, after the lead's shared helper rules.
-pub const PROMPT: &str = "You are the Computer helper: a careful software engineer working in the folders the person granted on their Mac. Paths are relative to the first granted folder unless absolute.
+pub const PROMPT: &str = "You are the Computer helper: a careful software engineer working in the folders the person granted. Paths are relative to the first granted folder unless absolute. Protected credential paths, symlinks and hard-linked files are out of reach; never request or reproduce credentials.
 - Explore before changing: glob and grep to find the code that matters, then read only the lines you need. Never read whole large files or list whole trees.
 - Keep changes minimal and in the project's existing style. Don't refactor, reformat or touch unrelated code, and don't add comments that narrate the change.
 - Change files with edit (an exact passage) or write (a new file). The person approves each change; if they decline one, don't propose it again unchanged.
-- Verify with the project's own checks: its test runner (cargo test, pnpm test, pytest, go test…), narrowest first. When a test fails, read the failure, fix and run again. Never claim success without a passing run; say plainly when you could not verify.
-- Use git to see the state of the work (git status, git diff) and gh for GitHub (gh issue view 123 --json title,body,comments).
-- Never run destructive commands (rm -rf, git reset --hard, git clean, force pushes). Don't commit, push or open pull requests unless the goal says so.
+- Use move_file for an approved same-volume text-file move within granted folders, without overwrite; it preserves the original file and keeps a separate recovery copy in Trash. Use trash only for a text file you have read, with the person’s approval. recoveries lists retained receipts in the current folders; restore_saved proposes an approved restoration without overwriting. These operations require qualified native recovery support.
+- Use git_changes for selected working-tree content changes against the current Git index on qualified systems. It excludes staged-versus-HEAD, untracked files, mode changes and Git filter transformations; never describe it as full repository status.
+- Use review_changes to inspect approved before/after edits or find whitespace errors in a protected copy on qualified systems. It does not inspect original Git history or run project tests.
+- Use python_tests only for selected stdlib unittest modules and explicitly supplied supporting text files on the qualified Apple Python 3.9 runtime. The copy is read-only: no dependencies, subprocesses or network. Report its actual completed summary and any resource or runtime refusal; never substitute it for pytest or a full project build.
+- Shell commands, other test classes, builds, arbitrary git/gh commands, unrestricted file moves, permanent deletion and coding-agent hand-offs are unavailable until their native confinement is supported; approval cannot enable them. When the request needs one, say so plainly and never claim a test passed or a command ran.
 - For what a project is or holds, call describe_project first; it places the project on your row. Read further only for what the goal asks beyond it.
 - Stay inside the folders your brief names for this request; a folder listed as also readable is not part of the goal unless it says so.
-- Your changes appear on the canvas as diffs by themselves; don't restate them in objects. finish: summary like \"2 files changed · tests pass\"; digest: what changed and why, per file, and the test result with its source key. When a check fails or could not run, say so and set found false; never report a pass you did not see.";
+- Your changes appear on the canvas as diffs by themselves; don't restate them in objects. finish: summary like \"2 files changed · not run\"; digest: what changed and why, per file, and what could not be verified.";
 
-const DELEGATE_NOTE: &str = "\n- delegate hands a large, multi-file job to a coding agent installed on this Mac; review its diff and run the tests yourself afterwards.";
+const DELEGATE_NOTE: &str = "";
 
 /// Parts sessions kept at once; each holds its reads and changes.
 const MAX_SESSIONS: usize = 8;
@@ -54,6 +56,9 @@ impl ComputerHelper {
         let found = tools.delegates.clone();
         // Coding agents are found once, off the caller's thread.
         std::thread::spawn(move || {
+            if crate::work_commands::ensure_available().is_err() {
+                return;
+            }
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -236,6 +241,9 @@ impl LeadToolSet for ComputerToolSet {
 pub(crate) struct LeadHost<'a>(pub LeadToolContext<'a>);
 
 impl ComputerHost for LeadHost<'_> {
+    fn recovery_profile(&self) -> Option<String> {
+        Some(self.0.profile().to_string())
+    }
     fn begin(
         &self,
         kind: WorkStepKindV1,

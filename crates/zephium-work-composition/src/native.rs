@@ -1,8 +1,9 @@
 //! The only production adapter from actual desktop owners to Work admission.
 
 use std::sync::{Arc, Mutex};
-use zephium_agent_controller::{AgentWorkFailure, AgentWorkRunInput, AgentWorkTask};
-use zephium_agent_provider_transport::AgentProviderCredential;
+use zephium_agent_controller::{
+    AgentBrowserModelAccess, AgentWorkFailure, AgentWorkRunInput, AgentWorkTask,
+};
 use zephium_app::{
     AgentWorkApplicationConfig, AgentWorkApplicationHandle, AgentWorkApplicationPorts,
     CallbackHandle, PreparedAgentWork,
@@ -17,10 +18,11 @@ pub struct TrustedWorkRequest {
     pub(crate) construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     page: Option<zephium_app::RetainedPageAdmission>,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    pub(crate) redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     work: Option<zephium_agentic::WorkId>,
     pub(crate) input: AgentWorkRunInput,
     pub(crate) config: AgentWorkApplicationConfig,
-    pub(crate) credential: AgentProviderCredential,
+    pub(crate) access: AgentBrowserModelAccess,
     pub(crate) task: Box<dyn AgentWorkTask>,
     browser_profile: Option<zephium_app::AgentWorkProfileBinding>,
     #[cfg(feature = "public-qualification")]
@@ -32,17 +34,18 @@ impl TrustedWorkRequest {
     pub fn new(
         input: AgentWorkRunInput,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
     ) -> Self {
         Self {
             construction_attempt: Default::default(),
             page: None,
             anonymous_session: None,
+            redirect: None,
             work: None,
             input,
             config,
-            credential,
+            access: access.into(),
             task,
             browser_profile: None,
             #[cfg(feature = "public-qualification")]
@@ -62,11 +65,42 @@ impl TrustedWorkRequest {
         self.page = Some(page);
         self
     }
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn model_images_for(
+        &mut self,
+        probe: &zephium_app::work_runtime::WorkAttemptProbe,
+        blocked: bool,
+        entry: Option<zephium_app::work_agent::WorkConfirmPort>,
+    ) -> Result<
+        Option<Arc<zephium_app::work_screenshots::WorkScreenshotAccess>>,
+        zephium_core::work::WorkError,
+    > {
+        let Some(page) = self.page.as_ref() else {
+            return Ok(None);
+        };
+        let identity = self
+            .input
+            .retained_resource_spec()
+            .map_err(|_| zephium_core::work::WorkError::Invalid)?
+            .identity;
+        let host = zephium_app::work_screenshots::for_page(probe, page, identity, blocked, entry)
+            .ok_or(zephium_core::work::WorkError::Invalid)?;
+        self.input
+            .bind_model_image_host(host.clone())
+            .map_err(|_| zephium_core::work::WorkError::Invalid)?;
+        Ok(Some(host))
+    }
     pub(crate) fn with_anonymous_session(
         mut self,
         session: zephium_agentic::WorkBrowserSession,
     ) -> Self {
         self.anonymous_session = Some(session);
+        self
+    }
+    /// Where the native gate keeps a public first load's refused redirect.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_redirect(mut self, redirect: zephium_agentic::WorkBrowserRedirect) -> Self {
+        self.redirect = Some(redirect);
         self
     }
     /// Bind the aggregate owning this fresh dispatch; no authority is added.
@@ -147,7 +181,7 @@ impl NativeWorkComposition {
             request.input,
             binding,
             request.config,
-            request.credential,
+            request.access,
             request.task,
             ports,
         )?;
@@ -158,6 +192,10 @@ impl NativeWorkComposition {
         };
         let prepared = match request.anonymous_session {
             Some(session) => prepared.with_anonymous_session(session)?,
+            None => prepared,
+        };
+        let prepared = match request.redirect {
+            Some(redirect) => prepared.with_redirect(redirect)?,
             None => prepared,
         };
         let prepared = match request.page {
@@ -209,7 +247,7 @@ impl NativeWorkComposition {
             return PreparedAgentWork::try_new_for_public_probe(
                 request.input,
                 request.config,
-                request.credential,
+                request.access,
                 request.task,
                 self.ports(),
             )?
@@ -218,7 +256,7 @@ impl NativeWorkComposition {
         let prepared = PreparedAgentWork::try_new(
             request.input,
             request.config,
-            request.credential,
+            request.access,
             request.task,
             self.ports(),
         )?;

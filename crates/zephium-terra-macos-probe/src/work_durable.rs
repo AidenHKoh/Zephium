@@ -173,7 +173,84 @@ pub(super) fn run_lead(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure
         .iter()
         .find(|scenario| name == scenario.name)
         .ok_or(super::ProbeFailure::Authority)?;
+    if scenario.name.starts_with("blocks-")
+        && [
+            "ZEPHIUM_PROBE_PROFILE",
+            "ZEPHIUM_PROBE_SEEDED_PROFILE",
+            "ZEPHIUM_PROBE_WORK_MEMORY",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(super::ProbeFailure::Authority);
+    }
     let _ = LEAD_SCENARIO.set(scenario);
+    run_mode(Mode::Lead)
+}
+
+/// The person's own requests (one per line, later lines follow up in the
+/// same work) through the whole lead, as the app runs
+/// it, with the stand-in's answer to any question it asks.
+pub(super) fn run_lead_request(
+    request: &std::ffi::OsStr,
+    answer: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    let (Some(request), Some(answer)) = (request.to_str(), answer.to_str()) else {
+        return Err(super::ProbeFailure::Authority);
+    };
+    if request.is_empty() || request.len() > 2400 || answer.len() > 600 {
+        return Err(super::ProbeFailure::Authority);
+    }
+    let _ = LEAD_SCENARIO.set(super::acceptance::request_scenario(request, answer));
+    run_mode(Mode::Lead)
+}
+
+pub(super) fn run_local_fixture(
+    case: &std::ffi::OsStr,
+    export: &std::ffi::OsStr,
+) -> Result<(), super::ProbeFailure> {
+    let case = case.to_str().ok_or(super::ProbeFailure::Authority)?;
+    let objective = if case.starts_with("blocks-") {
+        super::work_heldout_blocks::configure(case, std::path::Path::new(export))
+    } else {
+        super::work_local_fixture::configure(case, std::path::Path::new(export))
+    }
+    .map_err(|_| super::ProbeFailure::Authority)?;
+    LEAD_SCENARIO
+        .set(super::acceptance::request_scenario(
+            &objective,
+            "Follow the frozen fixture request; report unavailable capabilities honestly.",
+        ))
+        .map_err(|_| super::ProbeFailure::Authority)?;
+    let result = run_mode(Mode::Lead);
+    if let Some(fixture) = super::work_local_fixture::active() {
+        fixture.cleanup();
+    }
+    if let Some(fixture) = super::work_heldout_blocks::active() {
+        fixture.cleanup();
+    }
+    result
+}
+
+pub(super) fn run_account_read(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    run_account(start, false)
+}
+
+pub(super) fn run_account_send(start: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    run_account(start, true)
+}
+
+fn run_account(start: &std::ffi::OsStr, send: bool) -> Result<(), super::ProbeFailure> {
+    let url = start.to_str().ok_or(super::ProbeFailure::Authority)?;
+    let request = if send {
+        super::work_account::configure_send(url)
+    } else {
+        super::work_account::configure(url)
+    }
+    .map_err(|_| super::ProbeFailure::Authority)?;
+    LEAD_SCENARIO
+        .set(super::acceptance::request_scenario(&request, ""))
+        .map_err(|_| super::ProbeFailure::Authority)?;
     run_mode(Mode::Lead)
 }
 
@@ -278,7 +355,9 @@ static PAGE_OBJECTIVE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 pub(super) fn run_agent_page(url: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let url = url
         .to_str()
-        .filter(|url| url.starts_with("https://") && url.len() <= 512)
+        .filter(|url| {
+            (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 512
+        })
         .ok_or(super::ProbeFailure::Authority)?;
     let _ = PAGE_URL.set(url.to_owned());
     let _ = PAGE_OBJECTIVE.set(format!("Read {url} in one browser read and report the places to stay it shows with their displayed prices, as cited findings from that page. Do not search, follow links, book, sign in or interact with verification controls. If the page shows no places to stay, report that honestly."));
@@ -463,16 +542,48 @@ pub(super) fn replay_agent_turn(
 fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
     use super::ProbeFailure as Error;
     zephium_app::work_trace::install(Arc::new(|line: std::fmt::Arguments<'_>| {
-        let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+        if super::work_account::active().is_none()
+            && std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_none()
+            && !LEAD_SCENARIO
+                .get()
+                .is_some_and(|scenario| scenario.name.starts_with("blocks-"))
+        {
+            let _ = writeln!(std::io::stdout().lock(), "trace: {line}");
+        }
     }));
+    zephium_app::work_trace::install_record_media(Arc::new(|event| {
+        // Account qualification never exports even closed media measurements.
+        // Public qualification uses only this typed channel, not free-text traces.
+        if super::work_account::active().is_none() {
+            let _ = writeln!(std::io::stdout().lock(), "record-media: {event:?}");
+        }
+    }));
+    zephium_engine::configure_macos_public_media_diagnostic(
+        std::env::var("ZEPHIUM_PROBE_MEDIA_DIAGNOSTIC").as_deref() == Ok("1")
+            && std::env::var_os("ZEPHIUM_EVAL_PUBLIC_EXPORT").is_some(),
+        super::work_account::active().is_some(),
+    );
     let coordinated = !matches!(mode, Mode::Public | Mode::MoneyNode);
+    use std::os::unix::fs::PermissionsExt;
     let data = tempfile::Builder::new()
         .prefix("zephium-durable-work-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .map_err(|_| Error::Runtime)?;
     let store =
         Arc::new(zephium_store::SqliteStore::open(data.path()).map_err(|_| Error::Runtime)?);
-    let profile = ProfileId::generate();
+    // Match desktop initialization from this probe's actual private Store.
+    // Account qualification remains hard text-only and keeps this switch closed.
+    initialize_probe_screenshots(
+        super::work_account::active().is_some(),
+        || store.app_setting_readback("work.screenshots"),
+        zephium_app::work_screenshots::initialize,
+    );
+    // A named profile lets two probe processes share Work's memory.
+    let profile = std::env::var("ZEPHIUM_PROBE_PROFILE")
+        .ok()
+        .and_then(|id| ProfileId::parse(&id))
+        .unwrap_or_else(ProfileId::generate);
     let space = SpaceId::generate();
     store.save_session(SessionState {
         profiles: vec![PersistedProfile {
@@ -484,6 +595,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             id: space,
             profile,
             name: "Public research".into(),
+            look: Default::default(),
         }],
         active_space: Some(space),
         ..SessionState::default()
@@ -547,13 +659,23 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
         | Mode::AgentExplainMechanism
         | Mode::AgentCodeReview
         | Mode::AgentConceptComparison => 720,
-        Mode::Lead => 860,
+        // Each follow-up of a scenario gets a request's own time.
+        Mode::Lead => (860
+            * LEAD_SCENARIO
+                .get()
+                .map_or(1, |scenario| scenario.requests.len().max(1)) as u64)
+            .min(3500),
         Mode::Public => 160,
         _ => 240,
     });
     let run = zephium_engine::run_macos_work_application_with_input_probe(
         profile,
-        if matches!(mode, Mode::AgentHumanGovernment) {
+        if super::work_account::active().is_some()
+            || matches!(mode, Mode::AgentHumanGovernment)
+            || (mode == Mode::LoopbackSite && super::work_site::needs_human_presentation())
+            // A person sits at the window to sign in or pass a check.
+            || (mode == Mode::Lead && std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some())
+        {
             zephium_engine::MacosWorkProbeInput::Human
         } else {
             zephium_engine::MacosWorkProbeInput::LifecycleOnly
@@ -579,6 +701,8 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             *relay.lock().map_err(|_| "durable_events")? = Some(shell.callback_handle());
             if mode == Mode::LoopbackSite {
                 super::work_site::install_presence(engine.clone());
+            } else {
+                super::work_site::install_app_presence(engine.clone());
             }
             let composition = MacosWorkComposition::new(engine, owner_store);
             if !shell.admit_startup() {
@@ -606,6 +730,7 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
                                         &worker_handle,
                                         &composition,
                                         profile,
+                                        space,
                                         planning_key,
                                         browser_keys,
                                         mode,
@@ -835,6 +960,43 @@ fn run_mode(mode: Mode) -> Result<(), super::ProbeFailure> {
             execution.provider_evidence.len(),
             execution.attempts.first().and_then(|attempt| attempt.usage),
         );
+        if mode == Mode::AgentPage {
+            // Closed relations only: whether the requested page was read as
+            // asked or at where it redirected, and which read the records cite.
+            let reads: Vec<(&str, WorkStepStatus, bool)> = execution
+                .steps
+                .iter()
+                .filter_map(|step| match &step.kind {
+                    WorkStepKindV1::Read { url, .. } => {
+                        Some((url.as_str(), step.status, !step.artifacts.is_empty()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let requested = PAGE_URL
+                .get()
+                .map(|url| url.replacen("http://", "https://", 1))
+                .unwrap_or_default();
+            let cited: Vec<&str> = reads
+                .iter()
+                .filter(|(_, _, records)| *records)
+                .map(|(url, _, _)| *url)
+                .collect();
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "agent-work: page_reads={} redirected_reads={} cited_reads={} cited_requested={} cited_last_read={} content=redacted",
+                reads.len(),
+                reads
+                    .iter()
+                    .filter(|(_, status, _)| *status == WorkStepStatus::Failed)
+                    .count(),
+                cited.len(),
+                cited.iter().any(|url| *url == requested),
+                reads.last().is_some_and(|(url, status, _)| {
+                    *status == WorkStepStatus::Succeeded && cited.contains(url)
+                }),
+            );
+        }
     }
     if state.executions[0].status != expected_status || state.executions[0].artifacts.is_empty() {
         return Err(Error::Runtime);
@@ -1089,6 +1251,7 @@ async fn workflow(
     handle: &zephium_app::Handle,
     composition: &MacosWorkComposition,
     profile: ProfileId,
+    space: SpaceId,
     planning_key: zephium_agentic::AgentProviderCredential,
     mut browser_keys: Vec<zephium_agentic::AgentProviderCredential>,
     mode: Mode,
@@ -1133,6 +1296,7 @@ async fn workflow(
             handle,
             composition,
             profile,
+            space,
             binding,
             browser_keys,
             scenario,
@@ -2322,6 +2486,8 @@ async fn agent_workflow(
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
+        draft: None,
     };
     let search = OpenAiPublicSearch::try_new(
         transport.clone(),
@@ -2923,4 +3089,39 @@ mod airbnb_page_tests {
         );
         assert_eq!(airbnb_page("https://example.com/rooms/49597911"), None);
     }
+}
+
+// This qualification adapter does not expose an account-mode image opt-in.
+fn initialize_probe_screenshots(
+    account: bool,
+    readback: impl FnOnce() -> zephium_core::ports::store::AppSettingReadback,
+    initialize: impl FnOnce(zephium_core::ports::store::AppSettingReadback),
+) {
+    if !account {
+        initialize(readback());
+    }
+}
+#[cfg(test)]
+#[test]
+fn account_qualification_never_reads_or_enables_model_screenshot_preference() {
+    use zephium_core::ports::store::AppSettingReadback;
+    initialize_probe_screenshots(
+        true,
+        || panic!("account readback forbidden"),
+        |_| panic!("account image initialization forbidden"),
+    );
+    let read = std::cell::Cell::new(false);
+    let enabled = std::cell::Cell::new(false);
+    initialize_probe_screenshots(
+        false,
+        || {
+            read.set(true);
+            AppSettingReadback::Missing
+        },
+        |value| {
+            assert!(matches!(value, AppSettingReadback::Missing));
+            enabled.set(true);
+        },
+    );
+    assert!(read.get() && enabled.get());
 }

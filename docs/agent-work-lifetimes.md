@@ -22,7 +22,8 @@ all nine resource counts as zero while holding its sole remaining native task
 permit. Afterwards all task/capture permits must be absent. Retirement and
 old read-only audit admission share the same lock: a retired port cannot audit
 a successor's resources. Native invariant failure is sticky across the entire
-factory lineage, and whole-engine shutdown permanently seals the factory and
+factory lineage (a public page whose first load was redirected fails only its
+own resource, as `Redirected`, and is not an invariant failure), and whole-engine shutdown permanently seals the factory and
 its current port. The factory retains one current admission owner, not a growing
 history, and permits at most 1,024 lifetimes per process.
 An intervening refused, lost, mismatched or nonempty ordinary audit cannot use

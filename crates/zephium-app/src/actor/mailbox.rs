@@ -330,6 +330,18 @@ impl CommandQueue {
             self.inner.timer_ready.notify_one();
         }
     }
+    #[cfg(all(
+        test,
+        feature = "work-execution-probe",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(crate) fn work_deadline(&self) -> Option<std::time::Instant> {
+        self.inner
+            .timer_state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .work_deadline
+    }
     pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(CommandQueueInner {

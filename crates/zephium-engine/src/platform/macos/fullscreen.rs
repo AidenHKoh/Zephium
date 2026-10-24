@@ -168,12 +168,16 @@ impl FullscreenObserver {
                         .set(Some((layer.cornerRadius(), layer.borderWidth())));
                     layer.setCornerRadius(0.0);
                     layer.setBorderWidth(0.0);
+                    #[cfg(feature = "agentic-browser")]
+                    super::page_glow::reshape(view);
                 }
             }
             NativeFullscreen::Inactive => {
                 if let Some((radius, border)) = self.ivars().edge.take() {
                     layer.setCornerRadius(radius);
                     layer.setBorderWidth(border);
+                    #[cfg(feature = "agentic-browser")]
+                    super::page_glow::reshape(view);
                 }
             }
             NativeFullscreen::Exiting => {}

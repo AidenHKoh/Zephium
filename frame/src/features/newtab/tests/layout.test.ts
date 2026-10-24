@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { layout } from "../lib/layout";
 
-const FULL = { controls: 2, clock: true, tiles: 3 };
+const FULL = { controls: [32, 32], clock: true, tiles: 3 };
 
 describe("layout", () => {
   it("sets the figures along the foot and the name in the middle of the rest", () => {
@@ -25,6 +25,16 @@ describe("layout", () => {
     ]);
   });
 
+  it("gives words a capsule as wide as they are, and keeps the corner where it was", () => {
+    const page = layout(700, 800, { ...FULL, controls: [64, 32] });
+    // The notch gives up what the wider control needs, on both sides.
+    expect(page.notch.width).toBe(480 - 2 * 32);
+    expect(page.controls).toEqual([
+      { x: 700 - 14 - 32 - 6 - 64, y: 9, w: 64, h: 32 },
+      { x: 700 - 14 - 32, y: 9, w: 32, h: 32 },
+    ]);
+  });
+
   it("narrows the figures with the page rather than breaking the row", () => {
     const page = layout(560, 800, FULL);
     const [, , last] = page.tiles;
@@ -33,7 +43,7 @@ describe("layout", () => {
   });
 
   it("closes up around what is not shown", () => {
-    const page = layout(1200, 800, { controls: 0, clock: false, tiles: 0 });
+    const page = layout(1200, 800, { controls: [], clock: false, tiles: 0 });
     expect(page.controls).toEqual([]);
     expect(page.when).toBeNull();
     expect(page.tiles).toEqual([]);

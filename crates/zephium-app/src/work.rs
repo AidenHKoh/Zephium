@@ -22,10 +22,10 @@ use std::{
     time::{Duration, Instant},
 };
 use zephium_agent_controller::{
-    AgentWorkController, AgentWorkEvent, AgentWorkFailure, AgentWorkHandle, AgentWorkOutcome,
-    AgentWorkRunInput, AgentWorkTask,
+    AgentBrowserModelAccess, AgentWorkController, AgentWorkEvent, AgentWorkFailure,
+    AgentWorkHandle, AgentWorkOutcome, AgentWorkRunInput, AgentWorkTask,
 };
-use zephium_agent_provider_transport::{AgentProviderCredential, AgentProviderTransportConfig};
+use zephium_agent_provider_transport::AgentProviderTransportConfig;
 use zephium_agent_runtime::{
     AgentRuntimeCompletion, AgentRuntimeConfig, AgentRuntimeHandle, AgentRuntimeStopReason,
     NativeEventSink, PendingAgentRuntime,
@@ -111,14 +111,14 @@ impl PreparedAgentWork {
     pub fn try_new(
         input: AgentWorkRunInput,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
         ports: AgentWorkApplicationPorts,
     ) -> Result<Self, AgentWorkFailure> {
         let (controller, handle) = AgentWorkController::try_new(
             input,
             config.provider,
-            credential,
+            access,
             ports.audit.clone(),
             task,
         )?;
@@ -786,20 +786,7 @@ impl ApplicationWork {
     }
 
     fn remember(&mut self, record: AgentWorkRecord) -> bool {
-        let mut projection = lock(&self.projection);
-        if let Some(previous) = projection
-            .records
-            .iter_mut()
-            .find(|previous| previous.key() == record.key())
-        {
-            *previous = record;
-            true
-        } else if projection.records.len() < MAX_DURABLE_AGENT_WORK_RUNS {
-            projection.records.push(record);
-            true
-        } else {
-            false
-        }
+        zephium_agentic::remember_agent_work_record(&mut lock(&self.projection).records, record)
     }
 
     fn acknowledge(
@@ -894,7 +881,7 @@ impl ApplicationWork {
                 AgentWorkJournalRequest::Claim,
                 AgentWorkJournalReply::Claimed { owner, records },
             ) => {
-                if records.len() > MAX_DURABLE_AGENT_WORK_RUNS
+                if records.len() > zephium_agentic::MAX_AGENT_WORK_INVENTORY
                     || records
                         .windows(2)
                         .any(|pair| pair[0].key() >= pair[1].key())

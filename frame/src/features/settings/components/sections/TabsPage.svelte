@@ -1,20 +1,25 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { showPreviews } from "../../lib/settings-model";
-  import PreviewNotice from "../PreviewNotice.svelte";
   import SettingsGroup from "$shared/ui/SettingsGroup";
-  import PreviewSelect from "../PreviewSelect.svelte";
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 </script>
 
-<SettingsGroup title={m.section_tabs()}
+<SettingsGroup title={m.tabs_group_opening()}
   ><PreferenceSelect id="tabs.new-position" preference="tabs.new-position" /><PreferenceSelect
-    id="tabs.close"
-    preference="tabs.after-close"
-  /><PreferenceSwitch id="tabs.duplicates" preference="tabs.switch-to-open" /></SettingsGroup
+    id="tabs.external"
+    preference="tabs.external-position"
+  /><PreferenceSwitch id="tabs.duplicates" preference="tabs.switch-to-open" /><PreferenceSwitch
+    id="tabs.automatic-pip"
+    preference="tabs.automatic-pip"
+  /></SettingsGroup
 >
-{#if showPreviews}
-  <PreviewNotice />
-  <SettingsGroup title={m.settings_spaces()}><PreviewSelect id="tabs.archive" /></SettingsGroup>
-{/if}
+<SettingsGroup title={m.tabs_group_closing()}
+  ><PreferenceSelect id="tabs.close" preference="tabs.after-close" /><PreferenceSelect
+    id="tabs.close-button"
+    preference="tabs.close-button"
+  /></SettingsGroup
+>
+<SettingsGroup title={m.tabs_group_archive()}
+  ><PreferenceSelect id="tabs.archive" preference="tabs.archive" /></SettingsGroup
+>

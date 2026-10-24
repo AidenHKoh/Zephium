@@ -11,35 +11,31 @@ const WIRE: &str = "anthropic";
 const MAX_BREAKPOINTS: usize = 4;
 const SEARCH_MAX_USES: u32 = 8;
 
-/// Models before adaptive thinking take a token budget instead of effort.
-fn budget_thinking(model: &str) -> bool {
-    model.starts_with("claude-haiku-4") || model.starts_with("claude-3")
+/// Models before adaptive thinking take a token budget instead of effort;
+/// they refuse `adaptive`, and every newer model refuses a budget.
+pub(super) fn budget_thinking(model: &str) -> bool {
+    [
+        "claude-3",
+        "claude-haiku-4",
+        "claude-opus-4-5",
+        "claude-sonnet-4-5",
+        "claude-opus-4-1",
+        "claude-opus-4-2025",
+        "claude-sonnet-4-2025",
+    ]
+    .iter()
+    .any(|prefix| model.starts_with(prefix))
 }
 
-/// Dynamic-filtering search needs a current model; others keep the basic tool.
-fn search_tool(model: &str) -> &'static str {
-    let current = [
-        "claude-opus-5",
-        "claude-sonnet-5",
-        "claude-fable-5",
-        "claude-mythos-5",
-        "claude-opus-4-6",
-        "claude-opus-4-7",
-        "claude-opus-4-8",
-        "claude-sonnet-4-6",
-    ];
-    if current.iter().any(|prefix| model.starts_with(prefix)) {
-        "web_search_20260209"
-    } else {
-        "web_search_20250305"
-    }
-}
+/// Direct search without dynamic filtering. The filtering versions run search
+/// from provisioned code execution, whose blocks a replay must carry exactly,
+/// and Zephium Cloud admits only this version.
+const SEARCH_TOOL: &str = "web_search_20250305";
 
 pub(super) fn body(
     request: &WorkModelRequest,
     target: &LeadTarget,
 ) -> Result<Value, WorkModelError> {
-    let _ = target;
     let mut breakpoints = 0;
     let system: Vec<Value> = request
         .system
@@ -111,18 +107,20 @@ pub(super) fn body(
             }
         }
     }
-    // Conversation caching: the newest cacheable block closes a breakpoint.
+    // Conversation caching: the newest cacheable block closes a breakpoint,
+    // short of the volatile blocks that close the conversation.
     if breakpoints < MAX_BREAKPOINTS {
         if let Some(block) = messages
-            .last_mut()
-            .and_then(|message| message["content"].as_array_mut())
-            .and_then(|content| {
-                content.iter_mut().rev().find(|block| {
-                    matches!(
-                        block["type"].as_str(),
-                        Some("text" | "tool_result" | "image" | "tool_use")
-                    )
-                })
+            .iter_mut()
+            .rev()
+            .filter_map(|message| message["content"].as_array_mut())
+            .flat_map(|content| content.iter_mut().rev())
+            .skip(request.volatile_tail)
+            .find(|block| {
+                matches!(
+                    block["type"].as_str(),
+                    Some("text" | "tool_result" | "image" | "tool_use")
+                )
             })
         {
             block["cache_control"] = json!({"type": "ephemeral"});
@@ -134,10 +132,11 @@ pub(super) fn body(
         .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.schema}))
         .collect();
     let model = request.model.model.as_str();
-    if request.native_search {
-        tools.push(
-            json!({"type": search_tool(model), "name": "web_search", "max_uses": SEARCH_MAX_USES}),
-        );
+    if target.native_search(request) {
+        let uses = target
+            .search_calls
+            .map_or(SEARCH_MAX_USES, |calls| calls.min(SEARCH_MAX_USES));
+        tools.push(json!({"type": SEARCH_TOOL, "name": "web_search", "max_uses": uses}));
     }
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
@@ -148,18 +147,24 @@ pub(super) fn body(
     }
     body.insert("messages".into(), Value::Array(messages));
     if !tools.is_empty() {
+        let mut choice = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!({"type": "auto"}),
+            WorkModelToolChoice::Required => json!({"type": "any"}),
+            WorkModelToolChoice::Named(name) => json!({"type": "tool", "name": name}),
+        };
+        choice["disable_parallel_tool_use"] = json!(!request.parallel_tools);
         body.insert("tools".into(), Value::Array(tools));
-        body.insert(
-            "tool_choice".into(),
-            json!({"type": "auto", "disable_parallel_tool_use": !request.parallel_tools}),
-        );
+        body.insert("tool_choice".into(), choice);
     }
-    if let Some(reasoning) = request.reasoning {
+    let forced = !request.tools.is_empty() && request.tool_choice != WorkModelToolChoice::Auto;
+    if let Some(reasoning) = request.reasoning.filter(|_| !forced) {
         if budget_thinking(model) {
             let budget: u32 = match reasoning {
                 WorkModelReasoning::Low => 2_048,
                 WorkModelReasoning::Medium => 6_000,
-                WorkModelReasoning::High => 16_000,
+                WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                    16_000
+                }
             };
             if request.max_output_tokens > 2_048 {
                 let budget = budget.min(request.max_output_tokens - 1_024).max(1_024);
@@ -173,6 +178,8 @@ pub(super) fn body(
                 WorkModelReasoning::Low => "low",
                 WorkModelReasoning::Medium => "medium",
                 WorkModelReasoning::High => "high",
+                WorkModelReasoning::XHigh => "xhigh",
+                WorkModelReasoning::Max => "max",
             };
             body.insert("thinking".into(), json!({"type": "adaptive"}));
             body.insert("output_config".into(), json!({"effort": effort}));

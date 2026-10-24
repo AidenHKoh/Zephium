@@ -14,6 +14,12 @@ pub(super) fn editor(path: &str) -> Option<&'static str> {
         "/edit/slack" | "/edit/slack-enter" => Some(SLACK),
         "/edit/linear" => Some(LINEAR),
         "/edit/notion" => Some(NOTION),
+        "/edit/webmail"
+        | "/edit/webmail-swap"
+        | "/edit/webmail-autosave"
+        | "/edit/webmail-inbox"
+        | "/edit/webmail-blocks"
+        | "/edit/webmail-thread" => Some(WEBMAIL),
         _ => None,
     }
 }
@@ -60,7 +66,19 @@ function mount(host, onChange){
   }
   function fromDom(){
     var lines=[];
-    for(var i=0;i<host.childNodes.length;i++){ var c=host.childNodes[i]; if(c.nodeType!==1||c.tagName!=='P') return null; lines.push(c.textContent.replace(/ /g,' ')); }
+    function read(node){
+      if(node.nodeType===3) return node.data;
+      if(node.nodeName==='BR') return '\n';
+      var value=''; for(var j=0;j<node.childNodes.length;j++) value+=read(node.childNodes[j]);
+      return value;
+    }
+    for(var i=0;i<host.childNodes.length;i++){
+      var c=host.childNodes[i]; if(c.nodeType!==1||c.tagName!=='P') return null;
+      // Chromium's Shift+Enter uses BRs within a paragraph. A final BR is
+      // its caret placeholder; preceding BRs are real line breaks.
+      var value=read(c); if(c.lastChild&&c.lastChild.nodeName==='BR') value=value.slice(0,-1);
+      lines.push(value.replace(/ /g,' '));
+    }
     return lines.length?lines:[''];
   }
   host.addEventListener('input', function(){
@@ -75,6 +93,15 @@ function mount(host, onChange){
   }).observe(host,{childList:true,subtree:true,characterData:true});
   render(false);
   return { text:text, clear:function(){ model=['']; render(); } };
+}
+// An editor with no model of its own, like a mail composer's body: the
+// browser's editing leaves a block per line (an empty line as <div><br></div>)
+// and the text is read back from what is rendered.
+function plain(host, onChange){
+  var inserts=0;
+  host.addEventListener('beforeinput', function(e){ if(e.inputType==='insertText') inserts++; });
+  host.addEventListener('input', function(){ onChange(); });
+  return { inserts:function(){ return inserts; }, text:function(){ return host.innerText.replace(/ /g,' ').replace(/\n+$/,''); } };
 }
 </script>"#;
 
@@ -185,9 +212,117 @@ document.querySelectorAll('.block').forEach(add);
 </script></body></html>"#
 );
 
+/// Gmail's compose: the Compose button moves the address to a fragment that
+/// holds state (`#inbox?compose=new`), which loads no document, and opens a
+/// dialog with To and Subject inputs, a contenteditable body and Send. The
+/// swap variant re-renders Send as an identical new node, as a single-page app
+/// does while a confirmation waits. The thread variant opens a newsletter's
+/// conversation with its own Reply box and Send beside Compose. The autosave
+/// variant saves the draft as Gmail does while a confirmation waits: the
+/// fragment takes the draft's id, the box takes the subject as its title.
+/// The inbox variant lists more messages than one look holds before the
+/// compose box, which floats over them without being modal, closes with
+/// "Save & close" and names Send inside direction marks, as Gmail's does.
+const WEBMAIL: &str = concat!(
+    r#"<!doctype html><html><head><meta charset="utf-8"><title>Inbox - Mail</title></head><body>
+<nav aria-label="Mailboxes"><a href="/edit/webmail">Inbox</a></nav>
+<main>__THREAD__<h1>Inbox</h1><button id="compose">Compose</button>
+<div role="list" aria-label="Messages"><div role="listitem">Dana: Quarterly report</div></div>
+<div id="status" role="status"></div></main>
+<div id="dialog" role="dialog" aria-modal="true" aria-label="New Message" hidden>
+<h2>New Message</h2>
+<input id="to" type="text" aria-label="To recipients">
+<input id="subject" type="text" aria-label="Subject">
+<div id="body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message Body"></div>
+<div id="bar"><button id="send">Send</button></div>
+</div>"#,
+    "__EDITOR__",
+    r#"<script>
+var dialog=document.getElementById('dialog'), blocks=location.pathname.indexOf('blocks')>=0;
+var body=(blocks ? plain : mount)(document.getElementById('body'),function(){ arm(); });
+var swapping=location.pathname.indexOf('swap')>=0, swaps=[];
+var autosave=location.pathname.indexOf('autosave')>=0, saves=0, saving=null;
+location.hash='inbox';
+document.getElementById('compose').addEventListener('click',function(){ location.hash='inbox?compose=new'; dialog.hidden=false; document.getElementById('to').focus(); });
+function send(){
+  var parts=[document.getElementById('to').value, document.getElementById('subject').value, body.text()];
+  // How many times the body was typed into: a retyped field counts again.
+  if(blocks) parts.push(body.inserts());
+  fetch('/edit/webmail/send?text='+encodeURIComponent(parts.join('|')),{method:'POST'});
+  dialog.hidden=true; document.getElementById('status').textContent='Message sent';
+}
+function rerender(){
+  var old=document.getElementById('send'), fresh=old.cloneNode(true);
+  fresh.addEventListener('click',send); old.replaceWith(fresh);
+}
+document.getElementById('send').addEventListener('click',send);
+var reply=document.getElementById('reply-send');
+if(reply) reply.addEventListener('click',function(){
+  fetch('/edit/webmail/reply?text='+encodeURIComponent(document.getElementById('reply').value),{method:'POST'});
+  document.getElementById('status').textContent='Reply sent';
+});
+function arm(){
+  if(autosave){
+    clearTimeout(saving);
+    saving=setTimeout(function(){
+      saves++; location.hash='inbox?compose=draft'+saves;
+      var title=document.getElementById('subject').value||'New Message';
+      dialog.setAttribute('aria-label',title); dialog.querySelector('h2').textContent=title;
+      document.getElementById('status').textContent='Draft saved';
+    },1500);
+  }
+  if(!swapping) return;
+  swaps.forEach(clearTimeout); swaps=[3500].map(function(ms){ return setTimeout(rerender,ms); });
+}
+</script></body></html>"#
+);
+
+const THREAD: &str = r#"<section role="region" aria-label="Conversation"><h2>Weekly digest</h2>
+<p>From: news@sender.test</p>
+<textarea id="reply" aria-label="Reply" autofocus></textarea>
+<button id="reply-send">Send</button></section>"#;
+
 /// The replica with the shared editor in place.
 pub(super) fn page(path: &str) -> Option<String> {
     let page = editor(path).map(|html| html.replace("__EDITOR__", EDITOR))?;
+    let page = page.replace(
+        "__THREAD__",
+        if path == "/edit/webmail-thread" {
+            THREAD
+        } else {
+            ""
+        },
+    );
+    let page = if path == "/edit/webmail-inbox" {
+        let rows: String = (1..=120)
+            .map(|n| {
+                format!(
+                    "<div role=\"listitem\" style=\"height:7px;font-size:6px;overflow:hidden\">\
+                     <input type=\"checkbox\" aria-label=\"Select\"><a href=\"#m{n}\">Sender {n}</a> \
+                     <span>Update {n}</span> <span>Oct {}</span></div>",
+                    n % 28 + 1
+                )
+            })
+            .collect();
+        page.replace(
+            "<div role=\"listitem\">Dana: Quarterly report</div>",
+            &format!("<div role=\"listitem\">Dana: Quarterly report</div>{rows}"),
+        )
+        .replace(
+            "<button id=\"send\">Send</button>",
+            "<button id=\"send\" aria-label=\"Send \u{202a}(\u{2318}Enter)\u{202c}\">Send</button>",
+        )
+        .replace(
+            "<h2>New Message</h2>",
+            "<h2>New Message</h2><button aria-label=\"Save &amp; close\" onclick=\"dialog.hidden=true\">x</button>",
+        )
+        .replace(
+            "role=\"dialog\" aria-modal=\"true\"",
+            "role=\"dialog\" style=\"position:fixed;right:8px;bottom:0;width:420px;background:#fff;border:1px solid #888\"",
+        )
+    } else {
+        page
+    };
     // A composer that only Enter sends, as Slack's is with its button hidden.
     Some(if path == "/edit/slack-enter" {
         page.replace("<button id=\"send\"", "<button id=\"send\" hidden")
@@ -205,7 +340,17 @@ mod tests {
             Some("On my way 🚀")
         );
         assert_eq!(super::posted("/edit/slack/send"), None);
-        for path in ["/edit/slack", "/edit/linear", "/edit/notion"] {
+        for path in [
+            "/edit/slack",
+            "/edit/linear",
+            "/edit/notion",
+            "/edit/webmail",
+            "/edit/webmail-swap",
+            "/edit/webmail-autosave",
+            "/edit/webmail-inbox",
+            "/edit/webmail-blocks",
+            "/edit/webmail-thread",
+        ] {
             let page = super::page(path).unwrap();
             assert!(page.contains("function mount") && !page.contains("__EDITOR__"));
         }

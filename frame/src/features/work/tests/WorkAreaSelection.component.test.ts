@@ -113,7 +113,6 @@ test("Area from a selection creates the area, moves every selected element in, a
       tabFixture({ id: "tab-2", title: "Nuphy Air75" }),
     ],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

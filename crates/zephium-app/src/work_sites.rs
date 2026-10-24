@@ -107,7 +107,12 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
     ("booking.com", "Booking.com", None),
     ("trello.com", "Trello", None),
     ("asana.com", "Asana", Some("https://app.asana.com/")),
-    ("linear.app", "Linear", Some("https://linear.app/")),
+    ("linear.app", "Linear", Some("https://linear.app/login")),
+    (
+        "todoist.com",
+        "Todoist",
+        Some("https://app.todoist.com/app"),
+    ),
     (
         "discord.com",
         "Discord",
@@ -136,6 +141,34 @@ const VENDORS: &[(&str, &str, Option<&str>)] = &[
         Some("https://outlook.live.com/mail/"),
     ),
 ];
+
+/// The sites of services a person names by their name ("check my Slack and
+/// Todoist"), as if they had named the sites themselves.
+pub fn named_services(text: &str) -> Vec<String> {
+    const ALSO: &[(&str, &str)] = &[("gmail", "google.com"), ("allegro", "allegro.pl")];
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '.')
+        .map(|word| word.trim_matches('.').to_lowercase())
+        .collect();
+    let named = |name: &str| {
+        let name = name.to_lowercase();
+        words
+            .iter()
+            .any(|word| *word == name || word.strip_suffix(".com") == Some(&name))
+    };
+    let mut sites: Vec<String> = Vec::new();
+    for (site, name, _) in VENDORS {
+        if named(name) && !sites.iter().any(|known| known == site) {
+            sites.push((*site).to_owned());
+        }
+    }
+    for (name, site) in ALSO {
+        if named(name) && !sites.iter().any(|known| known == site) {
+            sites.push((*site).to_owned());
+        }
+    }
+    sites
+}
 
 pub fn is_sensitive(site: &str) -> bool {
     SENSITIVE_SITES.contains(&site)
@@ -190,7 +223,18 @@ pub fn view_home(url: &str) -> Option<&'static str> {
             });
         return (!conversation).then_some("https://app.slack.com/client");
     }
-    (host == "linear.app" || host.ends_with(".linear.app")).then_some("https://linear.app/")
+    // Preserve explicit workspace and sign-in routes. The vendor's bare-root
+    // entry below is distinct from a page the person actually requested.
+    None
+}
+
+/// A daily app that is also the public web: a task about its public pages
+/// (GitHub's projects) starts where it was sent, not on the person's view.
+pub fn public_app(url: &str) -> bool {
+    url::Url::parse(url).ok().is_some_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.trim_start_matches("www.") == "github.com")
+    })
 }
 
 /// A bare site's own start page for a page task, when the vendor has one.
@@ -397,6 +441,8 @@ pub struct RunSites {
     decided: BTreeMap<String, Option<String>>,
     /// Sites this run reads publicly, without the person's session.
     public: Vec<String>,
+    /// Sites this run works on as the person: their account there.
+    account: Vec<String>,
     /// Sites where the person allowed edits for this run.
     edits: Vec<String>,
 }
@@ -407,6 +453,7 @@ impl RunSites {
             standing,
             decided: BTreeMap::new(),
             public: Vec::new(),
+            account: Vec::new(),
             edits: Vec::new(),
         }
     }
@@ -420,11 +467,20 @@ impl RunSites {
     }
     pub fn personal(&mut self, site: &str) {
         self.public.retain(|known| known != site);
+        if !self.account.iter().any(|known| known == site) {
+            self.account.push(site.to_owned());
+        }
     }
     pub fn allow_edits(&mut self, site: &str) {
         if !self.edits.iter().any(|edit| edit == site) {
             self.edits.push(site.to_owned());
         }
+    }
+    /// Entry refusal also prevents screenshot permission from being used as
+    /// an alternative way to disclose this site's account page.
+    pub fn image_entry_blocked(&self, site: &str) -> bool {
+        self.standing(site) == Some(WorkSiteAccessV1::Never)
+            || matches!(self.decided.get(site), Some(None))
     }
     pub fn edits_allowed(&self, site: &str) -> bool {
         self.edits.iter().any(|edit| edit == site)
@@ -481,7 +537,16 @@ impl RunSites {
             // session rather than asking to use it.
             (true, true) => Entry::Private(PrivateBecause::Public),
             (true, false) => Entry::Ask,
-            (false, _) => Entry::Session(self.yours(site)),
+            // Signed out of an account the run works on as the person: there
+            // is nothing of theirs to ask about, so it opens in their profile
+            // without a question; signing in there is their own act, and the
+            // sign-in is theirs in normal browsing too.
+            (false, _) if self.account.iter().any(|known| known == site) => {
+                Entry::Session(self.yours(site))
+            }
+            // Nothing of the person's to use: the page opens in Work's own
+            // website data, which keeps what the site remembers for Work.
+            (false, _) => Entry::Private(PrivateBecause::Public),
         }
     }
     /// Records the person's answer; Always also needs the standing write.
@@ -515,6 +580,17 @@ impl RunSites {
             self.yours(site)
         } else {
             SiteSession::Private
+        }
+    }
+    /// Whether the person let this run work on the site as them.
+    pub fn works_as_person(&self, site: &str) -> bool {
+        match self.decided.get(site) {
+            Some(decided) => decided.is_some(),
+            None => {
+                !self.private
+                    && !is_sensitive(site)
+                    && self.standing(site) == Some(WorkSiteAccessV1::Always)
+            }
         }
     }
     /// The decided sites, for the lead's view.
@@ -580,6 +656,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn screenshot_entry_constraint_only_removes_authority() {
+        let mut sites = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Never,
+            }],
+        );
+        assert!(sites.image_entry_blocked("example.com"));
+        assert!(!sites.image_entry_blocked("other.example"));
+        sites.answer("other.example", EntryAnswer::NotNow);
+        assert!(sites.image_entry_blocked("other.example"));
+        let allowed = RunSites::new(
+            false,
+            vec![WorkSiteEntryV1 {
+                site: "example.com".into(),
+                access: WorkSiteAccessV1::Always,
+            }],
+        );
+        assert!(!allowed.image_entry_blocked("example.com"));
+        // False is only absence of this refusal; it creates no screenshot choice.
+    }
+    #[test]
+    fn a_service_named_by_name_is_its_site() {
+        assert_eq!(
+            named_services("Open my Slack and Todoist, then my Gmail"),
+            ["slack.com", "todoist.com", "google.com"]
+        );
+        assert!(
+            named_services("a slack rope and linear algebra").contains(&"linear.app".to_owned())
+        );
+        assert!(named_services("Find a flat").is_empty());
+    }
+
+    #[test]
     fn work_site_entries_ask_once_and_respect_standing_answers() {
         let mut run = RunSites::new(
             false,
@@ -595,10 +706,10 @@ mod tests {
             ],
         );
         assert_eq!(run.entry("slack.com", true), Entry::Ask);
-        assert!(matches!(
+        assert_eq!(
             run.entry("fresh.com", false),
-            Entry::Session(SiteSession::Yours { .. })
-        ));
+            Entry::Private(PrivateBecause::Public)
+        );
         assert!(matches!(
             run.entry("notion.so", true),
             Entry::Session(SiteSession::Yours { .. })
@@ -637,16 +748,27 @@ mod tests {
             Entry::Private(PrivateBecause::Public)
         );
         run.public("kayak.com");
-        assert!(matches!(
+        assert_eq!(
             run.entry("kayak.com", false),
-            Entry::Session(SiteSession::Yours { .. })
-        ));
+            Entry::Private(PrivateBecause::Public)
+        );
         assert!(matches!(
             run.entry("notion.so", true),
             Entry::Session(SiteSession::Yours { .. })
         ));
         run.personal("lego.com");
         assert_eq!(run.entry("lego.com", true), Entry::Ask);
+        // Signed out of an account the run works on as the person: nothing
+        // to ask about; the page and the sign-in are in their own profile.
+        run.personal("linear.app");
+        assert!(matches!(
+            run.entry("linear.app", false),
+            Entry::Session(SiteSession::Yours { .. })
+        ));
+        assert_eq!(
+            run.entry("airbnb.com", false),
+            Entry::Private(PrivateBecause::Public)
+        );
         let mut private = RunSites::new(true, vec![]);
         assert_eq!(
             private.entry("slack.com", true),
@@ -657,8 +779,7 @@ mod tests {
             run.view(),
             [
                 ("figma.com".to_owned(), "private"),
-                ("fresh.com".to_owned(), "yours"),
-                ("kayak.com".to_owned(), "yours"),
+                ("linear.app".to_owned(), "yours"),
                 ("notion.so".to_owned(), "yours"),
                 ("slack.com".to_owned(), "yours"),
             ]
@@ -709,6 +830,7 @@ mod tests {
             Some("https://app.slack.com/client")
         );
         assert_eq!(entry_url("https://slack.com/archives"), None);
+        assert!(public_app("https://www.github.com/") && !public_app("https://mail.google.com"));
         assert_eq!(
             entry_url("https://calendar.google.com/"),
             Some("https://calendar.google.com/calendar/u/0/r/day")
@@ -738,10 +860,13 @@ mod tests {
             view_home("https://app.slack.com/client/T01ABCDEF/C07LAUNCH1"),
             None
         );
+        assert_eq!(view_home("https://linear.app/team/my-issues"), None);
+        assert_eq!(view_home("https://linear.app/login"), None);
         assert_eq!(
-            view_home("https://linear.app/team/my-issues"),
-            Some("https://linear.app/")
+            entry_url("https://linear.app/"),
+            Some("https://linear.app/login")
         );
+        assert_eq!(entry_url("https://linear.app/team/my-issues"), None);
         assert_eq!(view_home("https://mail.google.com/mail/u/0/"), None);
     }
 

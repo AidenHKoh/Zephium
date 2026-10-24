@@ -91,12 +91,19 @@ pub struct SemanticActionResult {
     pub(crate) baseline: SemanticObservationAcknowledgement,
     verified: SemanticVerifiedAction,
     update: SemanticActionStateUpdate,
+    target_role: Option<&'static str>,
 }
 
 impl SemanticActionResult {
     /// Independently established effect proof.
     pub const fn verified(&self) -> &SemanticVerifiedAction {
         &self.verified
+    }
+
+    /// The role of the control the step acted on, for the planner's own
+    /// record of its steps; never page text or typed values.
+    pub const fn target_role(&self) -> Option<&'static str> {
+        self.target_role
     }
 
     /// Whether the next model update is a bounded diff or full fresh snapshot.
@@ -114,6 +121,14 @@ impl SemanticActionResult {
         match &self.update {
             SemanticActionStateUpdate::Diff { diff, .. } => Some(diff),
             SemanticActionStateUpdate::FreshSnapshot { .. } => None,
+        }
+    }
+
+    /// Exact verified successor, including when the model received its diff.
+    pub const fn observation(&self) -> &SemanticObservation {
+        match &self.update {
+            SemanticActionStateUpdate::Diff { observation, .. }
+            | SemanticActionStateUpdate::FreshSnapshot { observation, .. } => observation,
         }
     }
 
@@ -317,7 +332,7 @@ pub fn finalize_accounted_semantic_action_result(
     }
     let (receipt, execution, settlement, verified) = accounted.into_parts();
     let result =
-        finish_semantic_action_result(verified, baseline, acknowledgement, current, budget);
+        finish_semantic_action_result(action, verified, baseline, acknowledgement, current, budget);
     Ok(AgentAccountedSemanticActionResult {
         receipt,
         execution,
@@ -337,6 +352,7 @@ pub(crate) fn finalize_semantic_action_result(
 ) -> Result<SemanticActionResult, SemanticActionResultError> {
     validate_semantic_action_result(action, &verified, baseline, acknowledgement, &current)?;
     Ok(finish_semantic_action_result(
+        action,
         verified,
         baseline,
         acknowledgement,
@@ -392,12 +408,14 @@ fn validate_semantic_action_result(
 }
 
 fn finish_semantic_action_result(
+    action: &SemanticPreparedAction,
     verified: SemanticVerifiedAction,
     baseline: &SemanticObservation,
     acknowledgement: &SemanticObservationAcknowledgement,
     current: SemanticPostActionObservation,
     budget: SemanticDiffBudget,
 ) -> SemanticActionResult {
+    let target_role = target_role_of(action, baseline);
     let current = current.observation;
     let update = match compute_semantic_diff(baseline, acknowledgement, &current, budget) {
         SemanticDiffOutcome::Diff(diff) => SemanticActionStateUpdate::Diff {
@@ -416,7 +434,19 @@ fn finish_semantic_action_result(
         baseline: acknowledgement.clone(),
         verified,
         update,
+        target_role,
     }
+}
+
+fn target_role_of(
+    action: &SemanticPreparedAction,
+    baseline: &SemanticObservation,
+) -> Option<&'static str> {
+    baseline
+        .frames()
+        .iter()
+        .find_map(|frame| action.target_node(frame))
+        .map(|node| crate::semantic_model::role_label(node.role()))
 }
 
 #[cfg(test)]

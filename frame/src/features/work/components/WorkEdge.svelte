@@ -36,7 +36,7 @@
 <script lang="ts">
   import { getContext, onMount } from "svelte";
   import { useStore, ViewportPortal, type EdgeProps } from "@xyflow/svelte";
-  import { watchStill } from "$shared/ui/presence/still";
+  import { watchStill } from "$shared/lib/still";
   import { canvasArrival } from "../lib/canvas-context";
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
   import { roundedPath } from "../lib/run/lines";

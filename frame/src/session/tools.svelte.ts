@@ -3,6 +3,8 @@ import { setPanelExtent } from "./sidebar-mode.svelte";
 import { events } from "$shared/ipc/native-events";
 export type ToolKind = "notes" | "tasks" | "ai" | "time" | "history" | "downloads" | "bookmarks";
 let tool = $state<ToolKind | null>(null);
+/** The assistant's conversation breathes wider than a list. */
+const extentOf = (kind: ToolKind) => (kind === "ai" ? 372 : 336);
 let queued: ToolKind | null = null;
 let stop: (() => void) | null = null;
 let generation = 0;
@@ -17,13 +19,9 @@ export function open(kind: ToolKind) {
     void browser.open(null);
     return;
   }
-  if (tool !== null) {
-    tool = kind;
-    return;
-  }
   // The column widens at once; native slides the page aside to make room.
   tool = kind;
-  setPanelExtent(336);
+  setPanelExtent(extentOf(kind));
 }
 export function close() {
   queued = null;

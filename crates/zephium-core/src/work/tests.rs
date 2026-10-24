@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn empty_local_evidence_does_not_prevent_the_next_agent_turn() {
+    use super::{agent::*, artifact::*, runtime::*};
+    let mut preview = WorkEvidencePreviewV1 {
+        version: 1,
+        link: WorkEvidenceLink {
+            extraction_id: 40.into(),
+            source_id: 1,
+        },
+        origin: "file:///Users/person/project".into(),
+        role: "file".into(),
+        text: String::new(),
+        truncated: false,
+        source_bytes: "0".into(),
+        link_destination: None,
+        source: WorkEvidenceSourceV1::File {
+            path: "/Users/person/project".into(),
+            name: "No search matches".into(),
+            file_kind: WorkFileKindV1::Search,
+        },
+    };
+    let disclose = |preview: &WorkEvidencePreviewV1| {
+        WorkAgentTurnDisclosure::try_new(
+            "Inspect this folder",
+            vec![],
+            vec![],
+            &[],
+            std::slice::from_ref(preview),
+            &[],
+            WorkAgentBudget {
+                turns_left: 3,
+                steps_left: 8,
+                browse_available: true,
+            },
+            WorkExecutionLimits {
+                model_tokens: 8000,
+                cost_micro_usd: 10000,
+                operations: 8,
+                timeout_seconds: 60,
+                max_workers: 1,
+            },
+            vec![],
+        )
+    };
+    assert!(disclose(&preview).is_ok());
+    preview.text = "\0".into();
+    assert!(disclose(&preview).is_err());
+    preview.text = "x".repeat(MAX_WORK_FILE_TEXT_BYTES + 1);
+    assert!(disclose(&preview).is_err());
+    preview.text.clear();
+    preview.source = WorkEvidenceSourceV1::NativeExtraction;
+    assert!(disclose(&preview).is_err());
+}
+
+#[test]
 fn native_link_handoff_admits_exact_observed_targets_without_promoting_prose() {
     use super::{agent::*, artifact::*, runtime::*};
     let target = "https://shop.example.test/products/42?variant=blue";
@@ -650,6 +704,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -660,9 +715,33 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     assert!(WorkAgentGrantV1 {
         max_turns: 0,
+        ..grant.clone()
+    }
+    .validate()
+    .is_err());
+    // Only a browser search names a fallback, whose evidence then belongs too.
+    let fallback = WorkSearchFallbackV1 {
+        provider: WorkSearchProvider::Native,
+        model: "anthropic/claude-haiku-4-5-20251001".into(),
+    };
+    let browser = WorkAgentGrantV1 {
+        provider: WorkSearchProvider::Browser,
+        model: "bing".into(),
+        search_fallback: Some(fallback.clone()),
+        ..grant.clone()
+    };
+    assert!(browser.validate().is_ok());
+    assert!(browser.admits_search(WorkSearchProvider::Browser, "bing"));
+    assert!(browser.admits_search(WorkSearchProvider::Native, &fallback.model));
+    assert!(!browser.admits_search(WorkSearchProvider::Browser, "google"));
+    assert!(!browser.admits_search(WorkSearchProvider::OpenAi, PUBLIC_SEARCH_MODEL));
+    assert!(!grant.admits_search(WorkSearchProvider::Native, &fallback.model));
+    assert!(WorkAgentGrantV1 {
+        search_fallback: Some(fallback),
         ..grant.clone()
     }
     .validate()
@@ -703,6 +782,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     });
     fact.status = WorkExecutionStatus::Running;
     let step = |id: u128, turn, kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn,
@@ -754,6 +834,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
                 title: "Svelte Flow".into(),
                 start_index: 0,
                 end_index: 11,
+                snippet: None,
             }],
             actual_input_tokens: 1000,
             actual_output_tokens: 200,
@@ -826,6 +907,26 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     fact.attempts[0].usage = Some(usage);
     fact.status = WorkExecutionStatus::NeedsReview;
     fact.validate(&plan, revision).unwrap();
+    // Finishing the answer must not make later cancellation or failed
+    // settlement impossible; the published artifacts remain available.
+    for (attempt_status, execution_status) in [
+        (WorkAttemptStatus::Cancelled, WorkExecutionStatus::Cancelled),
+        (WorkAttemptStatus::Failed, WorkExecutionStatus::Failed),
+        (
+            WorkAttemptStatus::OutcomeUnknown,
+            WorkExecutionStatus::Interrupted,
+        ),
+    ] {
+        let mut interrupted = fact.clone();
+        interrupted.attempts[0].status = attempt_status;
+        interrupted.attempts[0].usage =
+            (attempt_status != WorkAttemptStatus::OutcomeUnknown).then_some(usage);
+        interrupted.status = execution_status;
+        assert!(
+            interrupted.validate(&plan, revision).is_ok(),
+            "terminal settlement after Finish: {attempt_status:?}"
+        );
+    }
     let mut after_finish = fact.clone();
     after_finish.attempts[0].status = WorkAttemptStatus::Running;
     after_finish.attempts[0].usage = None;
@@ -1248,6 +1349,7 @@ fn agent_citations_round_trip_source_keys_without_model_renumbering() {
 fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     use super::{agent::*, runtime::*};
     let step = |kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: 9.into(),
         turn: 2,
@@ -1328,6 +1430,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         ],
     };
     let file = |kind, status| WorkStepFact {
+        model_fault: None,
         part: None,
         id: 10.into(),
         turn: 2,
@@ -1380,6 +1483,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     succeeded_read.evidence = Some(11.into());
     assert!(succeeded_read.validate().is_ok());
     let grant = |folders: Vec<&str>| WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: super::search::WorkSearchProvider::OpenAi,
         model: "gpt-5.6-luna".into(),
@@ -1390,6 +1494,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         accounts: Vec::new(),
         private: false,
         skill: None,
+        search_fallback: None,
     };
     assert!(grant(vec!["/Users/me/Documents/project"])
         .validate()
@@ -1435,8 +1540,51 @@ fn step_measurements_name_their_cost_basis_and_read_older_records() {
         read(r#","cost_exact":false"#).cost_basis,
         WorkCostBasis::Reserved
     );
+    assert_eq!(read("").settled_revision, None);
+    let sequenced = read(r#","settled_revision":"42""#);
+    assert_eq!(sequenced.settled_revision, WorkRevision::new(42));
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&serde_json::to_string(&sequenced).unwrap())
+            .unwrap(),
+        sequenced
+    );
     let priced = read(r#","cost_basis":"priced""#);
     assert_eq!(priced.cost_basis, WorkCostBasis::Priced);
+    assert_eq!(priced.outcome, None);
+    assert_eq!(priced.resolved_handoff, None);
+    for (wire, kind) in [
+        ("sign_in", runtime::WorkPageHandoffKindV1::SignIn),
+        ("check", runtime::WorkPageHandoffKindV1::Check),
+        (
+            "sign_in_and_check",
+            runtime::WorkPageHandoffKindV1::SignInAndCheck,
+        ),
+    ] {
+        let resolved = read(&format!(",\"resolved_handoff\":\"{wire}\""));
+        assert_eq!(resolved.resolved_handoff, Some(kind));
+        assert_eq!(
+            serde_json::from_str::<WorkStepMeasurementsV1>(
+                &serde_json::to_string(&resolved).unwrap()
+            )
+            .unwrap(),
+            resolved
+        );
+    }
+    assert!(runtime::WorkPageHandoffKindV1::SignInAndCheck
+        .includes(runtime::WorkPageHandoffKindV1::SignIn));
+    assert!(runtime::WorkPageHandoffKindV1::SignInAndCheck
+        .includes(runtime::WorkPageHandoffKindV1::Check));
+    assert!(!runtime::WorkPageHandoffKindV1::Check.includes(runtime::WorkPageHandoffKindV1::SignIn));
+    let checked = read(",\"outcome\":{\"kind\":\"needs_check\"}");
+    assert_eq!(
+        checked.outcome,
+        Some(runtime::WorkPageOutcomeV1::NeedsCheck)
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkStepMeasurementsV1>(&serde_json::to_string(&checked).unwrap())
+            .unwrap(),
+        checked
+    );
     let written = serde_json::to_string(&priced).unwrap();
     assert!(written.contains(r#""cost_basis":"priced""#) && !written.contains("cost_exact"));
     assert_eq!(
@@ -1479,6 +1627,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Postgres".into(),
             descriptor: None,
             homepage: homepage.map(Into::into),
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         items: vec![WorkFinding {
@@ -1568,6 +1718,7 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
         general_knowledge: true,
     };
     let publish = WorkStepFact {
+        model_fault: None,
         part: None,
         id: 3.into(),
         turn: 1,
@@ -1662,6 +1813,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Postgres".into(),
             descriptor: None,
             homepage: Some("https://www.postgresql.org/".into()),
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         criteria: vec![WorkCriterion {
@@ -1717,6 +1870,8 @@ fn a_knowledge_object_stands_without_evidence_but_never_claims_a_source() {
             name: "Starter".into(),
             descriptor: None,
             homepage: None,
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }],
         criteria: vec![WorkCriterion {
@@ -1902,6 +2057,8 @@ fn charts_of_nothing_second_findings_and_malformed_objects_are_refused_by_cause(
                 name: (*name).into(),
                 descriptor: None,
                 homepage: None,
+                record_media: None,
+                media_attempted: false,
                 image_candidates: vec![],
             })
             .collect(),
@@ -2031,6 +2188,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
         model: PUBLIC_SEARCH_MODEL.into(),
@@ -2041,6 +2199,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         accounts: vec![mail.clone()],
         private: false,
         skill: None,
+        search_fallback: None,
     };
     grant.validate().unwrap();
     for accounts in [
@@ -2101,10 +2260,12 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     );
     fact.validate(&plan, revision).unwrap();
     let read = |id: u128, url: &str, host: Option<&str>| WorkStepFact {
+        model_fault: None,
         part: None,
         id: id.into(),
         turn: 1,
         kind: WorkStepKindV1::Read {
+            verbatim: None,
             url: url.into(),
             collection: None,
             goal: None,
@@ -2225,6 +2386,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         environment: 1.into(),
         items: vec![],
         tabs: true,
+        blocks: false,
     }
     .validate()
     .is_ok());
@@ -2236,6 +2398,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         items: vec![],
         total_bytes: 0,
         tabs: vec![tab.clone(); MAX_CONTEXT_TABS],
+        blocks: false,
     };
     disclosure.validate().unwrap();
     assert!(disclosure.requires_review());
@@ -2316,6 +2479,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     assert_eq!(
         started.fetch,
         [WorkStepKindV1::Read {
+            verbatim: None,
             url: "https://slack.com/".into(),
             collection: None,
             goal: Some("Read #design since Monday".into()),
@@ -2334,6 +2498,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
     }
     let mut long = read(9, "https://slack.com/", None);
     long.kind = WorkStepKindV1::Read {
+        verbatim: None,
         url: "https://slack.com/".into(),
         collection: None,
         goal: Some("x".repeat(MAX_WORK_PAGE_GOAL_BYTES + 1)),
@@ -2363,6 +2528,7 @@ fn a_held_site_step_round_trips_and_its_decision_matches_its_status() {
         decision: None,
     };
     let mut step = WorkStepFact {
+        model_fault: None,
         part: None,
         id: 8u128.into(),
         turn: 1,

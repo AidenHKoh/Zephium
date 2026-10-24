@@ -69,19 +69,25 @@ mod decision_journal_tests;
 #[path = "work.rs"]
 pub(crate) mod work;
 pub use work::{
-    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController, AgentWorkEvent,
-    AgentWorkEventKind, AgentWorkExtractionTask, AgentWorkFailure, AgentWorkHandle,
-    AgentWorkHumanRequest, AgentWorkInitialReadiness, AgentWorkOutcome, AgentWorkRecovery,
-    AgentWorkRetainedBrowser, AgentWorkRetainedController, AgentWorkRetainedHandle,
-    AgentWorkRetainedOutcome, AgentWorkRetainedRecovery, AgentWorkRetainedResourceSpec,
-    AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess, AgentWorkTask,
-    AgentWorkTaskProgress, AgentWorkWaitingForHuman, MAX_AGENT_WORK_EVENTS,
+    AgentWorkClosedUnsuccessfully, AgentWorkContextSpec, AgentWorkController,
+    AgentWorkDecisionRoute, AgentWorkEvent, AgentWorkEventKind, AgentWorkExtractionTask,
+    AgentWorkFailure, AgentWorkHandle, AgentWorkHumanRequest, AgentWorkInitialReadiness,
+    AgentWorkOutcome, AgentWorkRecovery, AgentWorkRetainedBrowser, AgentWorkRetainedController,
+    AgentWorkRetainedHandle, AgentWorkRetainedOutcome, AgentWorkRetainedRecovery,
+    AgentWorkRetainedResourceSpec, AgentWorkRunInput, AgentWorkRunSettings, AgentWorkSuccess,
+    AgentWorkTask, AgentWorkTaskProgress, AgentWorkWaitingForHuman, MAX_AGENT_WORK_EVENTS,
 };
 
 /// This text-only/discarding vertical never needs Terra's catalog-wide 128k
 /// output ceiling. Keeping its own 8k ceiling bounds wasted generation and
 /// the conservative reservation without widening catalog authority.
 const TERRA_CONTROLLER_MAX_OUTPUT_TOKENS: u32 = 8_192;
+/// A chosen page model's reply ceiling, for its decisions and its mappings.
+/// Decisions measured 50-900 output tokens on GPT-6 Luna and up to about
+/// 1,600 with DeepSeek's reasoning; a mapping of a long list stays near 1,000.
+/// A runaway or lost reply is charged at this ceiling, so it stays well
+/// under the 8k the fixed-model paths keep.
+const CHOSEN_PAGE_MAX_OUTPUT_TOKENS: u32 = 4_096;
 /// Fixed Terra worst-case model-call reservation, in micro-USD.
 const TERRA_PROVIDER_EXACT_RESERVATION_COST_MICRO_USD: u64 = 778_304;
 /// Controller-level cap aligned with the transport's fixed request ceiling.
@@ -150,6 +156,31 @@ impl AgentBrowserModel {
             Self::Terra => TERRA_MODEL_REVISION,
             Self::Luna => LUNA_MODEL_REVISION,
             Self::Gpt6Luna => GPT6_LUNA_MODEL_REVISION,
+        }
+    }
+}
+
+/// How a browser session reaches its page model.
+pub enum AgentBrowserModelAccess {
+    /// The session's pinned catalog model through Zephium's fixed endpoint,
+    /// authenticated with this key.
+    Exact(AgentProviderCredential),
+    /// The person's chosen model through its own client. The session's
+    /// catalog model selection is then unused.
+    Chosen(zephium_agentic::AgentProviderModelClient),
+}
+
+impl From<AgentProviderCredential> for AgentBrowserModelAccess {
+    fn from(credential: AgentProviderCredential) -> Self {
+        Self::Exact(credential)
+    }
+}
+
+impl fmt::Debug for AgentBrowserModelAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Exact(_) => formatter.write_str("Exact([redacted])"),
+            Self::Chosen(model) => formatter.debug_tuple("Chosen").field(model).finish(),
         }
     }
 }
@@ -1959,15 +1990,22 @@ pub struct AgentBrowserSession {
     navigation: Option<zephium_agentic::AgentActiveNavigation>,
     navigation_refusal: Option<AgentBrowserNavigationDispatchRefusal>,
     navigation_receipt: Option<zephium_agentic::AgentNavigationReceipt>,
+    /// The settled navigation whose arrival already holds the account.
+    arrived: Option<zephium_agentic::ContextOperationJoin>,
     history_depth: usize,
     journal: Option<work::WorkJournal>,
     journal_receipts: usize,
     policy: AgentRunPolicy,
     transport: BrowserSessionTransport,
-    credential: Option<AgentProviderCredential>,
+    access: Option<AgentBrowserModelAccess>,
+    /// The chosen model's pricing identity; kept past `access` so a call
+    /// aborted at close still settles under its own schedule.
+    chosen: Option<zephium_agentic::AgentProviderModelClient>,
     attempt: Option<AgentProviderAttempt>,
     retained_terminal: Option<BrowserUnsettledTerminal>,
     extraction_output: Option<zephium_agentic::AgentProviderExtractionOutputCollector>,
+    /// The one corrective mapping call a run may make was spent.
+    extraction_corrected: bool,
     model_receipts: Vec<(
         AgentModelCallReceipt,
         zephium_agentic::AgentProviderInputMetricReceipt,
@@ -1979,6 +2017,8 @@ pub struct AgentBrowserSession {
     account: AgentContextAccountBinding,
     account_attestations: Vec<zephium_agentic::AgentAccountAttestationId>,
     next_call: u64,
+    /// The next model call is the page's last decision: extraction alone.
+    last_decision: bool,
     clock: Arc<dyn TerraControllerClock>,
     last_policy_at: AgentPolicyInstant,
     cancellation: AgentProviderCancellation,
@@ -1991,9 +2031,13 @@ pub struct AgentBrowserSession {
     action_proposal_failure: Option<crate::action::AgentBrowserActionProposalRefusal>,
     action_terminal: Option<zephium_agentic::SemanticActionBatchResult>,
     rejected_refusal: Option<zephium_agentic::AgentProviderActionRefusal>,
-    /// A site session hands an unverified draft step back to the model
-    /// instead of ending the page task.
-    pub(crate) unverified_local_writes: bool,
+    /// A site session hands every step the page survived back to the model
+    /// instead of ending the page task: an unverified draft, a commit
+    /// refused before it acted, or one whose outcome is unknown.
+    pub(crate) site_session: bool,
+    /// The pending fill types into a field that commits nothing: the page
+    /// rewriting it is the model's to see, not the person's to resolve.
+    pub(crate) rewritable_fill: bool,
     failure: Option<AgentBrowserProviderError>,
     deadline: Instant,
     turns: u8,
@@ -2080,13 +2124,13 @@ impl AgentBrowserSession {
     pub async fn start(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         observation: &zephium_agentic::SemanticObservation,
     ) -> Result<(Self, AgentBrowserProviderTurn), AgentBrowserProviderError> {
         Self::start_with_model(
             input,
             transport_config,
-            credential,
+            access,
             observation,
             AgentBrowserModel::Terra,
             AgentBrowserRetention::Stateless,
@@ -2099,12 +2143,12 @@ impl AgentBrowserSession {
     pub async fn start_with_model(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         observation: &zephium_agentic::SemanticObservation,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<(Self, AgentBrowserProviderTurn), AgentBrowserProviderError> {
-        let mut session = Self::try_new(input, transport_config, credential, model, retention)?;
+        let mut session = Self::try_new(input, transport_config, access, model, retention)?;
         let turn = match session.start_initial(observation).await {
             Ok(turn) => turn,
             Err(error) => {
@@ -2119,7 +2163,7 @@ impl AgentBrowserSession {
     pub fn try_new(
         input: TerraControllerRunInput,
         transport_config: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<Self, AgentBrowserProviderError> {
@@ -2128,7 +2172,7 @@ impl AgentBrowserSession {
         Self::try_new_with_transport(
             input,
             BrowserSessionTransport(transport),
-            credential,
+            access.into(),
             model,
             retention,
         )
@@ -2137,7 +2181,7 @@ impl AgentBrowserSession {
     fn try_new_with_transport(
         input: TerraControllerRunInput,
         transport: BrowserSessionTransport,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         model: AgentBrowserModel,
         retention: AgentBrowserRetention,
     ) -> Result<Self, AgentBrowserProviderError> {
@@ -2157,19 +2201,34 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Deadline);
         }
         let now = clock.now().map_err(|_| AgentBrowserProviderError::Clock)?;
-        let config = match model {
-            AgentBrowserModel::Terra => {
+        let chosen = match &access {
+            AgentBrowserModelAccess::Chosen(chosen) => Some(chosen.clone()),
+            AgentBrowserModelAccess::Exact(_) => None,
+        };
+        let config = match (&chosen, model) {
+            (Some(chosen), _) => chosen
+                .try_call_config(CHOSEN_PAGE_MAX_OUTPUT_TOKENS)
+                .map_err(|_| AgentBrowserProviderError::Catalog)?,
+            (None, AgentBrowserModel::Terra) => {
                 try_terra_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
-            AgentBrowserModel::Luna => {
+            (None, AgentBrowserModel::Luna) => {
                 try_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
-            AgentBrowserModel::Gpt6Luna => {
+            (None, AgentBrowserModel::Gpt6Luna) => {
                 try_gpt6_luna_provider_exact_call_config(TERRA_CONTROLLER_MAX_OUTPUT_TOKENS)
                     .map_err(|_| AgentBrowserProviderError::Catalog)?
             }
+        };
+        // The objective was admitted as a byte bound; a chosen model counts
+        // it under its own label.
+        let objective = match &chosen {
+            Some(_) => objective
+                .try_relabel_conservative(config.tokenizer())
+                .map_err(|_| AgentBrowserProviderError::Catalog)?,
+            None => objective,
         };
         let config = config.restrict_to_locate_and_act();
         let config = match retention {
@@ -2195,14 +2254,17 @@ impl AgentBrowserSession {
             navigation: None,
             navigation_refusal: None,
             navigation_receipt: None,
+            arrived: None,
             history_depth: 0,
             journal: None,
             journal_receipts: 0,
             transport,
-            credential: Some(credential),
+            access: Some(access),
+            chosen,
             attempt: None,
             retained_terminal: None,
             extraction_output: None,
+            extraction_corrected: false,
             model_receipts: Vec::with_capacity(usize::from(max_model_calls)),
             config,
             objective: Some(objective),
@@ -2211,6 +2273,7 @@ impl AgentBrowserSession {
             account,
             account_attestations,
             next_call,
+            last_decision: false,
             max_model_calls,
             max_actions,
             max_account_attestations,
@@ -2226,7 +2289,8 @@ impl AgentBrowserSession {
             action_proposal_failure: None,
             action_terminal: None,
             rejected_refusal: None,
-            unverified_local_writes: false,
+            site_session: false,
+            rewritable_fill: false,
             failure: None,
             deadline,
             turns: 0,
@@ -2250,7 +2314,7 @@ impl AgentBrowserSession {
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
         self.check_live()?;
         if self.initial_provider_started || self.objective.is_none() {
-            return Err(AgentBrowserProviderError::Continuation);
+            return Err(crate::continuation!());
         }
         let payload = encode_semantic_observation(
             observation,
@@ -2262,7 +2326,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = match action_authority {
             Some(authority) => AgentPreparedObservationRequest::try_openai_for_provider_exact_count_with_action_authority(
                 &mut self.policy,
@@ -2284,7 +2348,8 @@ impl AgentBrowserSession {
         }
         .map_err(AgentBrowserProviderError::from_request)?;
         self.initial_provider_started = true;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Sends independently verified action state as the exact tool result.
@@ -2311,7 +2376,7 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let (continuation, result) = transition
             .into_parts()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let (result, payload) = match result
             .diff()
             .map(|diff| {
@@ -2342,10 +2407,10 @@ impl AgentBrowserSession {
         let Some(diff) = result.diff() else {
             let result = result
                 .action_result()
-                .ok_or(AgentBrowserProviderError::Continuation)?;
+                .ok_or_else(|| crate::continuation!())?;
             let observation = result
                 .fresh_snapshot()
-                .ok_or(AgentBrowserProviderError::Continuation)?;
+                .ok_or_else(|| crate::continuation!())?;
             let payload = encode_semantic_observation(
                 observation,
                 SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
@@ -2362,13 +2427,15 @@ impl AgentBrowserSession {
                 action_authority,
             )
                 .map_err(AgentBrowserProviderError::from_request)?;
-            return self.drive(prepared.into_transport_input()).await;
+            return self
+                .drive(prepared.into_transport_input(), Some(observation))
+                .await;
         };
-        let payload = payload.ok_or(AgentBrowserProviderError::Continuation)?;
+        let payload = payload.ok_or_else(|| crate::continuation!())?;
         let continuation = match result.action_result() {
             Some(result) => continuation
                 .with_verified_action_progress(result)
-                .map_err(|_| AgentBrowserProviderError::Continuation)?,
+                .map_err(|_| crate::continuation!())?,
             None => continuation,
         };
         let bound = continuation
@@ -2379,13 +2446,17 @@ impl AgentBrowserSession {
                 payload,
                 action_authority,
             )
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
-        let draft = AgentProviderDiffRequestDraft::try_new(bound)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
+        let draft =
+            AgentProviderDiffRequestDraft::try_new(bound).map_err(|_| crate::continuation!())?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, request, diff)
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(
+            prepared.into_transport_input(),
+            result.action_result().map(|result| result.observation()),
+        )
+        .await
     }
 
     /// Executes one bounded semantic locate requested by the prior model turn.
@@ -2416,18 +2487,27 @@ impl AgentBrowserSession {
             .map(|snapshot| snapshot.frame().clone())
             .collect::<Vec<_>>();
         let query = query.into_locate_query();
-        let request = SemanticLocateRequest::bind(
-            SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?,
-            observation,
-            continuation.baseline(),
-            &frames,
-            query,
-            scope
-                .try_into_locate_scope()
-                .map_err(|_| AgentBrowserProviderError::LocateTool)?,
-            SemanticLocateBudget::STANDARD,
-        )
-        .map_err(|_| AgentBrowserProviderError::Locate)?;
+        let id = SemanticLocateId::new(locate_id).ok_or(AgentBrowserProviderError::Authority)?;
+        let bind = |scope| {
+            SemanticLocateRequest::bind(
+                id,
+                observation,
+                continuation.baseline(),
+                &frames,
+                query.clone(),
+                scope,
+                SemanticLocateBudget::STANDARD,
+            )
+            .ok()
+        };
+        // A scope the look cannot hold (a list named as a region) widens to
+        // the whole look the model holds rather than ending the page.
+        let request = scope
+            .try_into_locate_scope()
+            .ok()
+            .and_then(&bind)
+            .or_else(|| bind(zephium_agentic::SemanticLocateScope::Initial))
+            .ok_or(AgentBrowserProviderError::Locate)?;
         let result = locate_semantic_observation(observation, request)
             .map_err(|_| AgentBrowserProviderError::Locate)?;
         // A miss is a completed inspection of this bounded baseline. Deliver
@@ -2442,19 +2522,56 @@ impl AgentBrowserSession {
         let model_request = self.next_model_call_request()?;
         let bound = continuation
             .bind_locate_request(model_request, &self.config, &result, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
-        let draft = AgentProviderLocateRequestDraft::try_new(bound)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
+        let draft =
+            AgentProviderLocateRequestDraft::try_new(bound).map_err(|_| crate::continuation!())?;
         let prepared = draft
             .try_prepare_for_provider_exact_count(&mut self.policy, model_request, &result)
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     fn next_model_call_request(
         &mut self,
     ) -> Result<AgentModelCallRequest, AgentBrowserProviderError> {
-        self.next_model_call_request_with_budget(browser_call_budget(self.model)?)
+        let budget = match &self.chosen {
+            Some(chosen) => chosen_call_budget(
+                chosen,
+                &self.policy,
+                self.lease.lease(),
+                self.config.max_output_tokens(),
+            )?,
+            None => browser_call_budget(self.model)?,
+        };
+        self.next_model_call_request_with_budget(budget)
+    }
+
+    /// Whether the page model accepts screenshots.
+    pub(crate) fn supports_vision(&self) -> bool {
+        self.policy.model_images_available(self.lease.lease())
+            && self
+                .chosen
+                .as_ref()
+                .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
+    }
+    /// Existing local crop capability, independent of model-image preference.
+    pub(crate) fn supports_record_crops(&self) -> bool {
+        self.policy
+            .permits_screenshot_sensitivity(self.lease.lease())
+            && self
+                .chosen
+                .as_ref()
+                .is_none_or(zephium_agentic::AgentProviderModelClient::supports_vision)
+    }
+
+    /// Optional viewport attachment to extraction has a narrower transport
+    /// contract than the standalone Screenshot tool. Exact-count credentials
+    /// cannot use its provider-reported image reservation/encoding path.
+    pub(crate) fn supports_viewport_mapping(&self) -> bool {
+        self.supports_vision() && self.config.input_accounting_mode()
+            == zephium_agentic::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            && self.chosen.as_ref().is_some_and(zephium_agentic::AgentProviderModelClient::supports_vision)
     }
 
     fn next_model_call_request_with_budget(
@@ -2468,13 +2585,22 @@ impl AgentBrowserSession {
             .checked_add(1)
             .ok_or(AgentBrowserProviderError::Authority)?;
         let now = self.policy_now()?;
-        Ok(
+        let request =
             AgentModelCallRequest::new(call_id, self.lease.lease(), self.account, budget, now)
                 .with_remaining_native_actions(
                     self.max_actions
                         .saturating_sub(self.next_action.saturating_sub(1)),
-                ),
-        )
+                );
+        Ok(if std::mem::take(&mut self.last_decision) {
+            request.with_last_decision()
+        } else {
+            request
+        })
+    }
+
+    /// Offers the next model call extraction alone.
+    pub(crate) fn decide_last(&mut self) {
+        self.last_decision = true;
     }
 
     /// Continues one settled read proposal against the exact already-delivered
@@ -2493,21 +2619,31 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
         let (proposal, continuation) = turn.into_parts();
-        if !self.config.permits_baseline_read()
-            || !matches!(
-                proposal,
-                AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Initial)
-            )
-        {
+        if !self.config.permits_baseline_read() {
             return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind()));
         }
-        let read = read_semantic_observation(
-            observation,
-            SemanticReadAuthority::Acknowledged(continuation.baseline()),
-            captured_at,
-            SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
-        )
+        let read = match proposal {
+            AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Initial) => {
+                read_semantic_observation(
+                    observation,
+                    SemanticReadAuthority::Acknowledged(continuation.baseline()),
+                    captured_at,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::STANDARD,
+                )
+            }
+            AgentBrowserToolProposal::Read(AgentBrowserScopeProposal::Subtree(target)) => {
+                read_semantic_target(
+                    observation,
+                    continuation.baseline(),
+                    target,
+                    captured_at,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                    SemanticReadBudget::STANDARD,
+                )
+            }
+            _ => return Err(AgentBrowserProviderError::UnsupportedTool(proposal.kind())),
+        }
         .map_err(AgentBrowserProviderError::Read)?;
         let payload = encode_semantic_read(
             &read,
@@ -2518,13 +2654,14 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let bound = continuation
             .bind_read_request(request, &self.config, &read, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderReadContinuationRequestDraft::try_new(bound)
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, &read)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Delivers one policy-admitted, canonical viewport capture requested by
@@ -2558,13 +2695,14 @@ impl AgentBrowserSession {
         let request = self.next_model_call_request()?;
         let bound = continuation
             .bind_screenshot_request(request, &self.config, screenshot)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderScreenshotRequestDraft::try_new(bound)
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, observation)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     /// Continues after one bounded standalone wait. The semantic runtime, not
@@ -2620,7 +2758,7 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::from_request)?;
         let input = prepared.into_transport_input();
         let observation = result.into_observation();
-        let turn = self.drive(input).await?;
+        let turn = self.drive(input, Some(&observation)).await?;
         Ok((turn, observation))
     }
 
@@ -2656,12 +2794,13 @@ impl AgentBrowserSession {
             captured_at,
             schema,
             None,
+            None,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn extract_from_with_evidence<'a>(
+    pub(super) async fn extract_from_with_evidence<'a>(
         &mut self,
         turn: AgentBrowserProviderTurn,
         observation: &'a zephium_agentic::SemanticObservation,
@@ -2670,9 +2809,17 @@ impl AgentBrowserSession {
         captured_at: zephium_agentic::SemanticCaptureInstant,
         schema: &zephium_agentic::SemanticExtractionSchema,
         evidence: Option<&'a zephium_agentic::SemanticRetainedReadEvidence>,
+        viewport: Option<&zephium_agentic::SemanticScreenshot>,
     ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
         use zephium_agentic::*;
         self.check_live()?;
+        // Pixels reach only a model that sees, only a whole-look mapping, and
+        // only within the image allowance that keeps the request admitted.
+        let viewport = viewport.filter(|screenshot| {
+            self.supports_viewport_mapping()
+                && previous.is_none()
+                && screenshot.as_png().len() <= MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES
+        });
         if self.turns >= self.max_model_calls {
             return Err(AgentBrowserProviderError::TurnLimit);
         }
@@ -2713,21 +2860,38 @@ impl AgentBrowserSession {
                 ))
                 .map_err(|_| AgentBrowserProviderError::Journal)?;
         }
-        let read = zephium_agentic::read_semantic_observation_for_schema(
-            observation,
-            match previous {
-                Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
-                    previous,
-                    acknowledgement: continuation.baseline(),
-                },
-                None => SemanticReadAuthority::Acknowledged(continuation.baseline()),
+        let authority = match previous {
+            Some(previous) => SemanticReadAuthority::AcknowledgedExpansion {
+                previous,
+                acknowledgement: continuation.baseline(),
             },
-            captured_at,
-            SemanticReadSensitivityLimit::PublicOnly,
-            SemanticReadBudget::STANDARD,
-            schema,
-        )
+            None => SemanticReadAuthority::Acknowledged(continuation.baseline()),
+        };
+        let read = if viewport.is_some() {
+            zephium_agentic::read_semantic_observation_for_schema_with_viewport_image(
+                observation,
+                authority,
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                schema.extraction_read_budget(),
+                schema,
+            )
+        } else {
+            zephium_agentic::read_semantic_observation_for_schema(
+                observation,
+                authority,
+                captured_at,
+                SemanticReadSensitivityLimit::PublicOnly,
+                schema.extraction_read_budget(),
+                schema,
+            )
+        }
         .map_err(AgentBrowserProviderError::Read)?;
+        let viewport = viewport.filter(|_| {
+            read.fragments()
+                .iter()
+                .any(|fragment| fragment.field() == SemanticReadField::ViewportImage)
+        });
         let read = match evidence {
             Some(evidence) => evidence
                 .merge_for_extraction(read)
@@ -2740,22 +2904,161 @@ impl AgentBrowserSession {
         if read.fragments().is_empty() && schema.fields().iter().any(|field| field.required()) {
             return Err(AgentBrowserProviderError::NoExtractionEvidence);
         }
-        let payload = encode_semantic_extraction_request(
-            schema,
-            &read,
-            SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
-        )
-        .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
-        .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let payload =
+            encode_semantic_extraction_request(schema, &read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
         let request = self.next_model_call_request()?;
+        let baseline = continuation.baseline().clone();
+        let subtree = previous.is_some();
         let bound = continuation
             .bind_extraction_request(request, &self.config, schema, &read, payload)
-            .map_err(|_| AgentBrowserProviderError::Continuation)?;
+            .map_err(|_| crate::continuation!())?;
         let prepared = AgentProviderExtractionRequestDraft::try_new(bound)
+            .and_then(|draft| match viewport {
+                Some(screenshot) => draft.with_viewport_image(&read, screenshot),
+                None => Ok(draft),
+            })
             .and_then(|draft| {
                 draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
             })
             .map_err(AgentBrowserProviderError::from_request)?;
+        if viewport.is_some() {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ViewportImageAttached)
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
+        let (input, output) = prepared.into_transport_parts();
+        let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+        let mapped = self
+            .extraction_output
+            .take()
+            .ok_or(AgentBrowserProviderError::Authority)?
+            .finish(
+                &terminal,
+                schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            );
+        match mapped {
+            Err(AgentProviderExtractionOutputError::Extraction(refusal)) if !subtree => {
+                self.map_told(Some(refusal), &baseline, schema, &read, viewport)
+                    .await
+            }
+            // Nothing mapped from evidence the planner chose to extract
+            // from: the mapper is told so and maps once more.
+            Ok(result) if !subtree && result.is_empty() => {
+                match self
+                    .map_told(None, &baseline, schema, &read, viewport)
+                    .await
+                {
+                    Ok(retried) => Ok(retried),
+                    Err(_) if self.failure.is_none() => Ok(result),
+                    Err(error) => Err(error),
+                }
+            }
+            mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
+        }
+    }
+
+    /// One corrective mapping of the same delivered schema and read after
+    /// Rust refused the first output, telling the model exactly why. An
+    /// unusable mapping is a model slip, not a page failure. The call is the
+    /// run's single call past its allowance, priced and admitted like any
+    /// other; when it cannot be admitted, the first refusal stands.
+    async fn map_after_refusal<'a>(
+        &mut self,
+        refusal: zephium_agentic::SemanticExtractionError,
+        baseline: &zephium_agentic::SemanticObservationAcknowledgement,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        read: &zephium_agentic::SemanticReadResult<'a>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        self.map_told(Some(refusal), baseline, schema, read, None)
+            .await
+    }
+
+    /// One corrective mapping, told why: after Rust refused the first
+    /// output (`refusal`), or after it admitted nothing at all (`None`).
+    async fn map_told<'a>(
+        &mut self,
+        refusal: Option<zephium_agentic::SemanticExtractionError>,
+        baseline: &zephium_agentic::SemanticObservationAcknowledgement,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        read: &zephium_agentic::SemanticReadResult<'a>,
+        viewport: Option<&zephium_agentic::SemanticScreenshot>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        let refused = match refusal {
+            Some(refusal) => AgentBrowserProviderError::Extraction(
+                AgentProviderExtractionOutputError::Extraction(refusal),
+            ),
+            None => AgentBrowserProviderError::NoExtractionEvidence,
+        };
+        if self.extraction_corrected
+            || refusal.is_some_and(|refusal| !semantic_extraction_refusal_is_retryable(refusal))
+            || read.fragments().is_empty()
+        {
+            return Err(refused);
+        }
+        self.extraction_corrected = true;
+        self.check_live()?;
+        let Some(prior) = self.model_receipts.last().map(|(_, input)| *input) else {
+            return Err(refused);
+        };
+        let Ok(payload) =
+            encode_semantic_extraction_request(schema, read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+        else {
+            return Err(refused);
+        };
+        let Ok(request) = self.next_model_call_request() else {
+            return Err(refused);
+        };
+        let Some(objective) = self.objective.as_ref() else {
+            return Err(refused);
+        };
+        let draft = match refusal {
+            Some(refusal) => AgentProviderExtractionRequestDraft::try_after_refusal(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+                refusal,
+            ),
+            None => AgentProviderExtractionRequestDraft::try_after_empty(
+                baseline,
+                prior,
+                request,
+                &self.config,
+                objective,
+                payload,
+                schema,
+                read,
+            ),
+        };
+        let Ok(prepared) = draft
+            .and_then(|draft| match viewport {
+                Some(screenshot) => draft.with_viewport_image(read, screenshot),
+                None => Ok(draft),
+            })
+            .and_then(|draft| {
+                draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, read)
+            })
+        else {
+            return Err(refused);
+        };
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ExtractionCorrected)
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        self.max_model_calls = self.max_model_calls.max(self.turns.saturating_add(1));
         let (input, output) = prepared.into_transport_parts();
         let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
         self.extraction_output
@@ -2764,10 +3067,116 @@ impl AgentBrowserSession {
             .finish(
                 &terminal,
                 schema,
-                &read,
+                read,
                 SemanticReadSensitivityLimit::PublicOnly,
             )
             .map_err(AgentBrowserProviderError::Extraction)
+    }
+
+    pub(super) async fn extract_owned_initial<'a>(
+        &mut self,
+        observation: &'a zephium_agentic::SemanticObservation,
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        if self.initial_provider_started {
+            return Err(crate::continuation!());
+        }
+        self.extract_owned_observation(observation, captured_at, schema, None)
+            .await
+    }
+
+    /// Maps fresh public evidence after bounded native loading; the existing
+    /// manifest, account and read admission still authorize every source.
+    pub(super) async fn extract_owned_observation<'a>(
+        &mut self,
+        observation: &'a zephium_agentic::SemanticObservation,
+        captured_at: zephium_agentic::SemanticCaptureInstant,
+        schema: &zephium_agentic::SemanticExtractionSchema,
+        retained: Option<&'a zephium_agentic::SemanticRetainedReadEvidence>,
+    ) -> Result<zephium_agentic::SemanticExtractionResult<'a>, AgentBrowserProviderError> {
+        use zephium_agentic::*;
+        self.check_live()?;
+        // `site_session` is a site session's mode, not a record of
+        // writes: a read of what loading showed stays a read in either mode.
+        if self.objective.is_none() {
+            return Err(crate::continuation!());
+        }
+        if self.turns >= self.max_model_calls {
+            return Err(AgentBrowserProviderError::TurnLimit);
+        }
+        let (baseline, _) = SemanticObservationAcknowledgement::whole_page_scope(observation)
+            .ok_or(AgentBrowserProviderError::Authority)?;
+        self.policy
+            .admit_owned_observation(observation, self.account)
+            .map_err(|_| AgentBrowserProviderError::Authority)?;
+        let read = read_semantic_observation_for_schema(
+            observation,
+            SemanticReadAuthority::Acknowledged(&baseline),
+            captured_at,
+            SemanticReadSensitivityLimit::PublicOnly,
+            schema.extraction_read_budget(),
+            schema,
+        )
+        .map_err(AgentBrowserProviderError::Read)?;
+        let read = match retained {
+            Some(retained) => retained
+                .merge_for_extraction(read)
+                .map_err(AgentBrowserProviderError::Read)?,
+            None => read,
+        };
+        if read.fragments().is_empty() {
+            return Err(AgentBrowserProviderError::NoExtractionEvidence);
+        }
+        let payload =
+            encode_semantic_extraction_request(schema, &read, schema.extraction_encoding_budget())
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
+        let request = self.next_model_call_request()?;
+        let prepared = AgentProviderExtractionRequestDraft::try_owned_read(
+            &self.policy,
+            self.lease,
+            request,
+            &baseline,
+            schema,
+            &read,
+            &self.config,
+            self.objective
+                .as_ref()
+                .ok_or_else(|| crate::continuation!())?,
+            payload,
+        )
+        .and_then(|draft| {
+            draft.try_prepare_for_provider_exact_count(&mut self.policy, request, schema, &read)
+        })
+        .map_err(AgentBrowserProviderError::from_request)?;
+        self.initial_provider_started = true;
+        if let Some(journal) = &self.journal {
+            journal
+                .emit(work::AgentWorkEventKind::ToolProposed(
+                    AgentBrowserToolKind::Extract,
+                ))
+                .map_err(|_| AgentBrowserProviderError::Journal)?;
+        }
+        let (input, output) = prepared.into_transport_parts();
+        let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
+        let mapped = self
+            .extraction_output
+            .take()
+            .ok_or(AgentBrowserProviderError::Authority)?
+            .finish(
+                &terminal,
+                schema,
+                &read,
+                SemanticReadSensitivityLimit::PublicOnly,
+            );
+        match mapped {
+            Err(AgentProviderExtractionOutputError::Extraction(refusal)) => {
+                self.map_after_refusal(refusal, &baseline, schema, &read)
+                    .await
+            }
+            mapped => mapped.map_err(AgentBrowserProviderError::Extraction),
+        }
     }
 
     pub(super) async fn extract_located<'a>(
@@ -2783,7 +3192,7 @@ impl AgentBrowserSession {
             let payload = encode_semantic_extraction_request(
                 schema,
                 read,
-                SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+                schema.extraction_encoding_budget(),
             )
             .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
             .map_err(AgentBrowserProviderError::InitialEncoding)?;
@@ -2800,7 +3209,7 @@ impl AgentBrowserSession {
                 &self.config,
                 self.objective
                     .as_ref()
-                    .ok_or(AgentBrowserProviderError::Continuation)?,
+                    .ok_or_else(|| crate::continuation!())?,
                 payload,
             )
             .and_then(|draft| {
@@ -2809,18 +3218,23 @@ impl AgentBrowserSession {
             .map_err(AgentBrowserProviderError::from_request)?;
             let (input, output) = prepared.into_transport_parts();
             let (terminal, _, _) = self.drive_terminal(input, Some(output)).await?;
-            Some(
-                self.extraction_output
-                    .take()
-                    .ok_or(AgentBrowserProviderError::Authority)?
-                    .finish(
-                        &terminal,
-                        schema,
-                        read,
-                        SemanticReadSensitivityLimit::PublicOnly,
-                    )
-                    .map_err(AgentBrowserProviderError::Extraction)?,
-            )
+            let mapped = self
+                .extraction_output
+                .take()
+                .ok_or(AgentBrowserProviderError::Authority)?
+                .finish(
+                    &terminal,
+                    schema,
+                    read,
+                    SemanticReadSensitivityLimit::PublicOnly,
+                );
+            Some(match mapped {
+                Err(AgentProviderExtractionOutputError::Extraction(refusal)) => {
+                    self.map_after_refusal(refusal, located.baseline(), schema, read)
+                        .await?
+                }
+                mapped => mapped.map_err(AgentBrowserProviderError::Extraction)?,
+            })
         } else {
             None
         };
@@ -2833,19 +3247,66 @@ impl AgentBrowserSession {
 
     async fn drive(
         &mut self,
-        input: AgentProviderTransportInput,
+        mut request_input: AgentProviderTransportInput,
+        observation: Option<&zephium_agentic::SemanticObservation>,
     ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
-        let (terminal, input, provider_elapsed) = self.drive_terminal(input, None).await?;
-        let receipt = terminal.receipt();
-        let turn = terminal
-            .into_tool_turn()
-            .ok_or(AgentBrowserProviderError::Proposal)?;
-        Ok(AgentBrowserProviderTurn {
-            receipt,
-            input,
-            turn,
-            provider_elapsed,
-        })
+        let started = Instant::now();
+        let mut repaired = false;
+        loop {
+            let (mut terminal, input, _) = self.drive_terminal(request_input, None).await?;
+            if let Some(refusal) = terminal.take_rejected_action() {
+                let error = refusal.error();
+                if let Some(journal) = &self.journal {
+                    journal
+                        .emit(work::AgentWorkEventKind::ModelActionRejected(error))
+                        .map_err(|_| AgentBrowserProviderError::Journal)?;
+                }
+                if repaired || observation.is_none() {
+                    return Err(AgentBrowserProviderError::ModelProtocol(
+                        zephium_agentic::AgentProviderProtocolError::ToolContract(
+                            refusal.kind(),
+                            error,
+                        ),
+                        None,
+                    ));
+                }
+                self.check_live()?;
+                if self.turns >= self.max_model_calls {
+                    return Err(AgentBrowserProviderError::TurnLimit);
+                }
+                let observation = observation.ok_or_else(|| crate::continuation!())?;
+                let payload = encode_semantic_observation(
+                    observation,
+                    SemanticModelEncodingBudget::INITIAL_PROVIDER_EXACT_CONSERVATIVE,
+                )
+                .and_then(|encoded| encoded.admit_conservative_utf8(self.config.tokenizer()))
+                .map_err(AgentBrowserProviderError::InitialEncoding)?;
+                let request = self.next_model_call_request()?;
+                let prepared =
+                    AgentPreparedObservationRequest::try_rejected_action_for_provider_exact_count(
+                        &mut self.policy,
+                        request,
+                        observation,
+                        payload,
+                        self.config.clone(),
+                        refusal,
+                    )
+                    .map_err(AgentBrowserProviderError::from_request)?;
+                request_input = prepared.into_transport_input();
+                repaired = true;
+                continue;
+            }
+            let receipt = terminal.receipt();
+            let turn = terminal
+                .into_tool_turn()
+                .ok_or(AgentBrowserProviderError::Proposal)?;
+            return Ok(AgentBrowserProviderTurn {
+                receipt,
+                input,
+                turn,
+                provider_elapsed: started.elapsed(),
+            });
+        }
     }
 
     async fn drive_terminal(
@@ -2877,7 +3338,7 @@ impl AgentBrowserSession {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::Transport);
         }
-        let Some(credential) = self.credential.as_ref() else {
+        let Some(access) = self.access.as_ref() else {
             let _ = input.cancel(&mut self.policy);
             return Err(AgentBrowserProviderError::Cancelled);
         };
@@ -2885,10 +3346,19 @@ impl AgentBrowserSession {
             .turns
             .checked_add(1)
             .ok_or(AgentBrowserProviderError::TurnLimit)?;
+        let chosen = matches!(access, AgentBrowserModelAccess::Chosen(_));
         self.attempt = Some(
-            self.transport
-                .try_admit(input, &mut self.policy, credential, cancellation)
-                .map_err(|_| AgentBrowserProviderError::Transport)?,
+            match access {
+                AgentBrowserModelAccess::Exact(credential) => {
+                    self.transport
+                        .try_admit(input, &mut self.policy, credential, cancellation)
+                }
+                AgentBrowserModelAccess::Chosen(model) => {
+                    self.transport
+                        .try_admit_model(input, &mut self.policy, model, cancellation)
+                }
+            }
+            .map_err(|_| AgentBrowserProviderError::Transport)?,
         );
         if let Some(output) = output {
             let evidence = self
@@ -2912,6 +3382,91 @@ impl AgentBrowserSession {
                 .model_active(call)
                 .map_err(|_| AgentBrowserProviderError::Journal)?;
         }
+        let result = if chosen {
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(self.deadline),
+                self.attempt
+                    .as_mut()
+                    .ok_or(AgentBrowserProviderError::Transport)?
+                    .execute_model_client(|batch| {
+                        if self
+                            .extraction_output
+                            .as_mut()
+                            .is_some_and(|output| output.push_batch(batch).is_err())
+                        {
+                            AgentProviderBatchDisposition::Cancel
+                        } else {
+                            AgentProviderBatchDisposition::Continue
+                        }
+                    }),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) | Err(_) => self
+                    .attempt
+                    .take()
+                    .ok_or(AgentBrowserProviderError::Transport)?
+                    .abort(AgentProviderAbortReason::HostDeadline)
+                    .map_err(|_| AgentBrowserProviderError::Transport)?,
+            }
+        } else {
+            self.drive_exact_attempt().await?
+        };
+        drop(self.attempt.take());
+        if let Some(facts) = result
+            .model_reply()
+            .filter(|facts| facts.dropped_tool_calls() != 0 || facts.dropped_text_bytes() != 0)
+        {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ModelReplyTrimmed {
+                        dropped_tool_calls: facts.dropped_tool_calls(),
+                        dropped_text_bytes: facts.dropped_text_bytes(),
+                    })
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
+        if let Some(times) = result
+            .model_reply()
+            .map(|facts| facts.asked_again())
+            .filter(|times| *times != 0)
+        {
+            if let Some(journal) = &self.journal {
+                journal
+                    .emit(work::AgentWorkEventKind::ModelAskedAgain(times))
+                    .map_err(|_| AgentBrowserProviderError::Journal)?;
+            }
+        }
+        if let Some(facts) = result.model_reply() {
+            if let Some(journal) = &self.journal {
+                for error in facts.action_rejections().into_iter().flatten() {
+                    journal
+                        .emit(work::AgentWorkEventKind::ModelActionRejected(error))
+                        .map_err(|_| AgentBrowserProviderError::Journal)?;
+                }
+            }
+        }
+        let input = result.input_metric_receipt();
+        let disclosure = result.disclosure_stage();
+        let terminal = settle_browser_terminal(
+            result,
+            disclosure,
+            input,
+            self.model,
+            self.chosen.as_ref(),
+            &mut self.policy,
+            &mut self.retained_terminal,
+            &mut self.model_receipts,
+        );
+        self.record_model_receipts()?;
+        Ok((terminal?, input, provider_started.elapsed()))
+    }
+
+    /// Counts then drives one fixed-endpoint OpenAI attempt.
+    async fn drive_exact_attempt(
+        &mut self,
+    ) -> Result<AgentProviderTransportResult, AgentBrowserProviderError> {
         let counted = tokio::time::timeout_at(
             tokio::time::Instant::from_std(self.deadline),
             self.attempt
@@ -2965,20 +3520,7 @@ impl AgentBrowserSession {
                 .abort(AgentProviderAbortReason::HostDeadline)
                 .map_err(|_| AgentBrowserProviderError::Transport)?,
         };
-        drop(self.attempt.take());
-        let input = result.input_metric_receipt();
-        let disclosure = result.disclosure_stage();
-        let terminal = settle_browser_terminal(
-            result,
-            disclosure,
-            input,
-            self.model,
-            &mut self.policy,
-            &mut self.retained_terminal,
-            &mut self.model_receipts,
-        );
-        self.record_model_receipts()?;
-        Ok((terminal?, input, provider_started.elapsed()))
+        Ok(result)
     }
 
     /// Seals admission and returns all run owners, even when drain refuses.
@@ -3011,7 +3553,7 @@ impl AgentBrowserSession {
         self.cancellation.cancel();
         self.action_executions.seal();
         self.action_settlements.seal();
-        drop(self.credential.take());
+        drop(self.access.take());
         self.decisions.take();
         drop(self.objective.take());
         let mut close_failure = None;
@@ -3025,6 +3567,7 @@ impl AgentBrowserSession {
                         disclosure,
                         input,
                         self.model,
+                        self.chosen.as_ref(),
                         &mut self.policy,
                         &mut self.retained_terminal,
                         &mut self.model_receipts,
@@ -3386,7 +3929,7 @@ impl AgentBrowserSession {
             .action
             .take()
             .ok_or(AgentBrowserProviderError::ActionPending)?;
-        let (terminal, refusal) = match action.into_rejected_refusal() {
+        let (terminal, refusal) = match action.into_rejected_refusal(self.site_session) {
             Ok((terminal, refusal)) => (terminal, Some(refusal)),
             Err(action) => match action.into_rejected_batch() {
                 Ok(terminal) => (terminal, None),
@@ -3409,7 +3952,7 @@ impl AgentBrowserSession {
             return Err(AgentBrowserProviderError::Journal);
         }
         self.action_terminal.take();
-        // A rejected read never ran: the model may choose again on a fresh
+        // A rejected step never ran: the model may choose again on a fresh
         // observation. Any other rejection closes its debt and stays fatal.
         if let Some(refusal) = refusal {
             self.failure = None;
@@ -3433,6 +3976,16 @@ impl AgentBrowserSession {
         self.action
             .as_ref()
             .is_some_and(|action| action.awaits_page_change(current, now))
+    }
+
+    pub(crate) fn action_may_still_draw(
+        &self,
+        current: &zephium_agentic::SemanticObservation,
+        now: zephium_agentic::SemanticSettleInstant,
+    ) -> bool {
+        self.action
+            .as_ref()
+            .is_some_and(|action| action.may_still_draw(current, now))
     }
 
     /// Independently verifies and accounts the pending action before continuation.
@@ -3498,11 +4051,21 @@ impl AgentBrowserSession {
             );
         match result {
             Err(error @ crate::AgentBrowserActionError::Failed(failure))
-                if crate::action::refused_before_acting(failure) =>
+                if crate::action::refused_before_acting(failure)
+                    || matches!(
+                        failure,
+                        zephium_agentic::SemanticActionFailure::NeedsHuman
+                            | zephium_agentic::SemanticActionFailure::Timeout
+                    ) =>
             {
                 if let Some(refusal) = self.covered_refusal()? {
                     self.rejected_refusal = Some(refusal);
                     return Err(AgentBrowserProviderError::ActionRejected(error));
+                }
+                if crate::action::refused_before_acting(failure) {
+                    // Code-owned reads have no provider continuation. Their exact
+                    // accounted refusal still needs journaling before failed closure.
+                    self.close_failed_owned_action()?;
                 }
                 Err(AgentBrowserProviderError::Action(error))
             }
@@ -3510,9 +4073,9 @@ impl AgentBrowserSession {
         }
     }
 
-    /// Closes a failed code-owned read so the next action may start. False
-    /// when the action is not one; the caller then fails as before.
-    pub(crate) fn close_failed_owned_read(&mut self) -> Result<bool, AgentBrowserProviderError> {
+    /// Journals a settled code-owned read failure or a local write refused
+    /// before acting. Pending or uncertain writes remain owned and refuse closure.
+    pub(crate) fn close_failed_owned_action(&mut self) -> Result<bool, AgentBrowserProviderError> {
         if self.action_executions.status().pending() != 0
             || self.action_settlements.status().pending() != 0
             || self.action_terminal.is_some()
@@ -3524,7 +4087,7 @@ impl AgentBrowserSession {
             self.failure = None;
             return Ok(true);
         };
-        let terminal = match action.into_failed_owned_read() {
+        let terminal = match action.into_failed_owned_action() {
             Ok(terminal) => terminal,
             Err(action) => {
                 self.action = Some(*action);
@@ -3559,13 +4122,14 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_covered_refusal() {
-            Ok(parts) => parts,
-            Err(action) => {
-                self.action = Some(*action);
-                return Ok(None);
-            }
-        };
+        let (terminal, refusal) =
+            match action.into_covered_refusal(self.rewritable_fill, self.site_session) {
+                Ok(parts) => parts,
+                Err(action) => {
+                    self.action = Some(*action);
+                    return Ok(None);
+                }
+            };
         self.action_terminal = Some(terminal);
         let recorded = self.journal.as_mut().is_some_and(|journal| {
             journal
@@ -3652,8 +4216,7 @@ impl AgentBrowserSession {
         let Some(action) = self.action.take() else {
             return Ok(None);
         };
-        let (terminal, refusal) = match action.into_unverified_refusal(self.unverified_local_writes)
-        {
+        let (terminal, refusal) = match action.into_unverified_refusal(self.site_session) {
             Ok(parts) => parts,
             Err(action) => {
                 self.action = Some(*action);
@@ -3746,7 +4309,7 @@ impl AgentBrowserSession {
             Err(refusal) => {
                 self.action_refusal = Some(refusal);
                 self.failure = Some(AgentBrowserProviderError::Continuation);
-                Err(AgentBrowserProviderError::Continuation)
+                Err(crate::continuation!())
             }
         }
     }
@@ -3786,6 +4349,7 @@ enum BrowserUnsettledTerminal {
     Immediate(AgentProviderImmediateSettlement),
     Terra(TerraProviderTerminalOwner),
     Luna(zephium_agent_model_catalog::LunaProviderTerminalOwner),
+    Chosen(Box<zephium_agentic::AgentProviderPricingSettlement>),
 }
 
 impl BrowserUnsettledTerminal {
@@ -3794,6 +4358,7 @@ impl BrowserUnsettledTerminal {
             Self::Immediate(value) => std::mem::size_of_val(value),
             Self::Terra(value) => std::mem::size_of_val(value),
             Self::Luna(value) => std::mem::size_of_val(value),
+            Self::Chosen(value) => std::mem::size_of_val(value.as_ref()),
         }
     }
 }
@@ -3891,11 +4456,60 @@ fn browser_call_budget(
     .map_err(|_| AgentBrowserProviderError::Catalog)
 }
 
+/// The largest call the lease can still afford on a chosen model: every input
+/// token at the highest input rate, the full output ceiling, and no more input
+/// than the model's pricing range.
+fn chosen_call_budget(
+    chosen: &zephium_agentic::AgentProviderModelClient,
+    policy: &AgentRunPolicy,
+    lease: zephium_agentic::AgentPlanLeaseId,
+    output: u32,
+) -> Result<AgentModelCallBudget, AgentBrowserProviderError> {
+    let cost = policy
+        .remaining_cost_micro_usd(lease)
+        .map_err(AgentBrowserProviderError::RequestPolicy)?;
+    let tokens = policy
+        .remaining_model_tokens(lease)
+        .map_err(AgentBrowserProviderError::RequestPolicy)?;
+    let affordable = |input: u64| {
+        chosen
+            .reservation_cost_micro_usd(input, u64::from(output))
+            .is_some_and(|reserved| reserved <= cost)
+    };
+    let (mut low, mut high) = (
+        0,
+        chosen
+            .max_input_tokens()
+            .min(tokens.saturating_sub(u64::from(output))),
+    );
+    if !affordable(low) {
+        return Err(AgentBrowserProviderError::RequestPolicy(
+            zephium_agentic::AgentPolicyError::Budget,
+        ));
+    }
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if affordable(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    let reserved = chosen
+        .reservation_cost_micro_usd(low, u64::from(output))
+        .ok_or(AgentBrowserProviderError::Catalog)?;
+    let input = u32::try_from(low).map_err(|_| AgentBrowserProviderError::Catalog)?;
+    AgentModelCallBudget::try_new(input, output, reserved)
+        .map_err(AgentBrowserProviderError::RequestPolicy)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn settle_browser_result(
     result: AgentProviderTransportResult,
     disclosure: AgentProviderDisclosureStage,
     input: zephium_agentic::AgentProviderInputMetricReceipt,
     model: AgentBrowserModel,
+    chosen: Option<&zephium_agentic::AgentProviderModelClient>,
     policy: &mut AgentRunPolicy,
     retained: &mut Option<BrowserUnsettledTerminal>,
     receipts: &mut Vec<(
@@ -3903,8 +4517,9 @@ fn settle_browser_result(
         zephium_agentic::AgentProviderInputMetricReceipt,
     )>,
 ) -> Result<AgentBrowserProviderTurn, AgentBrowserProviderError> {
-    let terminal =
-        settle_browser_terminal(result, disclosure, input, model, policy, retained, receipts)?;
+    let terminal = settle_browser_terminal(
+        result, disclosure, input, model, chosen, policy, retained, receipts,
+    )?;
     let receipt = terminal.receipt();
     let turn = terminal
         .into_tool_turn()
@@ -3917,11 +4532,13 @@ fn settle_browser_result(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settle_browser_terminal(
     result: AgentProviderTransportResult,
     disclosure: AgentProviderDisclosureStage,
     input: zephium_agentic::AgentProviderInputMetricReceipt,
     model: AgentBrowserModel,
+    chosen: Option<&zephium_agentic::AgentProviderModelClient>,
     policy: &mut AgentRunPolicy,
     retained: &mut Option<BrowserUnsettledTerminal>,
     receipts: &mut Vec<(
@@ -3969,8 +4586,19 @@ fn settle_browser_terminal(
             })
         }
         AgentProviderPolicySettlement::PricingRequired(settlement) => {
-            let terminal = match model {
-                AgentBrowserModel::Terra => {
+            let terminal = match (chosen, model) {
+                (Some(chosen), _) => match settle_chosen_terminal(*settlement, chosen, policy) {
+                    Ok(Ok(terminal)) => Box::new(terminal),
+                    Ok(Err(receipt)) => {
+                        receipts.push((receipt, input));
+                        return Err(AgentBrowserProviderError::Settlement);
+                    }
+                    Err(unsettled) => {
+                        *retained = unsettled.map(BrowserUnsettledTerminal::Chosen);
+                        return Err(AgentBrowserProviderError::Settlement);
+                    }
+                },
+                (None, AgentBrowserModel::Terra) => {
                     match settle_terra_provider_terminal(*settlement, policy).map_err(|error| {
                         *retained = error.into_retained().map(BrowserUnsettledTerminal::Terra);
                         AgentBrowserProviderError::Settlement
@@ -3982,7 +4610,7 @@ fn settle_browser_terminal(
                         }
                     }
                 }
-                AgentBrowserModel::Luna | AgentBrowserModel::Gpt6Luna => {
+                (None, AgentBrowserModel::Luna | AgentBrowserModel::Gpt6Luna) => {
                     let settle = if model == AgentBrowserModel::Luna {
                         settle_luna_provider_terminal
                     } else {
@@ -4004,6 +4632,30 @@ fn settle_browser_terminal(
             receipts.push((receipt, input));
             Ok(*terminal)
         }
+    }
+}
+
+/// Prices a chosen model's terminal on its own schedule. Usage that schedule
+/// cannot price is charged the reservation; a refused policy keeps the owner.
+#[allow(clippy::type_complexity)]
+fn settle_chosen_terminal(
+    settlement: zephium_agentic::AgentProviderPricingSettlement,
+    chosen: &zephium_agentic::AgentProviderModelClient,
+    policy: &mut AgentRunPolicy,
+) -> Result<
+    Result<zephium_agentic::AgentProviderSettledTerminal, AgentModelCallReceipt>,
+    Option<Box<zephium_agentic::AgentProviderPricingSettlement>>,
+> {
+    use zephium_agentic::AgentProviderPricingSettlementError as Refusal;
+    match settlement.settle(policy, chosen.schedule()) {
+        Ok(terminal) => Ok(Ok(terminal)),
+        Err(Refusal::Schedule { unsettled } | Refusal::TerminalPricing { unsettled, .. }) => {
+            unsettled
+                .settle_at_reservation_ceiling(policy)
+                .map(Err)
+                .map_err(|error| error.into_unsettled().map(Box::new))
+        }
+        Err(error) => Err(error.into_unsettled().map(Box::new)),
     }
 }
 
@@ -4093,6 +4745,9 @@ pub enum AgentBrowserProviderError {
     /// Fixed request configuration did not fit its exact admission contract.
     #[error("browser provider request contract was refused")]
     RequestContract(zephium_agentic::AgentProviderContractError),
+    /// Request serialization failed or exceeded its fixed byte ceiling.
+    #[error("browser provider request encoding was refused")]
+    RequestEncoding,
     /// Exact task-authorized native navigation policy refused its checkpoint.
     #[error("browser document navigation was refused")]
     Navigation(zephium_agentic::AgentPolicyError),
@@ -4205,6 +4860,7 @@ impl AgentBrowserProviderError {
         match error {
             AgentProviderRequestError::Policy(error) => Self::RequestPolicy(error),
             AgentProviderRequestError::Contract(error) => Self::RequestContract(error),
+            AgentProviderRequestError::Encoding => Self::RequestEncoding,
             _ => Self::Authority,
         }
     }
@@ -4252,6 +4908,15 @@ mod tests {
         budget: AgentRunBudget,
         max_model_calls: u8,
         max_actions: u64,
+    ) -> (AgentBrowserSession, SemanticObservation) {
+        browser_fixture_with_access(budget, max_model_calls, max_actions, None)
+    }
+
+    fn browser_fixture_with_access(
+        budget: AgentRunBudget,
+        max_model_calls: u8,
+        max_actions: u64,
+        chosen: Option<zephium_agentic::AgentProviderModelClient>,
     ) -> (AgentBrowserSession, SemanticObservation) {
         // Platform TLS initialization is fixture setup, not approved execution
         // time. Freeze the test deadline only after this undispatched owner exists.
@@ -4395,12 +5060,81 @@ mod tests {
         let session = AgentBrowserSession::try_new_with_transport(
             input,
             BrowserSessionTransport(transport),
-            credential,
+            chosen.map_or_else(|| credential.into(), AgentBrowserModelAccess::Chosen),
             AgentBrowserModel::Luna,
             AgentBrowserRetention::Stateless,
         )
         .expect("session");
         (session, observation)
+    }
+
+    #[test]
+    fn viewport_mapping_capability_matches_model_and_accounting_transport() {
+        use zephium_agentic::work_model::*;
+        struct NeverCalled;
+        impl WorkModelClient for NeverCalled {
+            fn call<'a>(
+                &'a self,
+                _: WorkModelRequest,
+                _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+            ) -> WorkModelFuture<'a> {
+                Box::pin(async { panic!("capability negotiation never dispatches a provider") })
+            }
+        }
+        let (exact, _) = browser_fixture();
+        assert_eq!(
+            exact.config.input_accounting_mode(),
+            AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        );
+        assert!(
+            !exact.supports_vision(),
+            "model pictures require original native and host owners"
+        );
+        assert!(
+            exact.supports_record_crops(),
+            "local Sensitive crop capability is unchanged"
+        );
+        assert!(
+            !exact.supports_viewport_mapping(),
+            "exact credentials cannot enter provider-reported image attachment"
+        );
+        for vision in [false, true] {
+            let entry = WorkModelEntry {
+                id: "fixture/page".into(),
+                model: WorkModelRef {
+                    provider: WorkModelProvider::OpenAi,
+                    wire: WorkModelWire::OpenAiResponses,
+                    model: "fixture-page".into(),
+                },
+                display_name: "Fixture page".into(),
+                roles: vec![WorkModelRole::Page],
+                recommended: false,
+                context_window: 200_000,
+                max_output: 32_000,
+                price: None,
+                supports: WorkModelSupports {
+                    tools: true,
+                    vision,
+                    prompt_cache: false,
+                    reasoning: false,
+                    native_search: false,
+                },
+            };
+            let client = AgentProviderModelClient::try_new(&entry, Arc::new(NeverCalled)).unwrap();
+            let (session, _) = browser_fixture_with_access(
+                AgentRunBudget::try_new(16, 300_000, 1_000_000, 1).unwrap(),
+                MAX_BROWSER_MODEL_TURNS,
+                MAX_BROWSER_ACTIONS,
+                Some(client),
+            );
+            assert_eq!(
+                session.config.input_accounting_mode(),
+                AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            );
+            assert_eq!(session.supports_record_crops(), vision);
+            assert!(!session.supports_vision());
+            assert!(!session.supports_viewport_mapping());
+        }
     }
 
     fn reserved_browser_input(
@@ -4452,7 +5186,7 @@ mod tests {
             );
             let deadline = session.deadline;
             session
-                .configure_decisions(AgentBrowserDecisionProvider::Emulation)
+                .configure_decisions(AgentBrowserDecisionProvider::Emulation, None)
                 .unwrap();
             let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
             if let Some(mut answers) = session
@@ -4477,11 +5211,103 @@ mod tests {
         }
     }
 
+    /// Answers every decision batch with an empty answer object.
+    #[derive(Default)]
+    struct DecidingModel {
+        choices: Mutex<Vec<zephium_agentic::work_model::WorkModelToolChoice>>,
+    }
+
+    impl zephium_agentic::work_model::WorkModelClient for DecidingModel {
+        fn call<'a>(
+            &'a self,
+            request: zephium_agentic::work_model::WorkModelRequest,
+            _: &'a (dyn Fn(zephium_agentic::work_model::WorkModelEvent) + Send + Sync),
+        ) -> zephium_agentic::work_model::WorkModelFuture<'a> {
+            use zephium_agentic::work_model::*;
+            self.choices
+                .lock()
+                .expect("choices")
+                .push(request.tool_choice);
+            Box::pin(async {
+                Ok(WorkModelOutcome {
+                    stop: WorkModelStop::ToolUse,
+                    usage: WorkModelUsage {
+                        input_tokens: 600,
+                        output_tokens: 20,
+                        ..WorkModelUsage::default()
+                    },
+                    assistant: vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                        id: "call_1".to_owned(),
+                        name: "typed_decision".to_owned(),
+                        arguments: serde_json::json!({"answers": {}}),
+                    })],
+                })
+            })
+        }
+    }
+
+    fn deciding_entry() -> zephium_agentic::work_model::WorkModelEntry {
+        use zephium_agentic::work_model::*;
+        WorkModelEntry {
+            id: "openrouter/light-test".to_owned(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::OpenRouter,
+                wire: WorkModelWire::ChatCompletions,
+                model: "vendor/light-test".to_owned(),
+            },
+            display_name: "Light Test".to_owned(),
+            roles: vec![WorkModelRole::Light],
+            recommended: false,
+            context_window: 128_000,
+            max_output: 8_000,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: false,
+                prompt_cache: false,
+                reasoning: false,
+                native_search: false,
+            },
+            price: Some(WorkModelPrice {
+                input: 100_000,
+                cached_input: 10_000,
+                output: 400_000,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsettled_decisions_fall_back_to_the_chosen_light_model() {
+        let (mut session, observation) = browser_fixture();
+        let client = Arc::new(DecidingModel::default());
+        let light =
+            zephium_agentic::AgentProviderModelClient::try_new(&deciding_entry(), client.clone())
+                .expect("light model");
+        session
+            .configure_decisions(AgentBrowserDecisionProvider::Emulation, Some(light))
+            .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        session
+            .decide_observation(&observation, &authority, None, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            *client.choices.lock().unwrap(),
+            [zephium_agentic::work_model::WorkModelToolChoice::Named(
+                "typed_decision".to_owned()
+            )]
+        );
+        assert_eq!(session.turns, 1);
+        assert_eq!(session.model_receipts.len(), 1);
+        assert_eq!(session.policy.pending_model_calls(), 0);
+        assert!(session.transport.snapshot().unwrap().is_idle());
+        assert!(session.try_finish().is_ok());
+    }
+
     #[tokio::test]
     async fn decision_turns_do_not_impersonate_or_replay_the_initial_openai_turn() {
         let (mut session, observation) = browser_fixture();
         session.turns = 2;
-        session.credential.take();
+        session.access.take();
         assert_eq!(
             session.start_initial(&observation).await.err(),
             Some(AgentBrowserProviderError::Cancelled)
@@ -4782,7 +5608,7 @@ mod tests {
         assert_eq!(session.policy.pending_model_calls(), 0);
         assert!(!format!("{session:?}").contains("Prepare a fixture"));
         let terminal = session.try_finish().expect("drained");
-        assert!(terminal.session.credential.is_none());
+        assert!(terminal.session.access.is_none());
         assert_eq!(terminal.accounting().reserved_model_tokens(), 0);
     }
 
@@ -4811,12 +5637,14 @@ mod tests {
                     AgentBrowserProviderError::Deadline
                 }
                 _ => {
-                    session.credential.take();
+                    session.access.take();
                     AgentBrowserProviderError::Cancelled
                 }
             };
             assert_eq!(
-                runtime.block_on(session.drive(input)).expect_err("stop"),
+                runtime
+                    .block_on(session.drive(input, None))
+                    .expect_err("stop"),
                 expected
             );
             assert_eq!(session.policy.pending_model_calls(), 0);

@@ -105,6 +105,7 @@ pub(super) struct AgentPendingScreenshot {
     id: SemanticScreenshotRequestId,
     context: ContextJoin,
     snapshot_generation: SemanticSnapshotGeneration,
+    capture_deadline: Instant,
     pub(super) cancelled: Arc<AtomicBool>,
     watchdog: crate::platform::imp::ContentPolicyTimeout,
     task: AgentScreenshotTask,
@@ -123,6 +124,7 @@ impl AgentPendingScreenshot {
             id: _,
             context: _,
             snapshot_generation: _,
+            capture_deadline: _,
             cancelled: _,
             watchdog,
             task,
@@ -1182,6 +1184,9 @@ impl EngineHost {
             id: request_id,
             context,
             snapshot_generation,
+            capture_deadline: admitted_at
+                .checked_add(capture_window)
+                .unwrap_or(admitted_at),
             cancelled: cancelled.clone(),
             watchdog,
             task,
@@ -1236,7 +1241,10 @@ impl EngineHost {
         &mut self,
         id: ContextId,
         request_id: SemanticScreenshotRequestId,
-        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+        outcome: Result<
+            crate::platform::semantic_pixel_privacy::ModelCapture<SemanticScreenshotNativeCapture>,
+            SemanticScreenshotNativeFailure,
+        >,
     ) {
         let Some(pending) = self.work_resources.get_mut(&id).and_then(|resource| {
             (resource
@@ -1248,6 +1256,18 @@ impl EngineHost {
         }) else {
             return;
         };
+        let outcome = outcome.and_then(|proof| {
+            let resource = self
+                .work_resources
+                .get(&id)
+                .ok_or(SemanticScreenshotNativeFailure::Stale)?;
+            resource.guard.record_model_capture(
+                request_id,
+                pending.context,
+                pending.capture_deadline,
+                proof,
+            )
+        });
         pending.complete(outcome);
         if let Some(resource) = self.work_resources.get(&id) {
             let guard = resource.guard.clone();
@@ -2146,6 +2166,9 @@ impl EngineHost {
             id: request_id,
             context,
             snapshot_generation,
+            capture_deadline: admitted_at
+                .checked_add(capture_window)
+                .unwrap_or(admitted_at),
             cancelled: cancelled.clone(),
             watchdog,
             task,
@@ -2196,7 +2219,10 @@ impl EngineHost {
         &mut self,
         id: ContextId,
         request_id: SemanticScreenshotRequestId,
-        outcome: Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>,
+        outcome: Result<
+            crate::platform::semantic_pixel_privacy::ModelCapture<SemanticScreenshotNativeCapture>,
+            SemanticScreenshotNativeFailure,
+        >,
     ) {
         let Some(pending) = self.agent_contexts.get_mut(&id).and_then(|binding| {
             (binding
@@ -2208,7 +2234,9 @@ impl EngineHost {
         }) else {
             return;
         };
-        pending.complete(outcome);
+        pending.complete(
+            outcome.map(crate::platform::semantic_pixel_privacy::ModelCapture::into_capture),
+        );
     }
 
     #[cfg(target_os = "macos")]

@@ -502,6 +502,8 @@ impl SemanticActionProposal {
                     if quiet.millis() > settle_budget.millis()
             )
         {
+            #[cfg(feature = "probe-harness")]
+            crate::probe_evidence_path::trace(format_args!("action-contract: kind={:?} effect={effect:?} wait={wait:?} verification={verification:?} settle_ms={}", intent.kind(), settle_budget.millis()));
             return Err(SemanticActionContractError::OutcomeContract);
         }
         Ok(Self {
@@ -967,7 +969,7 @@ impl SemanticBoundAction {
         };
         let checkpoint_invocation = current.invocation();
         let checkpoint_snapshot = current.generation();
-        let guard = prepared_guard(
+        let mut guard = prepared_guard(
             self,
             checkpoint_invocation,
             checkpoint_snapshot,
@@ -975,8 +977,29 @@ impl SemanticBoundAction {
             target_states,
             option_states,
         );
+        let option_identity = match &self.intent {
+            BoundActionIntent::Select { option, .. } => current
+                .nodes()
+                .iter()
+                .find(|node| node.key() == option.node_key)
+                .and_then(|node| node.approval_identity()),
+            _ => None,
+        };
+        let approval_binding = crate::SemanticApprovalBinding::new(
+            target.approval_identity(),
+            option_identity,
+            self.kind() == SemanticActionKind::Select,
+        );
+        if let Some(binding) = approval_binding {
+            let mut sealed = Sha256::new();
+            sealed.update(b"ZEPHIUM-PREPARED-APPROVAL-1\0");
+            sealed.update(guard);
+            sealed.update(binding.guard_bytes());
+            guard = sealed.finalize().into();
+        }
         Ok(SemanticPreparedAction {
             action: self.clone(),
+            approval_binding,
             checkpoint_invocation,
             checkpoint_snapshot,
             target_value,
@@ -1039,6 +1062,7 @@ impl SemanticBoundAction {
 #[derive(Eq, PartialEq)]
 pub struct SemanticPreparedAction {
     action: SemanticBoundAction,
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     checkpoint_invocation: SemanticInvocationId,
     checkpoint_snapshot: SemanticSnapshotGeneration,
     target_value: Option<SemanticValueSummary>,
@@ -1052,6 +1076,39 @@ pub struct SemanticPreparedAction {
 }
 
 impl SemanticPreparedAction {
+    /// Private native target/option continuity at the exact prepared checkpoint.
+    /// This is identity evidence, never an authorization by itself.
+    pub const fn approval_binding(&self) -> Option<crate::SemanticApprovalBinding> {
+        self.approval_binding
+    }
+
+    /// Resolves the private native target in the exact prepared checkpoint,
+    /// independently of model-facing reference rebasing.
+    pub fn target_node<'a>(
+        &self,
+        snapshot: &'a SemanticSnapshot,
+    ) -> Option<&'a crate::SemanticNode> {
+        (snapshot.frame() == self.frame()
+            && snapshot.invocation() == self.checkpoint_invocation
+            && snapshot.generation() == self.checkpoint_snapshot)
+            .then(|| {
+                snapshot
+                    .nodes()
+                    .iter()
+                    .find(|node| node.key() == self.target_key())
+            })
+            .flatten()
+    }
+    /// Resolves the bound selected option in that same exact checkpoint.
+    pub fn option_node<'a>(
+        &self,
+        snapshot: &'a SemanticSnapshot,
+    ) -> Option<&'a crate::SemanticNode> {
+        self.target_node(snapshot)?;
+        let key = self.option_key()?;
+        snapshot.nodes().iter().find(|node| node.key() == key)
+    }
+
     /// Content digest of the frame this action was prepared on.
     pub(crate) const fn page_digest(&self) -> [u8; 32] {
         self.page_digest
@@ -1215,19 +1272,13 @@ impl SemanticPreparedAction {
         current: &'snapshot SemanticSnapshot,
     ) -> Result<(&'action str, &'snapshot str), SemanticActionRevalidationError> {
         if self.kind() != SemanticActionKind::Fill
-            || !matches!(
-                self.bound_action().target_role(),
-                SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
-            )
+            || !fill_role(self.bound_action().target_role())
             || self.target_sensitivity() == SemanticSensitivity::Secret
         {
             return Err(SemanticActionRevalidationError::OperationDenied);
         }
         let (_, target) = self.verification_target(current)?;
-        if !matches!(
-            target.role(),
-            SemanticRole::Textbox | SemanticRole::Searchbox | SemanticRole::Combobox
-        ) || !target.operations().contains(SemanticOperationClass::Fill)
+        if !fill_role(target.role()) || !target.operations().contains(SemanticOperationClass::Fill)
         {
             return Err(SemanticActionRevalidationError::OperationDenied);
         }
@@ -1257,6 +1308,18 @@ impl SemanticPreparedAction {
     pub(crate) const fn verification_guard(&self) -> [u8; 32] {
         self.guard
     }
+}
+
+/// Roles whose fill the exact-value proof can verify; a number field's
+/// value reads back as the text that was set.
+const fn fill_role(role: SemanticRole) -> bool {
+    matches!(
+        role,
+        SemanticRole::Textbox
+            | SemanticRole::Searchbox
+            | SemanticRole::Combobox
+            | SemanticRole::Spinbutton
+    )
 }
 
 fn exact_fill_value(
@@ -1557,7 +1620,9 @@ fn projected_value_matches(
     expected: &SemanticActionText,
 ) -> bool {
     match current {
-        Some(SemanticValueSummary::Text(current)) => current.as_str() == expected.as_str(),
+        Some(SemanticValueSummary::Text(current)) => {
+            fill_value_matches(current.as_str(), expected.as_str())
+        }
         None
         | Some(
             SemanticValueSummary::Redacted
@@ -1565,6 +1630,16 @@ fn projected_value_matches(
             | SemanticValueSummary::Ordinal(_),
         ) => false,
     }
+}
+
+/// A field holds the filled text exactly. A multi-line text also matches when
+/// only its line breaks are represented differently: a rich editor keeps a
+/// block per line, an empty line as a block holding a break, and may add a
+/// trailing break or turn a space into a non-breaking one.
+pub(crate) fn fill_value_matches(value: &str, expected: &str) -> bool {
+    value == expected
+        || (value.contains(['\n', '\r']) || expected.contains(['\n', '\r']))
+            && value.split_whitespace().eq(expected.split_whitespace())
 }
 
 impl fmt::Debug for SemanticActionBatch {
@@ -1636,6 +1711,15 @@ fn bind_intent(
                 || target.sensitivity == SemanticSensitivity::Secret
             {
                 return Err(SemanticActionBindingError::CredentialBoundary);
+            }
+            // The exact-value proof compares against the observed value. A
+            // field whose value was not observed is refused before anything
+            // is typed, not left applied and unverified after.
+            if !fill_role(target.role) {
+                return Err(SemanticActionBindingError::OutcomeContract);
+            }
+            if !matches!(target.value, Some(crate::SemanticValueSummary::Text(_))) {
+                return Err(SemanticActionBindingError::ValueUnobserved);
             }
             *text_bytes = text_bytes
                 .checked_add(value.len())
@@ -1996,7 +2080,7 @@ impl SemanticActionRuntimeDescriptor {
     }
 }
 
-fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
+pub(crate) fn hash_frame(hasher: &mut Sha256, frame: &SemanticFrameJoin) {
     let context = frame.context();
     let identity = context.identity();
     hasher.update(identity.id().bytes());
@@ -2308,6 +2392,10 @@ pub enum SemanticActionBindingError {
     /// Select target/option role, frame, snapshot, or ancestry was incompatible.
     #[error("semantic selection target is invalid")]
     SelectionTarget,
+    /// The fill target's current value was not observed (private or
+    /// clipped), so no fill of it could be verified; nothing ran.
+    #[error("semantic fill target value was not observed")]
+    ValueUnobserved,
     /// The exact declared postcondition already held before any effect.
     #[error("semantic action outcome is already satisfied")]
     OutcomeAlreadySatisfied,
@@ -2353,6 +2441,15 @@ pub enum SemanticActionBindingError {
     /// outside the visible area, so nothing was pressed or typed.
     #[error("semantic action target was covered or out of view")]
     TargetCovered,
+    /// A step that may commit something reached the page, now or earlier in
+    /// the task, and its outcome was not seen: it may already have taken
+    /// effect, so it is never issued again.
+    #[error("semantic action outcome is unknown")]
+    OutcomeUnknown,
+    /// A send whose message is not addressed to the recipient the task
+    /// names: nothing was issued.
+    #[error("semantic action message is not addressed to the requested recipient")]
+    WrongRecipient,
 }
 
 /// Typed structural refusal before backend visibility/occlusion revalidation.
@@ -2407,6 +2504,29 @@ mod tests {
     };
     use serde_json::json;
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn a_multi_line_fill_matches_up_to_how_its_line_breaks_are_kept() {
+        let typed = "Hi Dana,\n\nThe release is ready.\nThanks, Hayk";
+        assert!(fill_value_matches(typed, typed));
+        for kept in [
+            "Hi Dana,\n\nThe release is ready.\nThanks, Hayk\n",
+            "Hi Dana,\n\n\nThe release is ready.\nThanks, Hayk",
+            "Hi Dana,\nThe release is ready.\n\nThanks, Hayk",
+            "Hi\u{a0}Dana,\n\nThe release is ready.\r\nThanks, Hayk",
+        ] {
+            assert!(fill_value_matches(kept, typed));
+        }
+        for wrong in [
+            "Hi Dana,\n\nThe release is ready.",
+            "Hi Dana,\n\nThe release is ready.\nThanks, Hayk and Sam",
+            "Thanks, Hayk\n\nThe release is ready.\nHi Dana,",
+            "Hi Dana,\n\nThe release is read y.\nThanks, Hayk",
+        ] {
+            assert!(!fill_value_matches(wrong, typed));
+        }
+        assert!(!fill_value_matches("a  b", "a b"));
+    }
 
     fn observation() -> SemanticObservation {
         let identity = ContextIdentity::new(
@@ -2529,13 +2649,13 @@ mod tests {
     }
 
     #[test]
-    fn scroll_uses_complete_local_fields_without_relaxing_click_completeness() {
+    fn partial_looks_act_on_targets_with_a_whole_local_witness() {
         let original = observation();
         let frame = original.frames()[0].frame().clone();
         for complete in [true, false] {
             let bytes = serde_json::to_vec(&json!({"v":1,"i":7,"g":9,"c":"node_limit","n":[
                 {"k":1,"r":"document","o":16,"fc":complete,"b":{"x":0,"y":0,"w":1280,"h":800}},
-                {"k":2,"p":0,"r":"button","o":1,"fc":true,"b":{"x":10,"y":10,"w":100,"h":30}}
+                {"k":2,"p":0,"r":"button","o":1,"fc":complete,"b":{"x":10,"y":10,"w":100,"h":30}}
             ]}))
             .unwrap();
             let snapshot = decode_semantic_snapshot(
@@ -2573,7 +2693,7 @@ mod tests {
                         target: SemanticReferenceId::new(2).unwrap(),
                     },
                     SemanticVerification::PageDialogOpened,
-                    false,
+                    complete,
                 ),
             ] {
                 let batch = SemanticActionBatch::bind(
@@ -2592,7 +2712,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_snapshot_disclosure_requires_complete_target_and_read_expansion() {
+    fn partial_snapshot_click_requires_a_whole_target() {
         let original = observation();
         let frame = original.frames()[0].frame().clone();
         let expanded = SemanticVerification::TargetState {
@@ -2602,10 +2722,18 @@ mod tests {
         for (complete, activation, effect, verification, accepted) in [
             (true, 6, SemanticEffectClass::Read, expanded, true),
             (false, 6, SemanticEffectClass::Read, expanded, false),
-            (true, 1, SemanticEffectClass::Read, expanded, false),
-            (true, 6, SemanticEffectClass::LocalWrite, expanded, false),
+            (true, 1, SemanticEffectClass::Read, expanded, true),
+            (false, 1, SemanticEffectClass::Read, expanded, false),
+            (true, 6, SemanticEffectClass::LocalWrite, expanded, true),
             (
                 true,
+                6,
+                SemanticEffectClass::Read,
+                SemanticVerification::PageDialogOpened,
+                true,
+            ),
+            (
+                false,
                 6,
                 SemanticEffectClass::Read,
                 SemanticVerification::PageDialogOpened,
@@ -2815,9 +2943,15 @@ mod tests {
 
     #[test]
     fn absent_fill_value_never_proves_an_already_satisfied_empty_input() {
+        for role in ["textbox", "spinbutton"] {
+            absent_fill_value_for_role(role);
+        }
+    }
+
+    fn absent_fill_value_for_role(role: &str) {
         let template = observation();
         let nodes = |value: Option<&str>| {
-            let mut field = json!({"k": 3,"p":0,"r":"textbox","n":"Title","o":11,
+            let mut field = json!({"k": 3,"p":0,"r":role,"n":"Title","o":11,
                 "b":{"x":10,"y":50,"w":200,"h":30}});
             if let Some(value) = value {
                 field["v"] = json!({"k":"text","value":value});
@@ -2854,36 +2988,25 @@ mod tests {
                 )],
             )
         };
-        let batch = bind_value(&unknown, "").expect("missing value is unknown, not already empty");
         assert_eq!(
-            batch.actions()[0].prepare(&unknown.frames()[0]),
-            Err(SemanticActionPreparationError::Revalidation(
-                SemanticActionRevalidationError::TargetChanged
-            )),
+            bind_value(&unknown, "").unwrap_err(),
+            SemanticActionBindingError::ValueUnobserved,
             "unknown starting value refuses before native mutation, without claiming it is empty"
         );
         assert_eq!(
             bind_value(&empty, "").unwrap_err(),
             SemanticActionBindingError::OutcomeAlreadySatisfied
         );
-        let observed_empty = current_snapshot(&unknown, 9, 11, nodes(Some("")));
         assert_eq!(
-            batch.actions()[0].prepare(&observed_empty),
-            Err(SemanticActionPreparationError::OutcomeAlreadySatisfied)
+            bind_value(&unknown, "replacement").unwrap_err(),
+            SemanticActionBindingError::ValueUnobserved
         );
-        let from_unknown = bind_value(&unknown, "replacement").unwrap();
-        assert!(matches!(
-            from_unknown.actions()[0].prepare(&unknown.frames()[0]),
-            Err(SemanticActionPreparationError::Revalidation(
-                SemanticActionRevalidationError::TargetChanged
-            ))
-        ));
-        let from_empty = bind_value(&empty, "replacement").unwrap();
+        let from_empty = bind_value(&empty, "12").unwrap();
         let prepared = from_empty.actions()[0].prepare(&empty.frames()[0]).unwrap();
-        let filled = current_snapshot(&empty, 9, 11, nodes(Some("replacement")));
+        let filled = current_snapshot(&empty, 9, 11, nodes(Some("12")));
         assert_eq!(
             prepared.verification_fill_values(&filled).unwrap(),
-            ("", "replacement"),
+            ("", "12"),
             "explicitly observed empty values must support exact fill transitions"
         );
     }

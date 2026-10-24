@@ -45,6 +45,8 @@ impl Shell {
             Some(Pane::Leaf(id))
         } else if browser_page_active {
             self.work_pane_tree()
+        } else if self.browser_return_hidden {
+            None
         } else {
             self.pane_tree()
         };
@@ -103,16 +105,7 @@ impl Shell {
                     })
                 })
             });
-        // Work chrome is full-bleed: header on the window material, composer on the edge.
-        let chrome_metrics = if self.active_browser_page() == Some(crate::BrowserPage::Work) {
-            layout::Metrics {
-                padding: 0.0,
-                ..win.metrics
-            }
-        } else {
-            win.metrics
-        };
-        let chrome_layout = layout::compute(win.size, win.mode, chrome_metrics, chrome_present);
+        let chrome_layout = layout::compute(win.size, win.mode, win.metrics, chrome_present);
         if !self.chrome.position(ChromeFrame {
             rect: chrome_layout.chrome,
             fill_width: chrome_layout.content.is_none(),

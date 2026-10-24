@@ -601,6 +601,24 @@ impl EngineHost {
         returned_process_id: Option<u32>,
         deadline: std::time::Instant,
     ) -> bool {
+        #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+        if returned_process_id.is_some_and(|id| {
+            self.browser_processes
+                .get(&profile)
+                .is_some_and(|process| process.id() != id)
+        }) {
+            eprintln!(
+                "windows-work-construction: stage=idle_generation owners_extension_partition_spare_agent_work={:?} remaining_ms={}; content=redacted",
+                [
+                    self.windows_extensions.has_native_views_for_profile(profile),
+                    self.partitions.values().any(|partition| partition.profile() == profile),
+                    self.spare.as_ref().is_some_and(|spare| spare.partition.profile() == profile),
+                    self.has_windows_agent_view_or_transfer_for_profile(profile),
+                    self.work_resources.values().any(|resource| resource.view.as_ref().is_some_and(|view| view.work_native_profile() == Some(profile))),
+                ],
+                deadline.saturating_duration_since(std::time::Instant::now()).as_millis()
+            );
+        }
         if self.erasure_tombstones.contains(&profile)
             || self.unverifiable_browser_processes.contains(&profile)
             || self.unproven_browser_processes.contains_key(&profile)
@@ -826,8 +844,12 @@ impl EngineHost {
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
         let completion = self.prepare_windows_anonymous_erasure(profile, completion);
         #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        let completion = self.prepare_windows_work_store_erasure(profile, completion);
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
         self.work_site_stores
             .retain(|(selected, _), _| *selected != profile);
+        #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+        self.release_work_profile_cookie_sources(Some(profile));
         // Durable erasure tombstones the profile and synchronously retires
         // every transient extension routing projection before native cleanup.
         self.retire_extension_browser_surface(profile);
@@ -959,6 +981,9 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         self.environments.remove(&profile);
 
+        // WebKit removes a named store only once nothing holds it.
+        #[cfg(all(target_os = "macos", feature = "agentic-browser"))]
+        self.work_data_stores.remove(&profile);
         #[cfg(target_os = "macos")]
         crate::platform::imp::erase_profile_data(profile, ephemeral_stores, completion);
         #[cfg(all(unix, not(target_os = "macos")))]

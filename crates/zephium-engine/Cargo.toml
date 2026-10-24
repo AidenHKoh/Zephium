@@ -45,6 +45,9 @@ native-agentic-work-lifetime-diagnostic = ["agentic-browser"]
 # intentionally separate from the release-excluded probe vocabulary.
 agentic-browser = ["dep:zephium-agentic", "dep:zeroize", "dep:image"]
 agentic-browser-qa = ["agentic-browser", "objc2-web-kit/WKHTTPCookieStore"]
+# Builds the headless loopback qualification of the Ask panel's Browse
+# reader and its measurements. Never part of a shipped binary.
+page-reader-probe = ["agentic-browser"]
 
 [[bin]]
 name = "macos-agentic-liveness-probe"
@@ -60,6 +63,11 @@ required-features = ["native-isolation-probes"]
 name = "macos-page-permission-probe"
 path = "src/bin/macos_page_permission_probe.rs"
 required-features = ["native-page-permission-probes"]
+
+[[bin]]
+name = "macos-page-reader-probe"
+path = "src/bin/macos_page_reader_probe.rs"
+required-features = ["page-reader-probe"]
 
 [[bin]]
 name = "macos-agentic-input-probe"
@@ -92,6 +100,8 @@ zephium-core.workspace = true
 wry = { workspace = true, features = ["devtools"] }
 dirs = "6"
 serde_json.workspace = true
+base64 = "0.22"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
 sha2 = "=0.10.9"
 serde = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
@@ -109,12 +119,15 @@ zephium-blocker = { workspace = true, features = ["runtime"] }
 flate2 = "=1.1.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
 base64 = "0.22"
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 raw-window-handle.workspace = true
 webview2-com = "0.38"
 windows = { version = "0.61", features = [
+    "Foundation_Collections",
+    "Foundation_Numerics",
+    "System",
+    "UI_Composition_Desktop",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -129,6 +142,7 @@ windows = { version = "0.61", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_WinRT_Composition",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
@@ -139,6 +153,7 @@ windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = t
     "Win32_System_Threading",
 ] }
 windows-core = "0.61"
+windows-numerics = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 gtk = "0.18"

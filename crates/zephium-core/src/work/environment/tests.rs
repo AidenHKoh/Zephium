@@ -22,6 +22,40 @@ fn placement(element: WorkElementId) -> WorkElementPlacement {
 }
 
 #[test]
+fn pinned_placement_round_trips_and_remains_admitted() {
+    for revision in [
+        WORK_PLACEMENT_LEGACY,
+        WORK_PLACEMENT_LANE,
+        WORK_PLACEMENT_PIN,
+    ] {
+        let mut pinned = placement(10.into());
+        pinned.revision = revision;
+        pinned.x = -320;
+        pinned.y = 240;
+        let view = WorkEnvironmentView {
+            placements: vec![pinned],
+            ..Default::default()
+        };
+        let restored: WorkEnvironmentView =
+            serde_json::from_slice(&serde_json::to_vec(&view).unwrap()).unwrap();
+        assert!(restored == view);
+        assert_eq!(restored.fault(), None);
+    }
+    for revision in [1, 4, u8::MAX] {
+        let mut invalid = placement(10.into());
+        invalid.revision = revision;
+        assert_eq!(
+            WorkEnvironmentView {
+                placements: vec![invalid],
+                ..Default::default()
+            }
+            .fault(),
+            Some(WorkViewFault::PlacementRevision)
+        );
+    }
+}
+
+#[test]
 fn manual_environment_has_no_objective_or_runtime_and_round_trips() {
     let initial = empty();
     assert!(initial.elements.is_empty());
@@ -555,4 +589,43 @@ fn decisions_bind_to_existing_elements_replace_in_place_and_leave_with_them() {
     let mut dangling = replaced.clone();
     dangling.decisions[0].element = 99.into();
     assert_eq!(dangling.validate(), Err(WorkError::Invalid));
+}
+
+#[test]
+fn a_link_is_named_in_place_and_an_unknown_element_is_not_found() {
+    let added = edit(
+        &empty(),
+        WorkEnvironmentEdit::Add {
+            reference: WorkEnvironmentReference::Link {
+                url: "https://youtu.be/dQw4w9WgXcQ".into(),
+                title: "youtu.be".into(),
+            },
+            area: None,
+        },
+    )
+    .unwrap();
+    let element = added.elements[0].id;
+    let named = edit(
+        &added,
+        WorkEnvironmentEdit::NameLink {
+            element,
+            title: "A talk\nA channel".into(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        &named.elements[0].reference,
+        WorkEnvironmentReference::Link { title, .. } if title == "A talk\nA channel"
+    ));
+    assert_eq!(
+        edit(
+            &added,
+            WorkEnvironmentEdit::NameLink {
+                element: 99.into(),
+                title: "x".into(),
+            },
+        )
+        .err(),
+        Some(WorkError::NotFound)
+    );
 }

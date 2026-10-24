@@ -93,7 +93,6 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
     session: environment,
     tabs: [tabFixture({ id: "tab-1", title: "Stays in the Mission", url: "https://airbnb.com/" })],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
@@ -105,7 +104,7 @@ test("the bar is tools and a field at rest, the field alone in use, the agent's 
 
   // At rest: the canvas tools, then the field; nothing on the right.
   const tools = screen.getByRole("toolbar", { name: "Work tools" });
-  for (const name of ["Note", "Add to canvas"])
+  for (const name of ["Blocks", "Add to canvas"])
     await expect.element(tools.getByRole("button", { name, exact: true })).toBeVisible();
   expect(bar().dataset.mode).toBe("rest");
   expect(screen.container.querySelector("[data-zephium-work-chrome]")).toBeNull();

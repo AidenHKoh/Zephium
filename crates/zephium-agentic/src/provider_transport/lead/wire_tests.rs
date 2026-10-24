@@ -5,6 +5,10 @@ use serde_json::{json, Value};
 use super::tests::request;
 use super::*;
 
+fn google() -> LeadTarget {
+    LeadTarget::direct(WorkModelProvider::Google).unwrap()
+}
+
 fn decode(
     wire: WorkModelWire,
     fixture: &str,
@@ -263,7 +267,7 @@ fn anthropic_streams_thinking_search_and_parallel_tool_use() {
     assert_eq!(body["messages"][0]["content"][1]["source"]["data"], "AQID");
     assert_eq!(body["thinking"], json!({"type": "adaptive"}));
     assert_eq!(body["output_config"]["effort"], "medium");
-    assert_eq!(body["tools"][1]["type"], "web_search_20260209");
+    assert_eq!(body["tools"][1]["type"], "web_search_20250305");
     assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], false);
 
     let haiku = anthropic::body(
@@ -279,6 +283,18 @@ fn anthropic_streams_thinking_search_and_parallel_tool_use() {
         json!({"type": "enabled", "budget_tokens": 3_072})
     );
     assert_eq!(haiku["tools"][1]["type"], "web_search_20250305");
+
+    // Listed 4.5 models refuse adaptive thinking; 4.6 and later refuse a budget.
+    for (model, budget) in [
+        ("claude-sonnet-4-5-20250929", true),
+        ("claude-opus-4-5-20251101", true),
+        ("claude-opus-4-6", false),
+        ("claude-sonnet-5-5", false),
+    ] {
+        let body =
+            anthropic::body(&request(WorkModelWire::AnthropicMessages, model), &target).unwrap();
+        assert_eq!(body["thinking"]["type"] == "enabled", budget, "{model}");
+    }
 }
 
 #[test]
@@ -379,7 +395,7 @@ fn gemini_streams_signed_calls_grounding_and_usage() {
             is_error: true,
         },
     ]));
-    let body = gemini::body(&next).unwrap();
+    let body = gemini::body(&next, &google()).unwrap();
     let model = body["contents"][1]["parts"].as_array().unwrap();
     assert_eq!(model.len(), 3);
     assert_eq!(model[0]["text"], "Flights from WAW start at $610.");
@@ -578,4 +594,372 @@ fn replay_from_another_wire_is_dropped() {
         body["messages"][1]["content"],
         json!([{"type": "text", "text": "Hi", "cache_control": {"type": "ephemeral"}}])
     );
+}
+
+#[test]
+fn mistral_streams_thinking_chunks_and_gets_them_back_as_a_chunk() {
+    let fixture = data(&[
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": [{"type": "text", "text": "Check the page."}]}]}}]}),
+        json!({"choices": [{"index": 0, "delta": {"content": [{"type": "text", "text": "Done."}]}}]}),
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}}),
+    ]);
+    let (events, decoded) = decode(WorkModelWire::ChatCompletions, &fixture);
+    let decoded = decoded.unwrap();
+    assert_eq!(text_of(&events), "Done.");
+    assert_eq!(decoded.usage.input_tokens, 100);
+
+    let target = LeadTarget::direct(WorkModelProvider::Mistral).unwrap();
+    let mut next = request(WorkModelWire::ChatCompletions, "mistral-medium-3-5");
+    next.native_search = false;
+    next.messages
+        .push(WorkModelMessage::Assistant(decoded.assistant));
+    let body = chat::body(&next, &target).unwrap();
+    let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(
+        last["content"],
+        json!([
+            {"type": "thinking", "thinking": [{"type": "text", "text": "Check the page."}]},
+            {"type": "text", "text": "Done."}
+        ])
+    );
+    assert!(last.get("thinking").is_none());
+    assert!(body.get("stream_options").is_none());
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn groq_and_cerebras_take_effort_only_where_their_models_accept_it() {
+    let body = |provider, model: &str| {
+        let mut call = request(WorkModelWire::ChatCompletions, model);
+        call.native_search = false;
+        call.reasoning = Some(WorkModelReasoning::Medium);
+        call.parallel_tools = false;
+        call.tools = vec![WorkModelTool {
+            name: "read".into(),
+            description: "Read a page.".into(),
+            schema: json!({"type": "object"}),
+            strict: false,
+        }];
+        chat::body(&call, &LeadTarget::direct(provider).unwrap()).unwrap()
+    };
+    let groq = body(WorkModelProvider::Groq, "openai/gpt-oss-120b");
+    assert_eq!(groq["reasoning_effort"], "medium");
+    assert_eq!(groq["parallel_tool_calls"], false);
+    assert!(body(WorkModelProvider::Groq, "qwen/qwen3.8-27b")
+        .get("reasoning_effort")
+        .is_none());
+    let cerebras = body(WorkModelProvider::Cerebras, "qwen-3.8-27b");
+    assert_eq!(cerebras["reasoning_effort"], "medium");
+    assert!(cerebras.get("parallel_tool_calls").is_none());
+    assert_eq!(cerebras["stream_options"], json!({"include_usage": true}));
+}
+
+#[test]
+fn new_providers_reach_their_own_endpoints() {
+    for (provider, url) in [
+        (WorkModelProvider::XAi, "https://api.x.ai/v1/responses"),
+        (
+            WorkModelProvider::Mistral,
+            "https://api.mistral.ai/v1/chat/completions",
+        ),
+        (
+            WorkModelProvider::Groq,
+            "https://api.groq.com/openai/v1/chat/completions",
+        ),
+        (
+            WorkModelProvider::Cerebras,
+            "https://api.cerebras.ai/v1/chat/completions",
+        ),
+    ] {
+        let target = LeadTarget::direct(provider).unwrap();
+        assert_eq!(target.call_url("model", false).unwrap().as_str(), url);
+        assert!(LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, provider).is_err());
+    }
+    let xai = openai::body(
+        &request(WorkModelWire::OpenAiResponses, "grok-4.7"),
+        &LeadTarget::direct(WorkModelProvider::XAi).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(xai["store"], false);
+    assert_eq!(xai["include"], json!(["reasoning.encrypted_content"]));
+}
+
+#[test]
+fn every_wire_forces_the_tool_it_is_told_to() {
+    let named = |wire| {
+        let mut request = request(wire, "model-1");
+        request.tool_choice = WorkModelToolChoice::Named("web_fetch".into());
+        request
+    };
+    let openai = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    let body = openai::body(&named(WorkModelWire::OpenAiResponses), &openai).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "function", "name": "web_fetch"})
+    );
+
+    let anthropic = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    let body = anthropic::body(&named(WorkModelWire::AnthropicMessages), &anthropic).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "tool", "name": "web_fetch", "disable_parallel_tool_use": false})
+    );
+    // Anthropic refuses a forced tool with thinking on.
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+
+    let body = gemini::body(&named(WorkModelWire::Gemini), &google()).unwrap();
+    assert_eq!(
+        body["toolConfig"]["functionCallingConfig"],
+        json!({"mode": "ANY", "allowedFunctionNames": ["web_fetch"]})
+    );
+    assert!(body["generationConfig"].get("thinkingConfig").is_some());
+
+    let chat = LeadTarget::direct(WorkModelProvider::DeepSeek).unwrap();
+    let body = chat::body(&named(WorkModelWire::ChatCompletions), &chat).unwrap();
+    assert_eq!(
+        body["tool_choice"],
+        json!({"type": "function", "function": {"name": "web_fetch"}})
+    );
+    // DeepSeek's thinking mode does not take a forced tool.
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    assert!(body.get("reasoning_effort").is_none());
+
+    let mut required = request(WorkModelWire::AnthropicMessages, "claude-sonnet-5-5");
+    required.tool_choice = WorkModelToolChoice::Required;
+    let body = anthropic::body(&required, &anthropic).unwrap();
+    assert_eq!(body["tool_choice"]["type"], "any");
+    assert!(body.get("thinking").is_none());
+    required.model.wire = WorkModelWire::OpenAiResponses;
+    assert_eq!(
+        openai::body(&required, &openai).unwrap()["tool_choice"],
+        "required"
+    );
+    required.model.wire = WorkModelWire::Gemini;
+    assert_eq!(
+        gemini::body(&required, &google()).unwrap()["toolConfig"]["functionCallingConfig"],
+        json!({"mode": "ANY"})
+    );
+    required.model.wire = WorkModelWire::ChatCompletions;
+    assert_eq!(
+        chat::body(&required, &chat).unwrap()["tool_choice"],
+        "required"
+    );
+}
+
+#[test]
+fn a_forced_tool_the_request_does_not_offer_is_refused() {
+    let mut request = request(WorkModelWire::OpenAiResponses, "model-1");
+    request.tool_choice = WorkModelToolChoice::Named("navigate".into());
+    let openai = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    assert_eq!(
+        openai::body(&request, &openai).err(),
+        Some(WorkModelError::BadRequest)
+    );
+    request.tools.clear();
+    request.tool_choice = WorkModelToolChoice::Required;
+    assert_eq!(
+        tool_choice(&request).err(),
+        Some(WorkModelError::BadRequest)
+    );
+    request.tool_choice = WorkModelToolChoice::Auto;
+    let anthropic = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    assert!(anthropic::body(&request, &anthropic).is_ok());
+}
+
+#[test]
+fn the_conversation_cache_closes_before_the_facts_that_change_every_call() {
+    let mut next = request(WorkModelWire::AnthropicMessages, "claude-haiku-4-5");
+    next.messages
+        .push(WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+            call: "toolu_1".into(),
+            content: "Clicked.".into(),
+            is_error: false,
+        }]));
+    next.messages
+        .push(WorkModelMessage::User(vec![WorkModelPart::Text(
+            "[developer]\nnative_actions_remaining=2".into(),
+        )]));
+    next.volatile_tail = 1;
+    let target = LeadTarget::direct(WorkModelProvider::Anthropic).unwrap();
+    let body = anthropic::body(&next, &target).unwrap();
+    let closing = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let [.., result, facts] = closing.as_slice() else {
+        panic!("a result and the facts close the conversation");
+    };
+    assert_eq!(result["type"], "tool_result");
+    assert_eq!(result["cache_control"], json!({"type": "ephemeral"}));
+    assert!(facts.get("cache_control").is_none());
+
+    // With nothing volatile, the newest block closes the cache as before.
+    next.volatile_tail = 0;
+    let body = anthropic::body(&next, &target).unwrap();
+    let closing = body["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        closing.last().unwrap()["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+}
+
+#[test]
+fn openai_routes_one_conversation_to_one_cache_and_xai_gets_no_key() {
+    let mut openai = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    openai.cache_key = Some("zk_0123456789abcdef".into());
+    let target = LeadTarget::direct(WorkModelProvider::OpenAi).unwrap();
+    let body = openai::body(&openai, &target).unwrap();
+    assert_eq!(body["prompt_cache_key"], "zk_0123456789abcdef");
+
+    let mut xai = openai.clone();
+    xai.model.provider = WorkModelProvider::XAi;
+    let target = LeadTarget::direct(WorkModelProvider::XAi).unwrap();
+    assert!(openai::body(&xai, &target)
+        .unwrap()
+        .get("prompt_cache_key")
+        .is_none());
+}
+
+#[test]
+fn deepseek_holds_strict_tools_to_their_schemas_on_its_beta_path() {
+    let deepseek = LeadTarget::direct(WorkModelProvider::DeepSeek).unwrap();
+    let mut strict = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    strict.tools[0].strict = true;
+    assert!(deepseek.strict_tools(&strict));
+    assert_eq!(
+        deepseek.call_url("deepseek-flash", true).unwrap().as_str(),
+        "https://api.deepseek.com/beta/chat/completions"
+    );
+    let body = chat::body(&strict, &deepseek).unwrap();
+    assert_eq!(body["tools"][0]["function"]["strict"], true);
+    // Loose tools, other providers and Cloud keep the ordinary path and body.
+    let loose = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    assert!(!deepseek.strict_tools(&loose));
+    assert!(
+        chat::body(&loose, &deepseek).unwrap()["tools"][0]["function"]
+            .get("strict")
+            .is_none()
+    );
+    let mistral = LeadTarget::direct(WorkModelProvider::Mistral).unwrap();
+    assert!(!mistral.strict_tools(&strict));
+    let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::DeepSeek).unwrap();
+    assert!(!cloud.strict_tools(&strict));
+}
+
+#[test]
+fn every_offered_effort_reaches_its_wire_request() {
+    use WorkModelReasoning as E;
+    let at = |provider: WorkModelProvider, wire, model: &str, effort| {
+        let mut call = request(wire, model);
+        call.model.provider = provider;
+        call.reasoning = Some(effort);
+        call.max_output_tokens = 32_000;
+        let target = LeadTarget::direct(provider).unwrap();
+        match wire {
+            WorkModelWire::OpenAiResponses => openai::body(&call, &target),
+            WorkModelWire::AnthropicMessages => anthropic::body(&call, &target),
+            WorkModelWire::Gemini => gemini::body(&call, &google()),
+            WorkModelWire::ChatCompletions => chat::body(&call, &target),
+        }
+        .unwrap()
+    };
+    let words = ["low", "medium", "high", "xhigh", "max"];
+    let all = [E::Low, E::Medium, E::High, E::XHigh, E::Max];
+    for (provider, wire, model) in [
+        (
+            WorkModelProvider::OpenAi,
+            WorkModelWire::OpenAiResponses,
+            "gpt-6-luna",
+        ),
+        (
+            WorkModelProvider::XAi,
+            WorkModelWire::OpenAiResponses,
+            "grok-4.7",
+        ),
+    ] {
+        for effort in models::efforts(provider, model) {
+            let body = at(provider, wire, model, effort);
+            assert_eq!(
+                body["reasoning"]["effort"], words[effort as usize],
+                "{model}"
+            );
+        }
+    }
+    let opus = models::efforts(WorkModelProvider::Anthropic, "claude-opus-5-5");
+    assert_eq!(opus, all);
+    for effort in opus {
+        let body = at(
+            WorkModelProvider::Anthropic,
+            WorkModelWire::AnthropicMessages,
+            "claude-opus-5-5",
+            effort,
+        );
+        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(body["output_config"]["effort"], words[effort as usize]);
+    }
+    let budgets: Vec<_> =
+        models::efforts(WorkModelProvider::Anthropic, "claude-haiku-4-5-20251001")
+            .into_iter()
+            .map(|effort| {
+                at(
+                    WorkModelProvider::Anthropic,
+                    WorkModelWire::AnthropicMessages,
+                    "claude-haiku-4-5-20251001",
+                    effort,
+                )["thinking"]["budget_tokens"]
+                    .clone()
+            })
+            .collect();
+    assert_eq!(budgets, [json!(2_048), json!(6_000), json!(16_000)]);
+    for model in ["gemini-3.1-pro-preview", "gemini-3.8-flash"] {
+        for effort in models::efforts(WorkModelProvider::Google, model) {
+            let body = at(
+                WorkModelProvider::Google,
+                WorkModelWire::Gemini,
+                model,
+                effort,
+            );
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingLevel"], words[effort as usize],
+                "{model}"
+            );
+        }
+    }
+    let deepseek: Vec<_> = models::efforts(WorkModelProvider::DeepSeek, "deepseek-v4-pro")
+        .into_iter()
+        .map(|effort| {
+            at(
+                WorkModelProvider::DeepSeek,
+                WorkModelWire::ChatCompletions,
+                "deepseek-v4-pro",
+                effort,
+            )["reasoning_effort"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(deepseek, [json!("low"), json!("high")]);
+    for effort in models::efforts(WorkModelProvider::Groq, "openai/gpt-oss-120b") {
+        let body = at(
+            WorkModelProvider::Groq,
+            WorkModelWire::ChatCompletions,
+            "openai/gpt-oss-120b",
+            effort,
+        );
+        assert_eq!(body["reasoning_effort"], words[effort as usize]);
+    }
+    for effort in models::efforts(WorkModelProvider::OpenRouter, "openai/gpt-6-luna") {
+        let body = at(
+            WorkModelProvider::OpenRouter,
+            WorkModelWire::ChatCompletions,
+            "openai/gpt-6-luna",
+            effort,
+        );
+        assert_eq!(body["reasoning"]["effort"], words[effort as usize]);
+    }
 }

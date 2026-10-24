@@ -3,7 +3,9 @@
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
   import Button from "$shared/ui/Button";
+  import { BrowserIcon } from "../lib/icons";
   import * as m from "$shared/i18n/messages";
+  import "./bar/pick.css";
 
   let {
     tabs,
@@ -67,6 +69,7 @@
   {#if onopentabs}<label class="all" class:chosen={openTabs}>
       <input
         type="checkbox"
+        class="pick-check"
         checked={openTabs}
         disabled={pending}
         onchange={(event) => onopentabs?.(event.currentTarget.checked)}
@@ -89,11 +92,16 @@
         <label class="tab">
           <input
             type="checkbox"
+            class="pick-check"
             checked={eligible.includes(tab.id)}
             disabled={pending || attached}
             onchange={() => toggle(tab.id)}
           />
-          <FavIcon image={favicons.image(tab.icon)} tone={favicons.tone(tab.icon)} />
+          <FavIcon
+            image={favicons.image(tab.icon)}
+            tone={favicons.tone(tab.icon)}
+            fallback={BrowserIcon}
+          />
           <span class="identity">
             <strong>{tab.title || m.work_env_untitled_tab()}</strong>
             <span class="where"
@@ -112,12 +120,13 @@
       </li>
     {:else}<li class="empty">{query ? m.work_env_no_matches() : m.work_env_no_tabs()}</li>{/each}
   </ul>
-  <p class="privacy">{m.work_env_tabs_privacy()}</p>
   {#if status}<p role="status">{status}</p>{/if}
   <footer>
-    <Button size="compact" disabled={pending} onclick={onnewtab}>{m.work_env_new_tab()}</Button
+    <Button size="compact" variant="ghost" disabled={pending} onclick={onnewtab}
+      >{m.work_env_new_tab()}</Button
     ><Button
       size="compact"
+      variant="primary"
       disabled={pending || eligible.length === 0}
       onclick={() => onattach([...eligible])}
       >{pending ? m.work_env_pending() : m.work_env_add_tabs({ count: eligible.length })}</Button
@@ -128,8 +137,10 @@
 <style>
   .picker {
     display: flex;
+    flex: 1;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
+    min-block-size: 0;
     min-inline-size: 0;
   }
 
@@ -141,6 +152,15 @@
     gap: 16px;
   }
 
+  /* The segment above already says Tabs; the header says whose they are. */
+  header strong {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
   header span {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -149,15 +169,14 @@
 
   header span,
   .where,
-  .privacy,
   .attached-mark,
   .empty {
     color: var(--color-muted);
     font-size: var(--text-caption);
   }
 
-  header strong {
-    font-weight: 600;
+  header {
+    padding-inline: 4px;
   }
 
   .search {
@@ -171,123 +190,98 @@
   input[type="search"] {
     inline-size: 100%;
     box-sizing: border-box;
-    block-size: 30px;
-    padding: 0 12px;
+    block-size: var(--field-height);
+    padding: 0 var(--control-inset);
     border: 0;
-    border-radius: var(--radius-control-compact);
+    border-radius: var(--radius-field);
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
+    outline: none;
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
-  input:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: 2px;
+  input[type="search"]:hover {
+    background: var(--color-field-hover);
+  }
+
+  input[type="search"]:focus {
+    background: var(--color-field-hover);
+    box-shadow: var(--shadow-field-focus);
+  }
+
+  input[type="search"]::placeholder {
+    color: var(--color-faint);
   }
 
   ul {
     list-style: none;
     display: flex;
+    flex: 1;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
+    min-block-size: 0;
+    max-block-size: 244px;
     margin: 0;
     padding: 0;
     overflow-y: auto;
-    max-block-size: min(360px, 45vh);
   }
 
   /* A row is a tab: its mark, its title, and where it is. */
-  li {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 8px 4px 6px;
-    border-radius: var(--radius-control);
-    background: var(--color-fill);
-    box-shadow: inset 0 0 0 1px transparent;
-    transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      box-shadow var(--motion-fast) var(--ease-smooth);
-  }
-
-  li:hover {
-    background: var(--color-fill-hover);
-  }
-
-  /* Every tab at once, as titles and addresses: a row of its own above the list. */
+  li,
   .all {
     display: flex;
     align-items: center;
     gap: 8px;
-    min-block-size: 32px;
-    padding: 4px 8px 4px 6px;
+    padding: 2px 6px 2px 10px;
     border-radius: var(--radius-control);
+    transition: background-color var(--motion-fast) var(--ease-smooth);
+  }
+
+  /* Every tab at once, as titles and addresses: a row of its own above the list. */
+  .all {
+    min-block-size: 40px;
     background: var(--color-fill);
-    box-shadow: inset 0 0 0 1px transparent;
     cursor: default;
-    transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      box-shadow var(--motion-fast) var(--ease-smooth);
   }
 
+  li:hover,
   .all:hover {
-    background: var(--color-fill-hover);
+    background: var(--row-active);
   }
 
-  .all.chosen {
-    background: var(--color-accent-soft);
-    box-shadow: inset 0 0 0 1px var(--color-accent);
-  }
-
-  li.current {
-    background: var(--color-surface);
-    box-shadow: inset 0 0 0 1px var(--color-border-strong);
-  }
-
+  .all.chosen,
   li.chosen {
-    background: var(--color-accent-soft);
-    box-shadow: inset 0 0 0 1px var(--color-accent);
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
   }
 
   li.attached {
-    opacity: 0.6;
+    opacity: 0.55;
   }
 
   .tab {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     flex: 1;
-    min-block-size: 32px;
+    min-block-size: 40px;
     min-inline-size: 0;
     cursor: default;
   }
 
-  input[type="checkbox"] {
-    appearance: none;
-    flex-shrink: 0;
-    inline-size: 15px;
-    block-size: 15px;
-    margin: 0;
-    border-radius: 50%;
-    background: transparent;
-    box-shadow: inset 0 0 0 1px var(--color-border-strong);
-    transition:
-      background-color var(--motion-fast) var(--ease-smooth),
-      box-shadow var(--motion-fast) var(--ease-smooth);
+  /* Opening a tab is the exception: it shows when the row is looked at. */
+  li :global(.ui-button) {
+    opacity: 0;
+    transition: opacity var(--motion-fast) var(--ease-out);
   }
 
-  input[type="checkbox"]:checked {
-    background:
-      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 4.8 8.5 9.5 3.8' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
-        center / 11px no-repeat,
-      var(--color-accent);
-    box-shadow: none;
-  }
-
-  input[type="checkbox"]:disabled {
-    box-shadow: inset 0 0 0 1px var(--color-border);
+  li:hover :global(.ui-button),
+  li:focus-within :global(.ui-button) {
+    opacity: 1;
   }
 
   .identity {
@@ -309,6 +303,10 @@
     white-space: nowrap;
   }
 
+  li.current .identity strong {
+    font-weight: 600;
+  }
+
   .badge {
     margin-inline-end: 6px;
     padding: 0 6px;
@@ -321,20 +319,30 @@
     flex: none;
   }
 
-  .privacy,
   p {
     margin: 0;
+    padding-inline: 4px;
   }
 
   .empty {
-    padding: 8px;
+    padding: 12px 10px;
   }
 
   footer {
+    flex: none;
     flex-wrap: wrap;
+    padding-block-start: 2px;
   }
 
   .all .where {
     white-space: normal;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    li,
+    .all,
+    li :global(.ui-button) {
+      transition: none;
+    }
   }
 </style>

@@ -794,6 +794,10 @@ impl Drop for NavigationObserver {
     }
 }
 
+pub fn history_state(view: &wry::WebView) -> Option<(bool, bool)> {
+    Some((view.can_go_back().ok()?, view.can_go_forward().ok()?))
+}
+
 pub fn current_url(view: &wry::WebView) -> Option<String> {
     const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
     let uri = view.webview().uri()?;

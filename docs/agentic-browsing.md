@@ -291,8 +291,8 @@ with a default or temporary profile.
 Before navigation, copy the bounded cookie set needed for the target origins
 from the selected user profile into the automation subprofile through supported
 cookie APIs, including HttpOnly cookies where the native API exposes them. A
-sign-in handoff may repeat that one-way copy after the person completes
-authentication. There is no automatic reverse synchronization. The complete
+sign-in made in a retained Work page is copied back to the selected profile
+for that page's site only (below). The complete
 native attempt, including cleanup proof after a partial write, uses one
 trusted-shell absolute deadline under a fixed product ceiling. Correlation
 retains that exact request/deadline window; native adapters cannot widen or
@@ -310,27 +310,90 @@ the context.
 
 Retained Work pages use stable `work-site-<digest>` subprofiles in the selected
 profile's user-data environment. The digest binds the approved registrable
-site, scheme and port. Pages for that site share the person's Work sign-in and
-origin storage across parts and runs, while independent apps can run in
-parallel. Each construction still verifies the extension-free inventory.
-Anonymous public Work sessions use separate ephemeral environments and never
-seed from the person's profile.
+site, scheme and port. Pages for that site share one store across parts and
+runs, while independent apps can run in parallel. Each construction still
+verifies the extension-free inventory. A per-site store also keeps a page's
+requests from carrying the person's cookies for every other site, which the
+selected profile itself would. Pages without the person's session use Work's
+own website data (4.3) and never touch the person's profile. Private runs and
+loopback qualification fixtures use separate ephemeral environments.
 
-The retained Work cookie bridge keeps existing destination-origin cookies.
-Initial seeding is serialized per site store; a new origin waits for that
-store to become idle within the original construction deadline. A failed seed
-removes only newly attempted cookie identities and proves their absence; it
-never clears retained profile data. Failure to prove cleanup quarantines the
-logical profile. A profile-owned, nonsecret initialization stamp is published
-after a successful seed and before the page becomes available. Reopening a
-page or restarting the browser therefore preserves an intentional Work logout
-instead of reseeding stale Browse cookies. These stamps are erased with the
-profile. Session presence checks both Browse and Work cookie stores, including
-previously used HTTP and custom-port stores, within one bounded request.
-This preserves Work sign-ins without claiming full Browse origin-storage
-equivalence or cross-site Work storage sharing with macOS.
+To the person the store and their tabs hold one session per site, as on
+macOS. The bridge is a scoped add-or-update over the page's document origin,
+the site's own origin and, on a return, the page's current origin on the same
+site; it writes only cookies whose value or attributes differ and never deletes
+a cookie the other side lacks:
 
-### 4.3 Profile leasing
+- Before each page opens, the profile's site cookies are added to the store,
+  so a sign-in made in a tab reaches the next Work page.
+- A sign-in handoff marks the store's return pending. When the handoff
+  resolves, the store's site cookies are added to the profile, so the person's
+  tabs are signed in too. A return that cannot run then (no live page, a busy
+  store, a failure) stays pending, and the site's next page returns before it
+  refreshes; while a return is pending and fails, the page opens on the store
+  as it is so the profile's older cookies cannot replace that sign-in.
+- With no tab of the profile open, the construction's own page-inert
+  controller of the profile is the profile's cookie authority for the length
+  of that one bounded sync, then closes.
+- While another page of the site is open on the store nothing is written into
+  it: no cookie compare-and-swap exists, and the open page may be mid sign-in.
+
+Each sync is serialized per site store and bounded by the construction or
+return deadline. Destination cookies in scope are listed before the first
+write; a failed sync deletes the identities it created and restores the ones
+it overwrote, then proves both by a scoped readback. It never clears a
+profile. Failure to prove cleanup quarantines the logical profile. A refused
+refresh opens the page on the store as it was and leaves the origin
+unstamped, so the next page tries again. A sign-out inside a Work page is not
+carried to the tabs, and a sign-out in a tab does not delete the store's
+copy; the site's own server-side session end governs both. Session presence
+checks the profile's and the remembered Work stores' cookies within one
+bounded request; since a page opens with both, presence in either is
+presence on the page. Each sync writes one content-free line
+(`windows-work-session: stage=… outcome=… profile=tab|work_bootstrap|none`).
+
+### 4.3 Work's own website data
+
+Pages Work opens without the person's session (public reads, public page
+tasks, sites marked Never or declined for the run, and search results pages)
+use **Work's own website data**: one persistent store per durable Zephium profile, separate from the
+profile's own store and from every other profile's. It remembers what a
+person-free browser would remember between visits: solved bot checks such as
+DataDome or Cloudflare clearance cookies, consent choices such as Google's EU
+consent, and site preferences. Earlier Work kept these pages in per-run
+ephemeral storage, so every run met the same consent wall and bot check again
+and failed on sites that only let a returning browser through. Work's store
+holds no session of the person's. A site the run works on as the person (their
+inbox, issues, messages) opens in the profile's own store (on Windows, the
+site's Work store kept in step with it, 4.2) even when they are signed out
+there, after the run's entry question, so a sign-in they make during Work is
+theirs in normal browsing too, and the reverse.
+
+- macOS: a persistent `WKWebsiteDataStore` from `dataStoreForIdentifier:` with
+  an identifier derived from the profile (SHA-256 of a domain tag and the
+  profile id, shaped as a version 8 UUID), never equal to the profile's own
+  identifier. Construction and every attestation check that the page's store
+  is persistent, carries exactly that identifier, and is the host's one
+  retained object for the profile.
+- Windows: a dedicated WebView2 user-data folder under the profiles root,
+  keyed by the same derived identifier, with one non-private named profile
+  `work-<identifier>`. Its environment never enables extensions and is never
+  seeded from the person's cookies.
+
+Every page of a run and of parallel runs shares the profile's one store, as
+ordinary tabs share a profile's; page teardown never removes it. Deleting the
+Zephium profile erases it with the profile's own data (macOS removes the named
+store and verifies it is gone; Windows removes and verifies the folder).
+Settings → Work → Privacy clears it on request
+(`work_clear_website_data`). A private profile has no Work store; its Work
+pages keep run-scoped ephemeral storage. A private run keeps the run's own
+empty storage for every page. The signed-in path (the person's session for a
+site, including the sign-in handoff) is unchanged and uses the profile's
+storage as before. Content policy, tracking protection and the ad blocker
+apply to Work's store as to every other Work context, and no extension ever
+loads in it.
+
+### 4.4 Profile leasing
 
 Every probe or production context names a profile explicitly. Test tooling
 never falls back to the default profile.
@@ -580,7 +643,9 @@ The exact-local path requires an exact (`ExactLocal` or authenticated
 count before policy mutation. The OpenAI-only provider-exact path instead
 reserves the already-serialized complete replay by its UTF-8 byte length before
 the authenticated count request; an Anthropic provider estimate is never
-accepted as exact admission. Policy proves the exact committed baseline cohort
+accepted as exact admission. A chosen-model call takes neither path: it
+reserves the replay as a provider-reported upper bound, described below, and
+is never exact admission either. Policy proves the exact committed baseline cohort
 and every returned reference/origin, then reuses that cohort unchanged. This
 admits truthful empty reads, preserves the conservative prior
 sensitivity and trust, and adds no origin, account, reference, or taint-cohort
@@ -610,9 +675,13 @@ cited findings (1,024 bytes each), mapped directly to finding artifacts. Scalar
 node outputs remain compatible. A collection-level citation never substitutes
 for a finding's own sources; empty findings return unavailable.
 Symbol-only `locate` queries match literal retained substrings.
-URL fields require an exact public link destination from the native semantic
-observation; prose containing a URL is insufficient. The existing URL screen
-rejects credentials and sensitive embedded state. Schema-driven reads include
+A URL value is always an address the page itself shows, never model text: a
+cited link destination, that field of a cited node, the one observed
+destination the model's copy names, the link named like the record's subject,
+or an address a cited text prints (a page-facts summary's `/p/123-...`),
+resolved against that source's own origin. A destination whose query or
+fragment carries credentials or opaque state keeps the page and loses only
+those parameters; one whose user, host or path looks secret is omitted. Schema-driven reads include
 `link_destination` fragments only when a URL field is declared, within the
 same fragment and byte budgets. The field selection is bound to read guards,
 retention and extraction admission. Version 4 archives independently revalidate
@@ -628,8 +697,11 @@ can populate host-selected Work subject image candidates; readers retain version
 
 Money fields carry a bounded nonnegative decimal string and one of up to 16
 host-approved three-letter currency codes. A cited, complete text/name/value
-fragment must show the matching amount beside an explicit currency code. Bare
-symbols, ambiguous separators and clipped prefixes do not establish a price. Field completeness survives read guards and retained
+fragment must show the matching amount beside its code or a sign that may stand
+for it (`$` for a dollar, `zł` for PLN, `€`, `£`). A lone separator before three
+digits groups thousands; signed amounts, ranges and clipped prefixes do not
+establish a price. A copied price column may take any one amount its cited
+text shows. Field completeness survives read guards and retained
 evidence; version 6 archives recheck it with amount, currency and citations.
 Readers retain versions 1–6. Work money cells preserve the decimal string and
 identity/price citations. `observed_at` remains absent: capture ticks are
@@ -698,10 +770,10 @@ Inspection checkpoints expose remaining capture capacity. Repeated subtree and
 exhausted-inspection refusals have distinct codes; the eight-capture limit is
 checked before native dispatch, preserving current evidence for extraction.
 
-Terminal extraction has its own 112-KiB conservative encoding envelope instead
-of reusing the 16-KiB initial-observation envelope: the existing STANDARD read
-can contain 32 KiB of values, which require up to 64 KiB after escaping, plus
-128 bounded rows, already-admitted frame provenance and the closed schema.
+Terminal extraction has its own conservative encoding envelope instead of
+reusing the 16-KiB initial-observation envelope: the EXTRACTION read can
+contain 48 KiB of values, which require up to 96 KiB after escaping, plus 256
+bounded rows, already-admitted frame provenance and the closed schema.
 This is not additional page disclosure or a larger native/read/turn/run budget.
 Only actual encoded bytes enter the original whole-request provider-exact
 counting path. The mapper receives the whole selected read, never an implicit
@@ -722,10 +794,20 @@ remains authoritative as its guidance requires.
 A purpose-bound collector retains at most 64 KiB from the exact provider call,
 poisons and clears itself on a wrong-call or tool event, and admits output only
 after an exact `Completed` terminal with matching text-byte accounting and no
-tool output. Rust then reapplies schema identity and definition, ordered field
-semantics, value/aggregate bounds, secret screening, sensitivity, and exact
-`@rN` provenance. Refusal, incomplete output, cancellation, byte mismatch, or
-schema/read substitution fails closed. Extraction proof is content-free and
+tool output. Providers that turn the schema into a forced tool call do not
+enforce it, so Rust first rewrites harmless forms into the canonical envelope
+(a missing version, fields in another order or as a map, a citation spelled
+`r12` or as a number, a scalar without its kind tag) and leaves out fields the
+schema lacks. It then reapplies schema identity and definition, value/aggregate
+bounds, secret screening, sensitivity, and `@rN` provenance per value: a
+missing citation is dropped, a value with none left is cited where the read
+shows it verbatim, a text left without a value copies its cited fragment, and
+an optional value, list item or record whose own evidence fails is left out
+and counted. A required value without evidence, a secret, or a sensitivity
+breach still refuses; such a refusal is answered once by a second mapping of
+the same delivered schema and read with a content-free note naming the
+refusal, as the run's single call past its allowance. Incomplete output,
+cancellation, byte mismatch, or schema/read substitution fails closed. Extraction proof is content-free and
 terminal: it cannot seed a diff, another browser-tool turn, or browser
 authority. No live provider request was made for this implementation evidence.
 
@@ -1212,6 +1294,52 @@ ceiling remains held until terminal settlement. Provider-exact standard-rate
 calls are capped at 272,000 input tokens so a future long-context pricing tier
 cannot be charged under the wrong schedule. Anthropic remains exact-local until
 it offers a qualifying exact authenticated contract.
+
+The third mode, `ProviderReportedAfterConservativeReservation`, serves the
+person's chosen page model from any provider through its own client. It is
+explicitly not exact admission. The same encoders build the same
+Responses-shaped body, which is reserved before disclosure as a strict upper
+bound: its UTF-8 bytes without inline image data, plus a fixed 4,096-token
+envelope allowance and 8,192 tokens per image. The call is then priced on the
+usage the provider reports, at the person's catalog price for that model or,
+for an unpriced model, at fixed conservative fallback rates under their own
+pricing revision. Reported usage above the reservation is never priced: the
+call fails and is charged its reservation. Each call is sized to what the
+lease can still afford at the model's highest input rate, and its pricing
+range stops below every supported provider's long-context tier. This mode can
+never take the authenticated count path, and an exact catalog entry can never
+settle on reported usage.
+
+The chosen-model drive keeps every other transport rule: admission, the
+disclosure commit, cancellation, the absolute deadline and terminal
+settlement are the fixed-endpoint path's own. A body Zephium built is
+translated into one provider-neutral call: the fixed instructions become the
+system prompt, developer host facts become user text whose first line marks
+them, replayed function calls and results become tool turns, reasoning items
+are dropped, a screenshot reaches only a model that accepts images, and a
+structured-output mapping becomes one forced answer tool. Any item Zephium
+never writes refuses the call before dispatch. The reply crosses back through
+the closed browser-tool decoder and stream ceilings: only the first tool call
+is decoded, it must be a tool the request offered, it receives Zephium's own
+call identity, and further calls and narration are dropped and counted
+without conferring anything. When its one call was kept whole, the model's
+own parts around it (thinking blocks, signatures, reasoning items) and the
+call identity it gave are retained, bounded and opaque, only to be given back
+to its wire with that call on the next turn. A reply that cannot become a
+browser turn but that the model could correct (no tool call, a tool not
+offered on that turn, arguments that do not decode) is not the end of the
+page: inside the same call the model's turn is handed back with the exact
+reason (the field path where its arguments leave the schema it was given,
+such as `arguments.actions[0].target: must be a string, not object`, or the
+decoder's own words) and it is asked again, at most twice per call. Every ask
+is summed into the one call's reported usage and held to the one call's
+reservation; a re-ask that could not fit is not made, and a reply still
+unusable after the last ask fails as before. Providers that hold tool calls
+to a schema get the browser tools marked strict: OpenAI and Cloud on the
+Responses wire, DeepSeek on its beta Chat Completions path. Typed decisions the primary backend leaves open
+are answered by the person's light model through one forced tool whose schema
+is the request's own answer schema, under the same validator, reservation and
+deadline as the OpenAI emulation.
 
 The BYOK HTTPS shell uses private exact provider endpoints, provider-bound
 zeroizing credential owners, redirect refusal, identity-only response content

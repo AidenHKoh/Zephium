@@ -324,8 +324,23 @@ pub struct WorkAgentGrantV1 {
     /// this skill loaded. A name it does not know is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// The canvas draft the person pressed Send on: this run sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<WorkArtifactId>,
+    /// What a browser search falls back to when a results page cannot be
+    /// used; only a browser search grant names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_fallback: Option<super::search::WorkSearchFallbackV1>,
 }
 impl WorkAgentGrantV1 {
+    /// Whether search evidence from this provider and model belongs to the run.
+    pub fn admits_search(&self, provider: super::search::WorkSearchProvider, model: &str) -> bool {
+        (provider == self.provider && model == self.model)
+            || self
+                .search_fallback
+                .as_ref()
+                .is_some_and(|fallback| fallback.provider == provider && fallback.model == model)
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
         let mut origins = BTreeSet::new();
         if self.accounts.len() > MAX_WORK_ACCOUNT_GRANTS
@@ -360,8 +375,14 @@ impl WorkAgentGrantV1 {
                 return Err(WorkError::Invalid);
             }
         }
+        if let Some(fallback) = &self.search_fallback {
+            fallback.validate()?;
+            if self.provider != super::search::WorkSearchProvider::Browser {
+                return Err(WorkError::Invalid);
+            }
+        }
         let max_turns = if self.lead.is_some() { u8::MAX } else { 16 };
-        if !super::search::supported_public_search_model(&self.model)
+        if !super::search::supported_search_model(self.provider, &self.model)
             || self.max_turns == 0
             || self.max_turns > max_turns
             || self.max_steps == 0
@@ -397,6 +418,9 @@ pub const MAX_WORK_ACCOUNT_GRANTS: usize = 4;
 pub const MAX_WORK_ACCOUNT_PAGES: u8 = 12;
 /// A page task's goal, as the agent states it for one site.
 pub const MAX_WORK_PAGE_GOAL_BYTES: usize = 600;
+/// Content a page task enters exactly as written. It sits beside the goal in
+/// an objective of at most 8 KiB, so it leaves room for the page rules.
+pub const MAX_WORK_PAGE_VERBATIM_BYTES: usize = 3_500;
 /// One origin read with the profile's signed-in session for one request.
 /// The person's approval attests the account; Zephium never infers it.
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -966,6 +990,22 @@ pub mod read_note {
         "The page did not become ready within its loading window";
     pub const SLOW_SITE: &str =
         "The site is slowing us down; the page did not become ready after two attempts";
+    /// Live and interrupted page runs kept for recovery fill Work storage.
+    pub const WORK_STORAGE: &str =
+        "Work storage needs attention: too many interrupted page runs are waiting for review";
+    /// An earlier page's record was never confirmed saved, so no page can
+    /// open until Zephium restarts.
+    pub const STORAGE_UNCONFIRMED: &str =
+        "Work storage did not confirm an earlier page; restart Zephium to read more pages";
+
+    /// A page that ended behind a bot check or waiting on the person:
+    /// "state.gov asks for a human check; its page was skipped", "Airbnb
+    /// needs you to continue".
+    pub fn is_human_check(note: &str) -> bool {
+        note == HUMAN_CHECK
+            || note.contains("human check")
+            || note.ends_with("needs you to continue")
+    }
 }
 
 pub(crate) fn validate_public_reference_url(value: &str) -> Result<url::Url, WorkError> {
@@ -1047,6 +1087,28 @@ pub enum WorkCostBasis {
     Reserved,
 }
 
+/// Conservative provenance after model-image dispatch, including unknown
+/// transmission. It never grants account entry, effects or later disclosure.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPageImageDisclosureV1 {
+    /// Native fresh-isolated public proof authorized the exact image.
+    PublicIsolated,
+    /// An exact site screenshot consent authorized the exact image.
+    SiteConsent,
+}
+impl WorkPageImageDisclosureV1 {
+    /// Privacy provenance is sticky; a later public view cannot downgrade it.
+    pub fn merge(self, next: Self) -> Self {
+        if self == Self::SiteConsent || next == Self::SiteConsent {
+            Self::SiteConsent
+        } else {
+            Self::PublicIsolated
+        }
+    }
+}
+
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[derive(Clone, Copy, Debug, Default, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -1054,6 +1116,19 @@ pub enum WorkCostBasis {
 /// accounting beside the conservative ceiling in `usage`. Never page, model
 /// or provider text.
 pub struct WorkStepMeasurementsV1 {
+    /// Work revision assigned by Store when this page step settled. Never an
+    /// adapter clock or claim; absent on older or unfinished records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_revision: Option<WorkRevision>,
+    /// Closed page outcome, independent of explanatory text. Absent on older steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<WorkPageOutcomeV1>,
+    /// A wall verified clear before the same retained task resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_handoff: Option<WorkPageHandoffKindV1>,
+    /// Sticky model-image disclosure provenance, absent on older/text-only steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_disclosure: Option<WorkPageImageDisclosureV1>,
     /// Wall time from the step's resource launch to its settled outcome.
     pub wall_millis: u32,
     /// Typed decision calls answered by the recommended backend.
@@ -1078,6 +1153,14 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            #[serde(default)]
+            settled_revision: Option<WorkRevision>,
+            #[serde(default)]
+            outcome: Option<WorkPageOutcomeV1>,
+            #[serde(default)]
+            resolved_handoff: Option<WorkPageHandoffKindV1>,
+            #[serde(default)]
+            image_disclosure: Option<WorkPageImageDisclosureV1>,
             wall_millis: u32,
             decision_calls: u16,
             emulation_calls: u16,
@@ -1092,6 +1175,10 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
         }
         let wire = Wire::deserialize(deserializer)?;
         Ok(Self {
+            settled_revision: wire.settled_revision,
+            outcome: wire.outcome,
+            resolved_handoff: wire.resolved_handoff,
+            image_disclosure: wire.image_disclosure,
             wall_millis: wire.wall_millis,
             decision_calls: wire.decision_calls,
             emulation_calls: wire.emulation_calls,
@@ -1106,6 +1193,52 @@ impl<'de> Deserialize<'de> for WorkStepMeasurementsV1 {
             }),
         })
     }
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPageHandoffKindV1 {
+    SignIn,
+    Check,
+    SignInAndCheck,
+}
+impl WorkPageHandoffKindV1 {
+    pub fn includes(self, kind: Self) -> bool {
+        self == kind || self == Self::SignInAndCheck
+    }
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkPageOutcomeV1 {
+    Completed,
+    Incomplete,
+    NeedsSignIn,
+    NeedsCheck,
+    NeedsApproval,
+    NeedsInteraction,
+    TooManySteps,
+    Redirected,
+    Refused { stage: WorkPageFailureStageV1 },
+    SiteError,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkPageFailureStageV1 {
+    Admission,
+    Observation,
+    Action,
+    Navigation,
+    Extraction,
+    Provider,
+    Storage,
+    Runtime,
 }
 
 impl WorkUsage {
@@ -1198,11 +1331,20 @@ pub enum WorkStepKindV1 {
         /// A page task: the agent works toward this goal on the url's site.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<String>,
+        /// Words a page task types or posts exactly as written, line breaks
+        /// included; the goal stays a short instruction.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verbatim: Option<String>,
     },
     Discover {
         query: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         collection: Option<super::collection::WorkBrowseCollection>,
+    },
+    /// A revision-checked edit of an admitted owned block.
+    EditBlock {
+        resource: String,
+        expected_revision: String,
     },
     /// Objects the agent placed on the canvas from this turn.
     Publish,
@@ -1357,6 +1499,8 @@ pub enum WorkAskPurposeV1 {
     Question,
     /// Whether the agent may work in the person's session on a site.
     Entry,
+    /// Screenshot consent for one origin. This grants no account entry or action.
+    Screenshot,
     /// The run spent its budget: keep going or stop.
     Budget,
     /// Whether the agent may read the person's history, notes or tabs.
@@ -1505,7 +1649,8 @@ pub struct WorkStepFact {
     /// A short line for people: what the agent said or what this step found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    /// Closed measurements of a settled browser step; absent for other kinds.
+    /// Browser measurements; a running read may carry conservative image
+    /// disclosure provenance before its final measurements settle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurements: Option<WorkStepMeasurementsV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1516,6 +1661,42 @@ pub struct WorkStepFact {
     /// The part of a lead run this step works for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<WorkPartId>,
+    /// Why a model turn failed, in closed words the person can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fault: Option<WorkModelFaultV1>,
+}
+
+/// What stopped a model turn, as the person can fix it.
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkModelFaultV1 {
+    /// No key is set for the chosen model.
+    MissingKey,
+    /// The provider refused the person's key.
+    KeyRefused,
+    /// The person's own provider account is out of credit.
+    ProviderCredit,
+    /// The account's included Zephium AI usage, and any extra, is spent.
+    HostedUsage,
+    /// The chosen Zephium AI model needs another plan.
+    PlanRequired,
+    /// The Zephium account is under billing review.
+    BillingReview,
+    /// The account's daily Zephium AI limit is reached.
+    DailyLimit,
+    /// Free Zephium AI usage is paused for now; credits and keys still work.
+    FreeUsagePaused,
+    /// Earlier Zephium AI requests are still being confirmed.
+    HostedBusy,
+    /// Zephium AI is paused as a spending protection.
+    HostedPaused,
+    /// The Zephium account's session ended.
+    SignedOut,
+    RateLimited,
+    ProviderDown,
+    Unreachable,
+    TooLarge,
 }
 impl WorkStepKindV1 {
     fn validate(&self) -> Result<(), WorkError> {
@@ -1525,6 +1706,7 @@ impl WorkStepKindV1 {
                 url,
                 collection,
                 goal,
+                verbatim,
             } => {
                 validate_public_url(url)?;
                 if let Some(goal) = goal {
@@ -1532,6 +1714,12 @@ impl WorkStepKindV1 {
                     if goal.trim().is_empty() || goal.chars().any(char::is_control) {
                         return Err(WorkError::Invalid);
                     }
+                }
+                if let Some(verbatim) = verbatim {
+                    if goal.is_none() || verbatim.contains('\r') {
+                        return Err(WorkError::Invalid);
+                    }
+                    validate_text(verbatim, MAX_WORK_PAGE_VERBATIM_BYTES)?;
                 }
                 collection.as_ref().map_or(Ok(()), |shape| shape.validate())
             }
@@ -1645,6 +1833,17 @@ impl WorkStepKindV1 {
                 }
                 Ok(())
             }
+            Self::EditBlock {
+                resource,
+                expected_revision,
+            } => {
+                if !crate::resources::valid_id(resource)
+                    || crate::resources::revision(expected_revision).is_none()
+                {
+                    return Err(WorkError::Invalid);
+                }
+                Ok(())
+            }
             Self::Confirm { confirm } => confirm.validate(),
             Self::Call { call } => call.validate(),
             Self::Turn | Self::Publish => Ok(()),
@@ -1695,6 +1894,36 @@ impl WorkStepKindV1 {
     }
 }
 impl WorkStepFact {
+    /// Interruption never proves a dispatched effect did not happen.
+    pub fn interruption_status(&self) -> WorkStepStatus {
+        if self.status != WorkStepStatus::Running {
+            return self.status;
+        }
+        if self.kind.fetches() || self.has_unconfirmed_effect() {
+            WorkStepStatus::OutcomeUnknown
+        } else {
+            WorkStepStatus::Cancelled
+        }
+    }
+    pub fn has_unconfirmed_effect(&self) -> bool {
+        matches!(
+            self.status,
+            WorkStepStatus::Running | WorkStepStatus::OutcomeUnknown
+        ) && (matches!(
+            self.kind,
+            WorkStepKindV1::RunCommand { .. } | WorkStepKindV1::EditBlock { .. }
+        ) || (self.kind.proposes_write() && self.kind.file_decision() == Some(true))
+            || (matches!(self.kind, WorkStepKindV1::Read { goal: Some(_), .. })
+                && self.measurements.is_none_or(|m| m.native_actions != 0)))
+    }
+    /// Human questions and confirmation cards do not occupy an execution worker.
+    pub fn occupies_worker(&self) -> bool {
+        self.status == WorkStepStatus::Running
+            && !matches!(
+                self.kind,
+                WorkStepKindV1::Ask { .. } | WorkStepKindV1::Confirm { .. }
+            )
+    }
     pub fn validate(&self) -> Result<(), WorkError> {
         self.kind.validate()?;
         if let Some(local) = &self.local {
@@ -1705,11 +1934,7 @@ impl WorkStepFact {
             ..
         } = &self.kind
         {
-            if self
-                .local
-                .as_ref()
-                .is_none_or(|local| local.folder.is_none())
-            {
+            if self.local.is_none() {
                 return Err(WorkError::Invalid);
             }
         }
@@ -1985,6 +2210,17 @@ impl WorkExecutionFact {
             }
         }
 
+        if self.steps.iter().any(|step| {
+            step.measurements
+                .and_then(|m| m.settled_revision)
+                .is_some_and(|settled| {
+                    step.status == WorkStepStatus::Running
+                        || settled <= self.approved_revision
+                        || settled > revision
+                })
+        }) {
+            return Err(WorkError::Invalid);
+        }
         if self.user_artifacts.len() > self.artifacts.len() {
             return Err(WorkError::Invalid);
         }
@@ -2003,10 +2239,14 @@ impl WorkExecutionFact {
                         .flat_map(|a| &a.evidence)
                         .any(|original| original == link)
                 })
-                || !matches!(
+                || !(matches!(
                     self.status,
                     WorkExecutionStatus::Completed | WorkExecutionStatus::NeedsReview
-                )
+                ) || (edit.decision.is_none()
+                    && matches!(&edit.edited_data, Some(WorkArtifactDataV1::Draft { .. }))
+                    && self.artifacts.iter().any(|a| {
+                        a.id == edit.artifact && matches!(&a.data, WorkArtifactDataV1::Draft { .. })
+                    })))
             {
                 return Err(WorkError::Invalid);
             }
@@ -2266,6 +2506,29 @@ impl WorkExecutionFact {
             );
         }
     }
+
+    /// Close logical steps without claiming that dispatched native effects
+    /// were undone or drained. Their native owners retain that responsibility.
+    pub fn close_pending_steps(&mut self, note: &str) -> bool {
+        let mut changed = false;
+        for step in &mut self.steps {
+            if step.status != WorkStepStatus::Running {
+                continue;
+            }
+            changed = true;
+            step.status = step.interruption_status();
+            step.usage = None;
+            step.note = Some(note.to_owned());
+            if let Some(measurements) = &mut step.measurements {
+                measurements.outcome = Some(if step.status == WorkStepStatus::OutcomeUnknown {
+                    WorkPageOutcomeV1::OutcomeUnknown
+                } else {
+                    WorkPageOutcomeV1::Cancelled
+                });
+            }
+        }
+        changed
+    }
     /// Each granted origin with the signed-in pages its steps opened.
     pub fn account_use(&self) -> Vec<WorkAccountUseV1> {
         let Some(grant) = self.agent_grant() else {
@@ -2455,7 +2718,7 @@ impl WorkExecutionFact {
                     return Err(WorkError::Invalid);
                 }
                 // A held site step waits beside its page; it is no worker.
-                if !matches!(step.kind, WorkStepKindV1::Confirm { confirm: _ }) {
+                if step.occupies_worker() {
                     running_steps += 1;
                 }
                 if matches!(step.kind, WorkStepKindV1::RunCommand { .. })
@@ -2515,7 +2778,6 @@ impl WorkExecutionFact {
             || (running_commands > 0 && pending_file_change)
             || running_steps > usize::from(self.spec.limits.max_workers)
             || (complete && (running_steps > 0 || !finished))
-            || (finished && !(complete || running))
             || claimed_artifacts.len() != self.artifacts.len()
             || claimed_evidence.len()
                 != self.provider_evidence.len()
@@ -2560,8 +2822,7 @@ impl WorkExecutionFact {
             let fact = attempt.ok_or(WorkError::Invalid)?;
             if source.attempt != fact.id
                 || source.node != node.node
-                || source.evidence.provider != grant.provider
-                || source.evidence.model != grant.model
+                || !grant.admits_search(source.evidence.provider, &source.evidence.model)
                 || !sources.insert(source.id)
                 || artifacts.contains(&source.id)
             {
@@ -2681,6 +2942,14 @@ pub enum WorkRuntimeIntent {
 
 #[derive(Clone, Debug)]
 pub enum WorkRuntimeUpdate {
+    /// Host-only conservative privacy provenance, committed before image input
+    /// may leave. This is not permission, billing, or proof bytes were sent.
+    MarkImageDisclosure {
+        execution: WorkExecutionId,
+        attempt: WorkAttemptId,
+        step: WorkStepId,
+        disclosure: WorkPageImageDisclosureV1,
+    },
     PageTitle {
         execution: WorkExecutionId,
         attempt: WorkAttemptId,
@@ -2869,6 +3138,7 @@ mod search_ranking_tests {
                     title: "Source".into(),
                     start_index: 0,
                     end_index: 6,
+                    snippet: None,
                 }],
                 actual_input_tokens: 100,
                 actual_output_tokens: 10,

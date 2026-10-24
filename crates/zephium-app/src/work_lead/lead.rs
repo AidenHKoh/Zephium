@@ -31,7 +31,7 @@ use crate::work_runtime::{WorkAttemptProbe, WorkNodeAttempt};
 /// Output one lead turn may produce: tool calls and a reply, never an essay.
 const LEAD_TURN_OUTPUT: u32 = 8_000;
 /// Said to the lead after a turn ran past its output limit.
-const RAN_LONG: &str = "Your last turn ran past its length limit and was discarded. Act now: call the tools you need, with short arguments, and keep any reply brief.";
+const RAN_LONG: &str = "Your previous turn hit the output limit. Do not repeat that response. Reuse the evidence and objects already available. You have 2048 output tokens for a compact recovery: at most three short reply sentences, fewer optional items, and details under 120 characters. Preserve required facts and explicitly requested counts by shortening details first. Keep any reply already published; never recreate it. If the work is complete, create the reply first if missing and call finish in this same turn; omit optional objects instead of delaying completion. If required work remains, call only its next necessary tools.";
 const FLOOR_COST: u32 = 40_000;
 const FLOOR_TOKENS: u32 = 24_000;
 /// Consecutive turns that call no tool before the run closes with what it
@@ -57,7 +57,10 @@ struct LeadState {
     parts_started: usize,
     parts_running: usize,
     reply: Option<WorkArtifactId>,
+    reply_input: Option<Value>,
+    reply_sources: Vec<String>,
     finish_refusals: u8,
+    final_records: Option<Value>,
     title_refused: bool,
     /// Objects refused in this run, by what they are, and how often.
     refused: std::collections::BTreeMap<String, u8>,
@@ -65,6 +68,8 @@ struct LeadState {
     steers: BTreeSet<WorkStepId>,
     searches: usize,
     reads: usize,
+    /// The browser parts this run started, by the site each works on.
+    sites: Vec<parts::SitePart>,
 }
 
 pub(crate) struct Lead<'a, B> {
@@ -86,6 +91,31 @@ pub(crate) struct Lead<'a, B> {
     pub name_work: bool,
     pub slots: tokio::sync::Semaphore,
     state: Mutex<LeadState>,
+}
+
+struct EarlyReply {
+    call: WorkModelToolCall,
+    answer: (String, bool),
+}
+
+fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
+    if tool.name == "create"
+        && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
+        && tool.arguments.get("part").is_none_or(Value::is_null)
+    {
+        Some(tool.arguments.clone())
+    } else if tool.name == "finish" {
+        finish_reply_args(&tool.arguments)
+    } else {
+        None
+    }
+}
+
+fn finish_reply_args(args: &Value) -> Option<Value> {
+    args.get("reply").filter(|reply| reply.is_object()).map(|reply| serde_json::json!({
+        "kind":"reply", "title":args.get("title").and_then(Value::as_str).unwrap_or("Answer"),
+        "data":reply, "sources":args.get("reply_sources").cloned().unwrap_or_else(|| serde_json::json!([]))
+    }))
 }
 
 type Answer = (usize, String, bool);
@@ -153,6 +183,32 @@ where
         *used += 1;
         *used <= cap
     }
+    /// Whether a browser part may start on `site` now, given the parts this
+    /// run already ran there; a part that may is counted as running there.
+    pub(crate) fn claim_site(&self, site: &str, title: &str) -> parts::SiteTurn {
+        let mut state = self.state();
+        let turn = parts::site_turn(&state.sites, site);
+        if !matches!(turn, parts::SiteTurn::Refuse(_)) {
+            state.sites.push(parts::SitePart {
+                site: site.to_owned(),
+                title: title.to_owned(),
+                ended: None,
+            });
+        }
+        turn
+    }
+    /// How the part that claimed `site` under `title` ended.
+    pub(crate) fn end_site(&self, site: &str, title: &str, ended: parts::SiteEnd) {
+        let mut state = self.state();
+        if let Some(part) = state
+            .sites
+            .iter_mut()
+            .rev()
+            .find(|p| p.site == site && p.title == title && p.ended.is_none())
+        {
+            part.ended = Some(ended);
+        }
+    }
     pub(crate) fn release_part(&self) {
         let mut state = self.state();
         state.parts_running = state.parts_running.saturating_sub(1);
@@ -162,7 +218,8 @@ where
     }
 
     fn system(&self) -> Vec<WorkModelSystemBlock> {
-        let mut index = String::from("Skills (load the one that fits before you start):\n");
+        let mut index =
+            String::from("Skills for workflows (plain fact reads use web_fetch directly):\n");
         for skill in &self.skills {
             index.push_str(&format!("- {}: {}\n", skill.name, skill.description));
         }
@@ -228,6 +285,7 @@ where
         let mut failed_calls = 0u8;
         // A turn that ran out of output is asked again once, briefly.
         let mut ran_long = false;
+        let effort = crate::work_models::lead_effort(self.run.profile, &self.models.lead.entry);
         loop {
             if self.run.cancelled().await {
                 return Ok(WorkAttemptStatus::Cancelled);
@@ -240,24 +298,36 @@ where
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
-            compact(&mut messages);
-            let sizes = Sections::of(&system, &tools, &messages);
+            compact(&mut messages, conversation_budget(&self.models.lead.entry));
+            let (call_system, call_tools, call_messages) = (&system, &tools, &messages);
+            let sizes = Sections::of(call_system, call_tools, call_messages);
             let model = &self.models.lead;
             let request = WorkModelRequest {
+                image_fence: None,
                 model: model.entry.model.clone(),
-                system: system.clone(),
-                tools: tools.clone(),
-                messages: messages.clone(),
-                max_output_tokens: model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT),
-                reasoning: model.entry.supports.reasoning.then_some(if ran_long {
-                    WorkModelReasoning::Low
+                system: call_system.clone(),
+                tools: call_tools.clone(),
+                messages: call_messages.clone(),
+                max_output_tokens: if ran_long {
+                    model.entry.max_output.min(2_048)
                 } else {
-                    WorkModelReasoning::Medium
+                    model.entry.max_output.clamp(4_096, LEAD_TURN_OUTPUT)
+                },
+                reasoning: effort.map(|effort| {
+                    if ran_long {
+                        WorkModelReasoning::Low
+                    } else {
+                        effort
+                    }
                 }),
                 native_search: false,
                 parallel_tools: true,
+                tool_choice: WorkModelToolChoice::Auto,
+                volatile_tail: 0,
+                cache_key: Some(work_model_cache_key(call_system, call_tools)),
             };
-            let (outcome, usage) = match call::call(self.run, model, request).await {
+            let (called, early_reply) = self.call_with_early_reply(model, request).await;
+            let (outcome, usage) = match called {
                 Ok(done) => done,
                 Err(CallFailure::Stopped) => return Ok(WorkAttemptStatus::Cancelled),
                 Err(CallFailure::Lost) => {
@@ -276,6 +346,7 @@ where
                         WorkStepStatus::Failed,
                         None,
                         CallFailure::Refused(error),
+                        self.models.lead.entry.model.provider,
                     )
                     .await;
                     let fatal = matches!(
@@ -283,6 +354,7 @@ where
                         WorkModelError::MissingKey
                             | WorkModelError::Unauthorized
                             | WorkModelError::OverBudget
+                            | WorkModelError::Hosted { .. }
                     );
                     if fatal {
                         return Ok(WorkAttemptStatus::Failed);
@@ -294,9 +366,22 @@ where
                 }
             };
             failed_calls = 0;
-            if outcome.stop == WorkModelStop::MaxTokens && !ran_long {
-                ran_long = true;
+            if outcome.stop == WorkModelStop::MaxTokens {
                 self.turn_step(None, usage, None).await;
+                if ran_long {
+                    return self.close(Stall::OutputLimit).await;
+                }
+                ran_long = true;
+                if let Some(reply) = early_reply {
+                    messages.push(WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(
+                        reply.call.clone(),
+                    )]));
+                    messages.push(WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                        call: reply.call.id,
+                        content: reply.answer.0,
+                        is_error: reply.answer.1,
+                    }]));
+                }
                 messages.push(WorkModelMessage::User(vec![WorkModelPart::Text(
                     RAN_LONG.into(),
                 )]));
@@ -308,6 +393,23 @@ where
             self.run.report(super::WorkLeadDiagnostic::Turn {
                 turn: self.run.turn(),
                 calls: calls.len(),
+                tool_kinds: Box::new(std::array::from_fn(|index| {
+                    calls.get(index).map(|call| match call.name.as_str() {
+                        "web_fetch" => "web_fetch",
+                        "web_search" => "web_search",
+                        "start_part" => "start_part",
+                        "create" => "create",
+                        "revise" => "revise",
+                        "read_canvas" => "read_canvas",
+                        "ask" => "ask",
+                        "ask_folder" => "ask_folder",
+                        "load_skill" => "load_skill",
+                        "finish" => "finish",
+                        "continue_work" => "continue_work",
+                        "revise_block" => "revise_block",
+                        _ => "other",
+                    })
+                })),
                 tokens: usage.model_tokens,
                 cost_micro_usd: usage.cost_micro_usd,
                 input: u32::try_from(outcome.usage.input_tokens).unwrap_or(u32::MAX),
@@ -320,6 +422,9 @@ where
             });
             messages.push(WorkModelMessage::Assistant(outcome.assistant));
             if calls.is_empty() {
+                if ran_long {
+                    return self.close(Stall::OutputLimit).await;
+                }
                 idle += 1;
                 if idle >= MAX_IDLE {
                     return self.close(Stall::NoProgress).await;
@@ -334,13 +439,24 @@ where
                 )]));
                 continue;
             }
-            let (results, progress, finished) = match self.execute(&calls).await {
-                Ok(done) => done,
-                Err(status) => return Ok(status),
-            };
+            let (results, progress, finished) =
+                match self.execute(&calls, early_reply.as_ref()).await {
+                    Ok(done) => done,
+                    Err(status) => return Ok(status),
+                };
             messages.push(WorkModelMessage::ToolResults(results));
             if finished {
                 return Ok(WorkAttemptStatus::Succeeded);
+            }
+            if ran_long
+                && calls.iter().all(|call| {
+                    matches!(
+                        call.name.as_str(),
+                        "create" | "revise" | "read_canvas" | "finish"
+                    )
+                })
+            {
+                return self.close(Stall::OutputLimit).await;
             }
             idle = 0;
             if progress {
@@ -354,10 +470,201 @@ where
         }
     }
 
+    async fn call_with_early_reply(
+        &self,
+        model: &call::LeadModel,
+        request: WorkModelRequest,
+    ) -> (
+        Result<(WorkModelOutcome, WorkUsage), CallFailure>,
+        Option<EarlyReply>,
+    ) {
+        let (send, mut receive) = tokio::sync::mpsc::channel(1);
+        let offered = std::sync::atomic::AtomicBool::new(false);
+        let completed = |tool: WorkModelToolCall| {
+            if early_reply_args(&tool).is_some()
+                && !offered.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let _ = send.try_send(tool);
+            }
+        };
+        let generation = call::call(
+            self.run,
+            model,
+            request,
+            WorkModelRole::Lead,
+            Some(&completed),
+        );
+        tokio::pin!(generation);
+        let mut reply = None;
+        let mut publication: Option<Pin<Box<dyn Future<Output = EarlyReply> + Send + '_>>> = None;
+        let mut outcome = None;
+        loop {
+            tokio::select! {
+                result = &mut generation, if outcome.is_none() => { outcome = Some(result); }
+                Some(tool) = receive.recv(), if reply.is_none() && publication.is_none() && outcome.is_none() => {
+                    publication = Some(Box::pin(async move {
+                        // Only a complete reply uses this path, through the same
+                        // schema, source, honesty and durable publication checks.
+                        let answer = self.publish_early_reply(&tool).await;
+                        EarlyReply { call: tool, answer }
+                    }));
+                }
+                published = async { publication.as_mut().expect("guarded publication").await }, if publication.is_some() => {
+                    if !published.answer.1 {
+                        self.run.report(super::WorkLeadDiagnostic::ReplyPublished { generation_pending: outcome.is_none() });
+                    }
+                    reply = Some(published);
+                    publication = None;
+                }
+                _ = self.run.probe.wait_cancelled(), if outcome.is_some() => {
+                    self.run.cancelled().await;
+                    return (Err(CallFailure::Stopped), reply);
+                }
+            }
+            if matches!(outcome, Some(Err(CallFailure::Stopped))) {
+                return (Err(CallFailure::Stopped), reply);
+            }
+            if publication.is_none()
+                && reply.is_none()
+                && matches!(&outcome, Some(Ok((result, _))) if result.stop == WorkModelStop::MaxTokens)
+            {
+                if let Ok(tool) = receive.try_recv() {
+                    publication = Some(Box::pin(async move {
+                        let answer = self.publish_early_reply(&tool).await;
+                        EarlyReply { call: tool, answer }
+                    }));
+                    continue;
+                }
+            }
+            if publication.is_none() {
+                if let Some(mut result) = outcome.take() {
+                    if let (Some(reply), Ok((finished, _))) = (&reply, &result) {
+                        if finished.stop != WorkModelStop::MaxTokens {
+                            let calls = call::tool_calls(&finished.assistant);
+                            if calls.iter().filter(|call| call.id == reply.call.id).count() != 1
+                                || !calls.iter().any(|call| {
+                                    call.id == reply.call.id
+                                        && call.name == reply.call.name
+                                        && call.arguments == reply.call.arguments
+                                })
+                            {
+                                result = Err(CallFailure::Lost);
+                            }
+                        }
+                    }
+                    return (result, reply);
+                }
+            }
+        }
+    }
+
+    fn check_finish_records(&self, args: &Value) -> Result<(), (String, ObjectRefusal)> {
+        let Some(fields) = args.as_object() else {
+            return Err((
+                "finish arguments must be an object".into(),
+                ObjectRefusal::Shape,
+            ));
+        };
+        if fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "reply"
+                    | "reply_sources"
+                    | "records"
+                    | "layout"
+                    | "records_title"
+                    | "say"
+                    | "followups"
+                    | "title"
+            )
+        }) {
+            return Err(("finish accepts only reply, reply_sources, records, layout, records_title, say, followups and title; nothing was published. Select native records by r key, or create other objects separately.".into(), ObjectRefusal::Shape));
+        }
+        if let Some(keys) = args.get("reply_sources") {
+            if args.get("reply").is_none()
+                || !keys.as_array().is_some_and(|keys| {
+                    keys.len() <= 16
+                        && keys
+                            .iter()
+                            .all(|key| key.as_str().is_some_and(|key| !key.is_empty()))
+                })
+            {
+                return Err(("reply_sources requires a reply and at most 16 source keys; nothing was published".into(), ObjectRefusal::Source));
+            }
+            let request = finish_reply_args(args)
+                .ok_or_else(|| ("reply must be an object".into(), ObjectRefusal::Shape))?;
+            objects::propose(
+                self.run,
+                &[],
+                "reply",
+                request["title"].as_str().unwrap_or("Answer"),
+                request["data"].clone(),
+                &strings(Some(keys)),
+                &[],
+                false,
+            )?;
+        }
+        if args.get("records").is_none()
+            && (args.get("layout").is_some() || args.get("records_title").is_some())
+        {
+            return Err((
+                "layout and records_title require records; nothing was published".into(),
+                ObjectRefusal::Shape,
+            ));
+        }
+        if let Some(records) = args.get("records") {
+            let kind = args
+                .get("layout")
+                .and_then(Value::as_str)
+                .unwrap_or("picks");
+            if !matches!(kind, "picks" | "sheet") {
+                return Err(("layout must be picks or sheet".into(), ObjectRefusal::Shape));
+            }
+            let title = args
+                .get("records_title")
+                .and_then(Value::as_str)
+                .unwrap_or("Results");
+            objects::propose(
+                self.run,
+                &[],
+                kind,
+                title,
+                serde_json::json!({"records": records}),
+                &[],
+                &[],
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    async fn publish_early_reply(&self, tool: &WorkModelToolCall) -> (String, bool) {
+        if tool.name == "finish" {
+            if let Err((message, reason)) = self.check_finish_records(&tool.arguments) {
+                return self.refuse("finish records", reason, message);
+            }
+            let state = self.state();
+            if state.reply.is_some() {
+                return if state.reply_input.as_ref() == tool.arguments.get("reply")
+                    && state.reply_sources == strings(tool.arguments.get("reply_sources"))
+                {
+                    ("Reply already published".into(), false)
+                } else {
+                    ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true)
+                };
+            }
+        }
+        let Some(args) = early_reply_args(tool) else {
+            return ("no complete reply".into(), true);
+        };
+        self.create(&args, None, false).await
+    }
+
     /// The tool calls of one turn, run together; `finish` last.
     async fn execute(
         &self,
         calls: &[WorkModelToolCall],
+        early_reply: Option<&EarlyReply>,
     ) -> Result<(Vec<WorkModelToolResult>, bool, bool), WorkAttemptStatus> {
         let mut terminal = None;
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
@@ -366,6 +673,26 @@ where
         let mut finish_at = None;
         let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
+            if let Some(reply) = early_reply.filter(|reply| reply.call.id == tool_call.id) {
+                if tool_call.name == "finish"
+                    && reply.call.name == tool_call.name
+                    && reply.call.arguments == tool_call.arguments
+                    && !reply.answer.1
+                {
+                    finish_at = Some(index);
+                    continue;
+                }
+                answers[index] = Some(
+                    if reply.call.name == tool_call.name
+                        && reply.call.arguments == tool_call.arguments
+                    {
+                        reply.answer.clone()
+                    } else {
+                        ("The completed reply changed in the final response. Keep the published reply and revise it explicitly if needed.".into(), true)
+                    },
+                );
+                continue;
+            }
             let args = &tool_call.arguments;
             match tool_call.name.as_str() {
                 "web_search" => {
@@ -385,7 +712,7 @@ where
                     match parts::step_request("web_search", &args, self.run) {
                         Ok(_) if !self.spend(true) => {
                             answers[index] = Some((
-                                "You have searched enough for this request: build the result from what you have, or start a research part for a new thread.".into(),
+                                "You have searched enough for this request: read the best pages your searches already listed with web_fetch and build the result from them; start a research part only for a subject you have not searched.".into(),
                                 true,
                             ))
                         }
@@ -430,7 +757,7 @@ where
                     Err(fault) => answers[index] = Some((fault, true)),
                 },
                 "create" => {
-                    let args = args.clone();
+                    let args = unquoted_data(args);
                     pending.push(Box::pin(async move {
                         let part = args
                             .get("part")
@@ -441,7 +768,7 @@ where
                     }))
                 }
                 "revise" => {
-                    let args = args.clone();
+                    let args = unquoted_data(args);
                     pending.push(Box::pin(async move {
                         let (content, error) = self.revise(&args).await;
                         vec![(index, content, error)]
@@ -487,10 +814,13 @@ where
                                 run: self.run,
                                 part: None,
                             };
+                            let private = super::run::tool_reads_private(&tool_call.name);
                             let outcome = set.call(context, tool_call).await;
                             // Personal, project, computer and connection tools
-                            // all answer with the person's own data.
-                            self.run.mark_private();
+                            // answer with the person's own data.
+                            if private {
+                                self.run.mark_private();
+                            }
                             vec![(index, outcome.content, outcome.is_error)]
                         }))
                     }
@@ -584,6 +914,9 @@ where
         let Some(kind) = args.get("kind").and_then(Value::as_str) else {
             return ("kind is required".into(), true);
         };
+        // The reply answers the whole request on top of the result, never
+        // from the end of one part's row.
+        let part = part.filter(|_| kind != "reply" || helper);
         if helper && !matches!(kind, "picks" | "sheet") {
             return (
                 "A part places at most one compact object, picks or a small sheet, and hands every other fact to the lead in finish's digest".into(),
@@ -604,15 +937,9 @@ where
         let lenient = self.tried(&key);
         if kind == "reply" {
             let reply = self.state().reply;
+            // A second reply is the model updating its answer: revise it.
             if let Some(reply) = reply {
-                if lenient {
-                    return self.revise(&with_id(args, reply)).await;
-                }
-                return self.refuse(
-                    &key,
-                    ObjectRefusal::Second,
-                    format!("This request already has its reply ({reply}); revise it instead"),
-                );
+                return self.revise(&with_id(args, reply)).await;
             }
         }
         let projection = match self.run.probe.runtime_projection().await {
@@ -637,7 +964,7 @@ where
                 .iter()
                 .find(|o| o.in_this_run && o.artifact.part.is_some() && o.artifact.part == part)
             {
-                if lenient && placed.artifact.data.kind_name() == kind {
+                if placed.artifact.data.kind_name() == kind {
                     return self.revise(&with_id(args, placed.artifact.id)).await;
                 }
                 return self.refuse(
@@ -649,54 +976,47 @@ where
                     ),
                 );
             }
+        } else if let Some(placed) = part.and_then(|part| {
+            canvas.iter().find(|o| {
+                o.in_this_run
+                    && o.artifact.part == Some(part)
+                    && o.artifact.data.kind_name() == kind
+            })
+        }) {
+            // The part's row holds one object of a kind: the lead's version
+            // of it replaces the part's.
+            return self.revise(&with_id(args, placed.artifact.id)).await;
         } else if let Some(held) = (kind == "picks")
             .then(|| {
-                let names: Vec<String> = args
-                    .pointer("/data/items")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.get("name").and_then(Value::as_str))
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let names = self.pick_names(args);
                 objects::part_holds(&canvas, &names)
+                    .or_else(|| objects::lead_holds(&canvas, &names))
             })
             .flatten()
         {
-            if lenient {
-                return self.revise(&with_id(args, held.artifact.id)).await;
-            }
-            return self.refuse(
-                &key,
-                ObjectRefusal::Duplicate,
-                format!(
-                    "picks {} from the part already holds these things and stands in the result as it is; add the reply around it, and revise it (id {}) only to change it",
-                    held.artifact.id, held.artifact.id
-                ),
-            );
+            // The same things again are an update of the part's picks.
+            return self.revise(&with_id(args, held.artifact.id)).await;
         } else if let Some(existing) = objects::duplicate(&canvas, kind, title, part) {
-            if lenient {
-                return self.revise(&with_id(args, existing.artifact.id)).await;
-            }
-            return self.refuse(
-                &key,
-                ObjectRefusal::Duplicate,
-                format!(
-                    "{kind} {} \"{}\" already covers this subject: revise it with revise (id {}) instead of placing a copy",
-                    existing.artifact.id, existing.artifact.title, existing.artifact.id
-                ),
-            );
+            return self.revise(&with_id(args, existing.artifact.id)).await;
         }
-        let data = args.get("data").cloned().unwrap_or(Value::Null);
+        let mut data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        let proposed =
+        if let Some(records) = self.as_records(kind, &data) {
+            data = records;
+        }
+        let mut proposed =
             match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
                 Ok(proposed) => proposed,
                 Err((fault, reason)) => return self.refuse(&key, reason, fault),
             };
+        if args.pointer("/data/records").is_none() {
+            objects::hydrate_record_media(
+                &mut proposed,
+                &projection.executions,
+                self.run.profile,
+                self.run.probe.work(),
+            );
+        }
         if helper {
             if let zephium_core::work::artifact::WorkArtifactDataV1::Sheet {
                 columns, rows, ..
@@ -713,7 +1033,6 @@ where
                 }
             }
         }
-        let mut proposed = proposed;
         let run_honesty = honesty(&projection, execution, &proposed);
         if let Err(fault) = objects::honest(&proposed.data, &run_honesty) {
             match objects::mend(&proposed.data, &run_honesty).filter(|_| lenient) {
@@ -730,6 +1049,8 @@ where
                 self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(id);
+                    self.state().reply_input = args.get("data").cloned();
+                    self.state().reply_sources = strings(args.get("sources"));
                 }
                 self.run.activity(WorkActivityV1::ProducingArtifact);
                 (
@@ -739,6 +1060,73 @@ where
             }
             Err(error) => (publish_fault(error), true),
         }
+    }
+
+    /// A hand-written pick or row that restates a record this run read: its
+    /// values must come from the record, so it is selected by its r key. A
+    /// pick that draws a route (a flight) is the lead's own shape.
+    /// The names a picks call is about: its items' names, or the names of
+    /// the records it selects by key.
+    fn pick_names(&self, args: &Value) -> Vec<String> {
+        if let Some(records) = args.pointer("/data/records").and_then(Value::as_array) {
+            let read = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+            return records
+                .iter()
+                .filter_map(super::records::Selection::loose)
+                .filter_map(|record| read.name_of(&record.source).map(str::to_owned))
+                .collect();
+        }
+        args.pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Hand-written picks or rows that name only records this run read stand
+    /// as those records, so their prices, links and pictures are the page's.
+    /// The lead's own words about each one are kept as its note.
+    fn as_records(&self, kind: &str, data: &Value) -> Option<Value> {
+        if data.get("records").is_some() {
+            return None;
+        }
+        let records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+        let items = match kind {
+            "picks" => data["items"].as_array()?,
+            "sheet" => data["rows"].as_array()?,
+            _ => return None,
+        };
+        let chosen = items
+            .iter()
+            .map(|item| {
+                if item.get("route").is_some() {
+                    return None;
+                }
+                let name = if kind == "picks" {
+                    item["name"].as_str()
+                } else {
+                    item["cells"][0].as_str()
+                }?;
+                let mut record = serde_json::json!({ "source": records.key_of(name)? });
+                for (from, to) in [
+                    ("why", "annotation"),
+                    ("subtitle", "subtitle"),
+                    ("facts", "facts"),
+                    ("recommended", "recommended"),
+                ] {
+                    if let Some(value) = item.get(from).filter(|_| record.get(to).is_none()) {
+                        record[to] = value.clone();
+                    }
+                }
+                Some(record)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!chosen.is_empty()).then(|| serde_json::json!({ "records": chosen }))
     }
 
     async fn revise(&self, args: &Value) -> (String, bool) {
@@ -795,7 +1183,7 @@ where
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
-        let proposed = match objects::propose(
+        let mut proposed = match objects::propose(
             self.run,
             &canvas,
             kind,
@@ -808,6 +1196,14 @@ where
             Ok(proposed) => proposed,
             Err((fault, reason)) => return self.refuse(&key, reason, fault),
         };
+        if args.pointer("/data/records").is_none() {
+            objects::hydrate_record_media(
+                &mut proposed,
+                &projection.executions,
+                self.run.profile,
+                self.run.probe.work(),
+            );
+        }
         if let Err(fault) = objects::honest(
             &proposed.data,
             &honesty(&projection, self.run.probe.execution(), &proposed),
@@ -821,6 +1217,8 @@ where
                 self.placed(&key);
                 if kind == "reply" {
                     self.state().reply = Some(new);
+                    self.state().reply_input = args.get("data").cloned();
+                    self.state().reply_sources = strings(args.get("sources"));
                 }
                 let forwarded = if target.artifact.id == id {
                     String::new()
@@ -852,6 +1250,7 @@ where
         *self.state().refused.entry(key.to_owned()).or_default() += 1;
         self.run.report(super::WorkLeadDiagnostic::ObjectRefused {
             reason: Some(reason),
+            at: schema_path(&words),
         });
         let words = if matches!(
             reason,
@@ -958,6 +1357,54 @@ where
     }
 
     async fn finish(&self, args: &Value) -> (String, bool) {
+        if let Err((message, reason)) = self.check_finish_records(args) {
+            return self.refuse("finish records", reason, message);
+        }
+        if let Some(reply) = args.get("reply") {
+            let state = self.state();
+            if state.reply.is_some()
+                && (state.reply_input.as_ref() != Some(reply)
+                    || state.reply_sources != strings(args.get("reply_sources")))
+            {
+                return ("A different reply is already published; revise it explicitly, then finish without reply.".into(), true);
+            }
+        }
+        let checked_title = if args.get("reply").is_some() || args.get("records").is_some() {
+            match self.title(args.get("title")) {
+                Ok(title) => Some(title),
+                Err(fault) => return (fault, true),
+            }
+        } else {
+            None
+        };
+        if self.state().reply.is_none() {
+            if let Some(request) = finish_reply_args(args) {
+                let result = self.create(&request, None, false).await;
+                if result.1 {
+                    return result;
+                }
+            }
+        }
+        if let Some(records) = args.get("records") {
+            let layout = args
+                .get("layout")
+                .and_then(Value::as_str)
+                .unwrap_or("picks");
+            if !matches!(layout, "picks" | "sheet") {
+                return ("layout must be picks or sheet".into(), true);
+            }
+            let request = serde_json::json!({"kind":layout, "title":args.get("records_title").and_then(Value::as_str).unwrap_or("Results"), "data":{"records":records}});
+            let prior = self.state().final_records.clone();
+            match prior {
+                Some(prior) if prior == request => {},
+                Some(_) => return ("The final records were already published. Use revise to change them, then finish without records.".into(), true),
+                None => {
+                    let result = self.create(&request, None, false).await;
+                    if result.1 { return result; }
+                    self.state().final_records = Some(request);
+                }
+            }
+        }
         if self.state().reply.is_none() {
             let refusals = {
                 let mut state = self.state();
@@ -994,9 +1441,12 @@ where
                 followups.push(followup);
             }
         }
-        let title = match self.title(args.get("title")) {
-            Ok(title) => title,
-            Err(fault) => return (fault, true),
+        let title = match checked_title {
+            Some(title) => title,
+            None => match self.title(args.get("title")) {
+                Ok(title) => title,
+                Err(fault) => return (fault, true),
+            },
         };
         self.run.activity(WorkActivityV1::Finishing);
         let mut step = self.run.step(
@@ -1150,11 +1600,47 @@ where
         status: WorkStepStatus,
         usage: Option<WorkUsage>,
         failure: CallFailure,
+        provider: WorkModelProvider,
     ) {
         let mut step = self.run.step(WorkStepKindV1::Turn, status, part);
         step.usage = Some(usage.unwrap_or_default());
+        let hosted = provider == WorkModelProvider::Cloud;
+        step.model_fault = match failure {
+            CallFailure::Refused(error) => model_fault(error, hosted),
+            _ => None,
+        };
         step.note = Some(
             match failure {
+                CallFailure::Refused(WorkModelError::OverBudget) if hosted => {
+                    "Zephium AI's included usage is spent; upgrade, buy extra usage or use your own key"
+                }
+                CallFailure::Refused(WorkModelError::Hosted { refusal, .. }) => match refusal {
+                    HostedRefusal::PlanRequired => {
+                        "The chosen Zephium AI model needs another plan; see plans in Settings → Account"
+                    }
+                    HostedRefusal::BillingReview => {
+                        "The Zephium account is under billing review; open Settings → Account"
+                    }
+                    HostedRefusal::OutOfCredits => {
+                        "Zephium AI's included usage is spent; upgrade, buy extra usage or use your own key"
+                    }
+                    HostedRefusal::DailyLimit => {
+                        "The daily Zephium AI limit is reached; it resets at 00:00 UTC"
+                    }
+                    HostedRefusal::FreeUsagePaused => {
+                        "Free Zephium AI usage is paused for now; credits and your own key still work"
+                    }
+                    HostedRefusal::ConfirmationLimited => {
+                        "Zephium AI is still confirming earlier requests; wait a moment"
+                    }
+                    HostedRefusal::Paused => {
+                        "Zephium AI is paused as a spending protection; try later or use your own key"
+                    }
+                    _ => "The model's turn could not be used",
+                },
+                CallFailure::Refused(WorkModelError::Unauthorized) if hosted => {
+                    "The Zephium account's session ended; sign in again in Settings → Account"
+                }
                 CallFailure::Refused(WorkModelError::MissingKey) => {
                     "No key is set for the chosen model; add one in Settings → AI"
                 }
@@ -1186,8 +1672,29 @@ where
     /// the run finishes. A run never dies with nothing to show.
     async fn close(&self, stall: Stall) -> Result<WorkAttemptStatus, WorkError> {
         self.run.report(super::WorkLeadDiagnostic::Closed { stall });
-        let projection = self.run.probe.runtime_projection().await.ok();
         let execution = self.run.probe.execution();
+        let mut projection = self.run.probe.runtime_projection().await.ok();
+        let found_nothing = projection.as_ref().is_some_and(|projection| {
+            !objects::canvas(projection, execution)
+                .iter()
+                .any(|o| o.in_this_run && o.artifact.data.kind_name() != "reply")
+        });
+        if found_nothing {
+            let proposed = {
+                let records = self.run.records.lock().unwrap_or_else(|e| e.into_inner());
+                records
+                    .read_so_far()
+                    .and_then(|request| records.present(&request).ok())
+            };
+            if let Some(proposed) = proposed {
+                if objects::publish(self.run, proposed, None, None)
+                    .await
+                    .is_ok()
+                {
+                    projection = self.run.probe.runtime_projection().await.ok();
+                }
+            }
+        }
         let placed: Vec<String> = projection
             .as_ref()
             .map(|projection| objects::canvas(projection, execution))
@@ -1202,7 +1709,8 @@ where
             .find(|e| e.id == execution)
             .map(|e| e.parts.clone())
             .unwrap_or_default();
-        if self.state().reply.is_none() {
+        let reply_stood = self.state().reply.is_some();
+        if !reply_stood {
             let (headline, text) = closing(&placed, &parts, stall);
             let data = zephium_core::work::artifact::WorkArtifactDataV1::Reply {
                 headline,
@@ -1232,7 +1740,9 @@ where
             None,
         );
         step.note = Some(
-            if placed.is_empty() {
+            if stall == Stall::OutputLimit && reply_stood {
+                "The reply is ready; further details could not be completed."
+            } else if placed.is_empty() {
                 "I couldn't finish this; the reply says why."
             } else {
                 "I stopped here; what I found is on the canvas."
@@ -1242,6 +1752,48 @@ where
         self.run.begin(step, vec![]).await?;
         Ok(WorkAttemptStatus::Succeeded)
     }
+}
+
+/// Call arguments whose `data` came as JSON text, as models sometimes send
+/// it, with that text read as the object it spells.
+fn unquoted_data(args: &Value) -> Value {
+    let mut args = args.clone();
+    let parsed = args
+        .get("data")
+        .and_then(Value::as_str)
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .filter(Value::is_object);
+    if let Some(data) = parsed {
+        args["data"] = data;
+    }
+    // The kind's fields given beside `data` rather than in it are its data.
+    if !args.get("data").is_some_and(Value::is_object) {
+        if let Some(map) = args.as_object_mut() {
+            let fields: serde_json::Map<String, Value> = [
+                "items", "records", "steps", "rows", "columns", "headline", "text", "points",
+                "figures", "facet", "nodes", "edges", "series", "language", "code", "calendar",
+            ]
+            .iter()
+            .filter_map(|key| map.remove(*key).map(|value| ((*key).to_owned(), value)))
+            .collect();
+            if !fields.is_empty() {
+                map.insert("data".into(), Value::Object(fields));
+            }
+        }
+    }
+    args
+}
+
+/// The schema path a refusal's words lead with, after an optional `kind: `.
+fn schema_path(words: &str) -> Option<super::SchemaPath> {
+    let words = words.split_once(": ").map_or(words, |(_, rest)| rest);
+    let path = words.split_whitespace().next()?;
+    (path.contains(|c: char| c.is_ascii_lowercase())
+        && path
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_.[]".contains(c)))
+    .then(|| super::SchemaPath::new(path))
+    .flatten()
 }
 
 /// Why a run closed without its own finish, as a closed fact.
@@ -1255,6 +1807,8 @@ pub enum Stall {
     Turns,
     /// The model stopped answering.
     Model,
+    /// The compact recovery could not finish within one further call.
+    OutputLimit,
 }
 
 /// The reply a closed run leaves: what it placed, what each part that could
@@ -1295,6 +1849,9 @@ fn closing(
         match stall {
             Stall::Budget => "I reached this run's budget before I could finish.",
             Stall::Model => "The model stopped answering before I could finish.",
+            Stall::OutputLimit => {
+                "I could not finish the remaining details within the result's size limit."
+            }
             Stall::NoProgress | Stall::Turns => "I stopped before I could put the rest together.",
         }
         .into(),
@@ -1333,7 +1890,11 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
     let title = &part.title;
     match &part.need {
         Some(Need::SignIn { host }) => format!("{title} needs you to sign in to {host}"),
+        Some(Need::Check { host }) => {
+            format!("{title} needs you to pass the human check on {host}")
+        }
         Some(Need::AllowSite { host }) => format!("{title} needs your OK to work on {host}"),
+        Some(Need::ChooseFolder) => format!("{title} needs you to choose a folder"),
         Some(Need::AllowFolder { path }) => format!(
             "{title} needs your OK to read {}",
             path.rsplit('/').find(|n| !n.is_empty()).unwrap_or(path)
@@ -1516,7 +2077,44 @@ const STUB: &str = "[Used; dropped to keep the conversation small.";
 /// turn: large tool results the model has moved past are replaced together
 /// by a stub with their source keys, and past the hard budget the older
 /// results are shortened too. The canvas keeps everything.
-fn compact(messages: &mut [WorkModelMessage]) {
+/// A refused model call in the words the person acts on.
+fn model_fault(error: WorkModelError, hosted: bool) -> Option<WorkModelFaultV1> {
+    Some(match error {
+        WorkModelError::MissingKey if hosted => WorkModelFaultV1::SignedOut,
+        WorkModelError::MissingKey => WorkModelFaultV1::MissingKey,
+        WorkModelError::Unauthorized if hosted => WorkModelFaultV1::SignedOut,
+        WorkModelError::Unauthorized => WorkModelFaultV1::KeyRefused,
+        WorkModelError::OverBudget if hosted => WorkModelFaultV1::HostedUsage,
+        WorkModelError::OverBudget => WorkModelFaultV1::ProviderCredit,
+        WorkModelError::Hosted { refusal, .. } => match refusal {
+            HostedRefusal::PlanRequired => WorkModelFaultV1::PlanRequired,
+            HostedRefusal::BillingReview => WorkModelFaultV1::BillingReview,
+            HostedRefusal::OutOfCredits => WorkModelFaultV1::HostedUsage,
+            HostedRefusal::DailyLimit => WorkModelFaultV1::DailyLimit,
+            HostedRefusal::FreeUsagePaused => WorkModelFaultV1::FreeUsagePaused,
+            HostedRefusal::ConfirmationLimited => WorkModelFaultV1::HostedBusy,
+            HostedRefusal::Paused => WorkModelFaultV1::HostedPaused,
+            HostedRefusal::AlreadySent
+            | HostedRefusal::InvalidAudio
+            | HostedRefusal::UnsupportedAudio
+            | HostedRefusal::AudioTooLong => return None,
+        },
+        WorkModelError::RateLimited { .. } => WorkModelFaultV1::RateLimited,
+        WorkModelError::Overloaded => WorkModelFaultV1::ProviderDown,
+        WorkModelError::Network => WorkModelFaultV1::Unreachable,
+        WorkModelError::ContextTooLong => WorkModelFaultV1::TooLarge,
+        _ => return None,
+    })
+}
+
+/// How much conversation the model's context can carry beside the prompt,
+/// tools and answer: two characters a token keeps it under the window for
+/// dense text, and large windows keep the usual ceiling.
+pub(crate) fn conversation_budget(entry: &WorkModelEntry) -> usize {
+    CONVERSATION_CHARS.min(entry.context_window as usize * 2)
+}
+
+pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize) {
     let results: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -1549,17 +2147,18 @@ fn compact(messages: &mut [WorkModelMessage]) {
     let mut total: usize = messages.iter().map(size).sum();
     let keep = messages.len().saturating_sub(6);
     for message in messages[..keep].iter_mut() {
-        if total <= CONVERSATION_CHARS {
+        if total <= budget {
             break;
         }
         if let WorkModelMessage::ToolResults(results) = message {
             for result in results.iter_mut() {
-                if result.content.len() > 400 {
-                    total -= result.content.len() - 400;
-                    result.content = format!(
-                        "{} [shortened; read_canvas or search again if needed]",
-                        clip(&result.content, 380)
-                    );
+                let shortened = format!(
+                    "{} [shortened; read_canvas or search again if needed]",
+                    clip(&result.content, 380)
+                );
+                if shortened.len() < result.content.len() {
+                    total = total.saturating_sub(result.content.len()) + shortened.len();
+                    result.content = shortened;
                 }
             }
         }
@@ -1605,4 +2204,151 @@ async fn join_all<T>(mut futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_
     })
     .await;
     results.into_iter().flatten().collect()
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+    use zephium_core::work::model::{
+        WorkModelProvider, WorkModelRef, WorkModelSupports, WorkModelWire,
+    };
+
+    #[test]
+    fn data_sent_as_json_text_is_read_as_its_object_and_a_refusal_names_its_path() {
+        let args = serde_json::json!({"kind":"picks","data":"{\"records\":[\"r1\"]}"});
+        assert_eq!(unquoted_data(&args)["data"]["records"][0], "r1");
+        let plain = serde_json::json!({"data":"not json"});
+        assert_eq!(unquoted_data(&plain), plain);
+        let beside = serde_json::json!({"kind":"picks","title":"Stays","records":["r1"]});
+        assert_eq!(unquoted_data(&beside)["data"]["records"][0], "r1");
+        assert_eq!(
+            format!(
+                "{:?}",
+                schema_path("plan: steps[3].detail is 300 characters").unwrap()
+            ),
+            "steps[3].detail"
+        );
+        assert!(schema_path("The canvas could not be read").is_none());
+    }
+
+    fn entry(context_window: u32) -> WorkModelEntry {
+        WorkModelEntry {
+            id: "compatible/local".into(),
+            model: WorkModelRef {
+                provider: WorkModelProvider::Compatible,
+                wire: WorkModelWire::ChatCompletions,
+                model: "local".into(),
+            },
+            display_name: "Local".into(),
+            roles: vec![],
+            recommended: false,
+            context_window,
+            max_output: 4096,
+            supports: WorkModelSupports {
+                tools: true,
+                vision: false,
+                prompt_cache: false,
+                reasoning: false,
+                native_search: false,
+            },
+            price: None,
+        }
+    }
+
+    fn turn(index: usize, size: usize) -> [WorkModelMessage; 2] {
+        [
+            WorkModelMessage::Assistant(vec![WorkModelPart::Text(format!("turn {index}"))]),
+            WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                call: format!("call_{index}"),
+                content: "x".repeat(size),
+                is_error: false,
+            }]),
+        ]
+    }
+
+    #[test]
+    fn hosted_refusals_name_the_account_not_a_provider_key() {
+        let fault = |error, hosted| model_fault(error, hosted);
+        assert_eq!(
+            fault(WorkModelError::OverBudget, true),
+            Some(WorkModelFaultV1::HostedUsage)
+        );
+        assert_eq!(
+            fault(WorkModelError::OverBudget, false),
+            Some(WorkModelFaultV1::ProviderCredit)
+        );
+        assert_eq!(
+            fault(WorkModelError::Unauthorized, true),
+            Some(WorkModelFaultV1::SignedOut)
+        );
+        assert_eq!(
+            fault(WorkModelError::Unauthorized, false),
+            Some(WorkModelFaultV1::KeyRefused)
+        );
+        assert_eq!(fault(WorkModelError::Cancelled, false), None);
+    }
+
+    #[test]
+    fn each_hosted_refusal_has_its_own_fault_and_the_rest_have_none() {
+        let hosted = |refusal| WorkModelError::Hosted {
+            refusal,
+            retry_after_ms: None,
+        };
+        for (refusal, expected) in [
+            (
+                HostedRefusal::PlanRequired,
+                Some(WorkModelFaultV1::PlanRequired),
+            ),
+            (
+                HostedRefusal::BillingReview,
+                Some(WorkModelFaultV1::BillingReview),
+            ),
+            (
+                HostedRefusal::OutOfCredits,
+                Some(WorkModelFaultV1::HostedUsage),
+            ),
+            (
+                HostedRefusal::DailyLimit,
+                Some(WorkModelFaultV1::DailyLimit),
+            ),
+            (
+                HostedRefusal::FreeUsagePaused,
+                Some(WorkModelFaultV1::FreeUsagePaused),
+            ),
+            (
+                HostedRefusal::ConfirmationLimited,
+                Some(WorkModelFaultV1::HostedBusy),
+            ),
+            (HostedRefusal::Paused, Some(WorkModelFaultV1::HostedPaused)),
+            (HostedRefusal::AlreadySent, None),
+            (HostedRefusal::AudioTooLong, None),
+        ] {
+            assert_eq!(model_fault(hosted(refusal), true), expected, "{refusal:?}");
+        }
+    }
+
+    #[test]
+    fn a_small_context_window_shortens_older_results_sooner() {
+        assert_eq!(conversation_budget(&entry(1_000_000)), CONVERSATION_CHARS);
+        assert_eq!(conversation_budget(&entry(32_768)), 65_536);
+        // Results small enough to stay whole until the conversation outgrows its budget.
+        let conversation: Vec<WorkModelMessage> = (0..80).flat_map(|i| turn(i, 1_100)).collect();
+        let total = |messages: &[WorkModelMessage]| messages.iter().map(size).sum::<usize>();
+
+        let mut large = conversation.clone();
+        compact(&mut large, conversation_budget(&entry(1_000_000)));
+        let mut small = conversation;
+        compact(&mut small, conversation_budget(&entry(32_768)));
+        assert_eq!(
+            total(&large),
+            total(&(0..80).flat_map(|i| turn(i, 1_100)).collect::<Vec<_>>())
+        );
+        assert!(total(&small) <= 65_536);
+        assert!(total(&small) < total(&large));
+        // The newest turns stay whole for the model to act on.
+        let Some(WorkModelMessage::ToolResults(last)) = small.last() else {
+            panic!("results last");
+        };
+        assert_eq!(last[0].content.len(), 1_100);
+    }
 }

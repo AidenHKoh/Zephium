@@ -1,6 +1,5 @@
 import type {
   WorkRuntimeProjection,
-  WorkPlanRevision,
   WorkAgentGrantV1,
   WorkExecutionLimits,
 } from "$shared/ipc/bindings";
@@ -42,6 +41,24 @@ export function commandId(): string {
   return result;
 }
 
+/**
+ * Every runtime change advances the work's revision, so one revision read
+ * twice is the same projection; only which runs this launch left behind is
+ * this process's own view and is compared too.
+ */
+export function sameProjection(
+  current: WorkRuntimeProjection | null,
+  next: WorkRuntimeProjection,
+): boolean {
+  return (
+    !!current &&
+    current.work.id === next.work.id &&
+    current.work.revision === next.work.revision &&
+    current.interrupted.length === next.interrupted.length &&
+    current.interrupted.every((id, index) => id === next.interrupted[index])
+  );
+}
+
 /** Transport admission, not an alternative domain validator or scheduler. */
 export function admitProjection(
   projection: WorkRuntimeProjection,
@@ -67,17 +84,4 @@ export function admitProjection(
     projection.work.revision === current.work.revision ||
     newerRevision(projection.work.revision, current.work.revision)
   );
-}
-
-export function planProposal(plan: WorkPlanRevision) {
-  return {
-    nodes: plan.draft.nodes.map((node, key) => ({
-      key,
-      objective: node.objective,
-      outputs: node.outputs.map((output) => ({ ...output })),
-      dependencies: node.dependencies.map((id) =>
-        plan.draft.nodes.findIndex((item) => item.id === id),
-      ),
-    })),
-  };
 }

@@ -268,6 +268,7 @@ impl WorkExecutionService {
                 })
                 .collect(),
             tabs: false,
+            blocks: manifest.blocks,
         };
         let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
             .admit(profile, context::WorkContextPurpose::Planning, &selection)

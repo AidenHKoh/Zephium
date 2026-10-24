@@ -104,6 +104,8 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var mediaMuted = captureGetter(HTMLMediaElement.prototype, 'muted');
   var mediaVolume = captureGetter(HTMLMediaElement.prototype, 'volume');
   var mediaSrcObject = captureGetter(HTMLMediaElement.prototype, 'srcObject');
+  var pictureInPicture = captureGetter(Document.prototype, 'pictureInPictureElement');
+  var videoPresentation = globalThis.HTMLVideoElement && captureGetter(HTMLVideoElement.prototype, 'webkitPresentationMode');
   var trackReadyState = globalThis.MediaStreamTrack &&
       captureGetter(MediaStreamTrack.prototype, 'readyState');
   var getTracks = globalThis.MediaStream && MediaStream.prototype.getTracks;
@@ -436,8 +438,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       var elements = collect('audio,video');
       if (elements.length > MAX_TRACKED) localIncomplete = true;
       var playing = false;
+      if (pictureInPicture && callGetter(pictureInPicture, document)) media = true;
       for (var m = 0; m < elements.length && m < MAX_TRACKED; m++) {
         var element = elements[m];
+        if (videoPresentation && apply(elementMatches, element, ['video']) &&
+            callGetter(videoPresentation, element) === 'picture-in-picture') media = true;
         // Muted autoplay loses nothing on reload; audible playback does.
         if (!callGetter(mediaPaused, element) && !callGetter(mediaEnded, element) &&
             callGetter(mediaReadyState, element) > 0) {
@@ -749,6 +754,15 @@ fn builtin_script(id: u128, source: &str, all_frames: bool) -> UserScript {
     }
 }
 
+/// The blocker's document script, with the shared picker in its own scope.
+const CONTENT_STYLE_JS: &str = concat!(
+    "(() => {\n",
+    include_str!("picker_kit.js"),
+    "\n",
+    include_str!("content_style.js"),
+    "\n})();\n"
+);
+
 #[derive(Clone, Copy)]
 struct ProtectedScriptSpec {
     id: u128,
@@ -761,7 +775,7 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         + cfg!(any(target_os = "macos", target_os = "windows")) as usize] = [
     ProtectedScriptSpec {
         id: 6,
-        source: include_str!("content_style.js"),
+        source: CONTENT_STYLE_JS,
         all_frames: false,
     },
     ProtectedScriptSpec {

@@ -18,8 +18,8 @@ pub struct RetainedHumanSnapshot {
     pub deadline: Instant,
     pub document_revision: u64,
     pub can_continue: bool,
-    /// The person's navigation settled back on the site, off any sign-in path.
-    pub clear_of_sign_in: bool,
+    /// Native observations of the same live document verified its wall is gone.
+    pub verified_wall_clear: bool,
 }
 
 /// Native-finalized successor operands; this object grants no provider scope.
@@ -31,6 +31,9 @@ pub struct RetainedHumanResume {
     pub usage: zephium_core::work::runtime::WorkUsage,
     pub model_calls: u32,
     pub actions: u32,
+    pub reason: AgentBrowserHumanReason,
+    /// Manual Continue alone never attests that a sign-in/check was resolved.
+    pub verified_wall_clear: bool,
 }
 
 /// One native human-handoff operation on a retained page.
@@ -50,6 +53,15 @@ pub(super) struct HumanHandoff {
     expires: AgentPolicyInstant,
     pending: Option<PendingLifecycle>,
     progress: Option<WorkBrowserHumanProgress>,
+    /// Captured at admitted Continue and kept only if native handback succeeds.
+    continued_wall_clear: bool,
+}
+
+fn requires_wall_proof(reason: AgentBrowserHumanReason) -> bool {
+    matches!(
+        reason,
+        AgentBrowserHumanReason::SignIn | AgentBrowserHumanReason::HumanChallenge
+    )
 }
 
 impl RetainedWork {
@@ -99,6 +111,7 @@ impl RetainedWork {
             expires,
             pending: None,
             progress: None,
+            continued_wall_clear: false,
         });
     }
     pub(in crate::work_resources) fn human_snapshot(&self) -> Option<RetainedHumanSnapshot> {
@@ -113,16 +126,27 @@ impl RetainedWork {
                 .as_ref()
                 .map_or(0, WorkBrowserHumanProgress::revision),
             can_continue: human.phase == RetainedHumanPhase::Presented
+                && human.progress.as_ref().is_some_and(|progress| {
+                    progress.ready()
+                        && (!requires_wall_proof(human.reason) || progress.verified_wall_clear())
+                }),
+            verified_wall_clear: human.phase == RetainedHumanPhase::Presented
                 && human
                     .progress
                     .as_ref()
-                    .is_some_and(WorkBrowserHumanProgress::ready),
-            clear_of_sign_in: human.phase == RetainedHumanPhase::Presented
-                && human
-                    .progress
-                    .as_ref()
-                    .is_some_and(WorkBrowserHumanProgress::clear_of_sign_in),
+                    .is_some_and(WorkBrowserHumanProgress::verified_wall_clear),
         })
+    }
+    pub(in crate::work_resources) fn human_check_progress(
+        &self,
+    ) -> Option<WorkBrowserHumanProgress> {
+        let human = self.human.as_ref()?;
+        (human.phase == RetainedHumanPhase::Presented
+            && requires_wall_proof(human.reason)
+            && !self.stopping
+            && Instant::now() < human.deadline)
+            .then(|| human.progress.clone())
+            .flatten()
     }
     pub(in crate::work_resources) fn human_deadline(&self) -> Option<Instant> {
         self.human
@@ -184,6 +208,16 @@ impl RetainedWork {
         }) else {
             return false;
         };
+        if requires_wall_proof(human.reason) {
+            if !human
+                .progress
+                .as_ref()
+                .is_some_and(WorkBrowserHumanProgress::capture_wall_continuation)
+            {
+                return false;
+            }
+            human.continued_wall_clear = true;
+        }
         let pending = match self.owner.human_lifecycle(
             &self.resource,
             HumanStep::Continue,
@@ -220,6 +254,8 @@ impl RetainedWork {
             usage: self.usage()?,
             model_calls: waiting.closure().model_calls(),
             actions: waiting.closure().actions(),
+            reason: human.reason,
+            verified_wall_clear: human.continued_wall_clear,
         })
     }
     pub(in crate::work_resources) fn poll_human(&mut self, now: AgentPolicyInstant) {

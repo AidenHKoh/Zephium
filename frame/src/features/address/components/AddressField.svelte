@@ -11,6 +11,7 @@
   import { extensions } from "$domain/extensions";
   import { webext } from "$domain/webext";
   import { tabs } from "$domain/tabs";
+  import { surface } from "$domain/surface";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { commands } from "$shared/ipc/bindings";
   import Icon from "$shared/ui/Icon";
@@ -59,7 +60,13 @@
   let draft = $state("");
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   let activeContent = $derived(tabs.activeTab()?.content ?? "web");
-  let listedId = $derived(webext.isAvailable() ? extensions.chromeStoreListingId(activeUrl) : null);
+  // Only a store page actually in front, never one behind Settings or another
+  // browser page, offers to install.
+  let listedId = $derived(
+    webext.isAvailable() && surface.currentPage() === null
+      ? extensions.chromeStoreListingId(activeUrl)
+      : null,
+  );
   let listedInstalled = $derived(listedId === null ? null : webext.named(listedId));
   let removing = $state(false);
   $effect(() => {
@@ -82,6 +89,15 @@
   $effect(() => {
     const command = ui.uiCommand();
     if (command.seq === 0 || command.id !== "url.focus" || input === undefined) return;
+    // At rail width the field is not drawn; the launcher stands in for it.
+    const tab = untrack(() => tabs.activeTab());
+    if (compact && tab?.url && (tab.content ?? "web") === "web") {
+      // Work has no page in front, so there the launcher opens empty.
+      if (untrack(() => surface.currentPage()) === "work")
+        void commands.runCommand("launcher.toggle");
+      else void commands.launcherEdit(tab.id, tab.url);
+      return;
+    }
     input.focus();
     input.select();
   });
@@ -211,7 +227,7 @@
     class:sr-only={compact}
     class:flex={!compact}
     class:shadow-[inset_0_0_0_1px_var(--color-danger)]={failed}
-    class="address-field h-[34px] items-center gap-2 rounded-row bg-fill ps-2.5 pe-1 shadow-field transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-fill-hover focus-within:shadow-[var(--shadow-field-focus)] hover:bg-fill-hover"
+    class="address-field h-[34px] items-center gap-2 rounded-row bg-address ps-2.5 pe-1 shadow-[var(--shadow-tile)] transition-[background-color,box-shadow] duration-[var(--motion-fast)] ease-[var(--ease-out)] [--address-centering:20px] focus-within:bg-address-hover focus-within:shadow-[var(--shadow-field-focus)] hover:bg-address-hover"
   >
     {#if !compact && warning}
       <span

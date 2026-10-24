@@ -1,10 +1,17 @@
-import type { WorkArtifactDataV1, WorkArtifactV1, WorkExecutionFact } from "$shared/ipc/bindings";
+import type {
+  WorkRecordMediaRefV1,
+  WorkArtifactDataV1,
+  WorkArtifactV1,
+  WorkExecutionFact,
+} from "$shared/ipc/bindings";
 
 type Subject = {
   name: string;
   descriptor?: string | null;
   homepage?: string | null;
   image_candidates?: readonly string[] | null;
+  record_media?: WorkRecordMediaRefV1 | null;
+  media_attempted?: boolean;
 };
 type Matrix = Extract<WorkArtifactDataV1, { kind: "comparison_matrix" }>;
 export type SubjectFact = { label: string; value: string };
@@ -224,6 +231,7 @@ export function subjectFacts(execution: WorkExecutionFact, subject: Subject): Su
  * from memory and can cite another subject's.
  */
 export function subjectImageCandidates(execution: WorkExecutionFact, subject: Subject): string[] {
+  if (subject.media_attempted) return [];
   const key = subjectKey(subject);
   const records = recordArtifacts(execution);
   const observed: string[] = [];
@@ -233,7 +241,8 @@ export function subjectImageCandidates(execution: WorkExecutionFact, subject: Su
       records.has(artifact.id) || artifact.data.kind === "evidence_collection" ? observed : claimed;
     for (const candidate of subjectsOf(artifact)) {
       if (subjectKey(candidate) !== key) continue;
-      for (const url of candidate.image_candidates ?? []) if (!out.includes(url)) out.push(url);
+      for (const url of candidate.media_attempted ? [] : (candidate.image_candidates ?? []))
+        if (!out.includes(url)) out.push(url);
     }
   }
   return [...observed, ...claimed.filter((url) => !observed.includes(url))];

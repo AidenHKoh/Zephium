@@ -57,8 +57,12 @@ async function mountCanvas() {
     };
     return true;
   });
-  const operation = vi.spyOn(objective.operations, "begin").mockResolvedValue();
-  const run = vi.spyOn(objective, "run").mockResolvedValue();
+  const operation = vi.spyOn(objective.operations, "begin").mockImplementation(async (input) => ({
+    id: "operation",
+    input,
+    state: { kind: "pending", work: "objective" },
+  }));
+  const run = vi.spyOn(objective, "run").mockResolvedValue(true);
   for (const spy of [create, operation, run]) spy.mockClear();
   vi.spyOn(environment, "edit").mockResolvedValue(true);
   const screen = await render(WorkEnvironmentWorkspace, {
@@ -67,7 +71,6 @@ async function mountCanvas() {
       tabFixture({ id: "tab-1", title: "Sprint 42", url: "https://app.notion.com/p/Sprint-42" }),
     ],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

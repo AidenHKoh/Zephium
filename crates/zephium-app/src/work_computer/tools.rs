@@ -1,4 +1,7 @@
-//! The six tools, their schemas and what each returns to the model.
+//! The bounded Computer tools, their schemas and what each returns to the model.
+mod git;
+mod python;
+mod recovery;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,12 +22,8 @@ const READ_LINES: u32 = 400;
 const MAX_READ_LINES: u32 = 2000;
 const COMMAND_TIMEOUT: u32 = 120;
 const MAX_COMMAND_TIMEOUT: u32 = 600;
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
-#[cfg(windows)]
-const SHELL_DESCRIPTION: &str = "Run a Windows PowerShell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. The shell is Windows PowerShell with no profile and non-interactive UTF-8 output; use PowerShell syntax and cmdlets, not POSIX shell syntax. Literal reading commands run at once; literal commands that change files ask the person once per folder; network, privileged, compound or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files.";
-#[cfg(not(windows))]
-const SHELL_DESCRIPTION: &str = "Run a shell command in the working folder, or in `cwd` inside a granted folder: tests, builds, git and gh. Reading commands run at once; commands that change files ask the person once per folder; network, privileged or unusual commands ask each time. You get the exit status, duration, test counts and the lines that matter; the full output is kept with the step. Use glob, grep and read to look at files, not cat, find or grep.";
+const SHELL_DESCRIPTION: &str = "Currently unavailable: commands require an OS-enforced runner to confine file and network access. Use read, glob and grep.";
 
 /// A tool's answer: compact text for the model and whether it failed.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,9 +52,14 @@ pub fn definitions() -> Vec<WorkModelTool> {
         name: name.into(),
         description: description.into(),
         schema,
+        strict: false,
     };
     let path = json!({"type": "string", "description": "Relative to the working folder, or absolute inside a granted folder."});
     vec![
+        tool("move_file", "Move one previously read ordinary text file (at most 64 KiB) between granted folders after approval, retaining its identity and permissions and a separate recovery copy in Trash. Never overwrites. Requires qualified macOS support; directories, binaries, cross-volume moves and Windows are unavailable.", json!({"type":"object","properties":{"from":path,"to":path},"required":["from","to"],"additionalProperties":false})),
+        tool("trash", "Move one previously read text file (at most 64 KiB) to OS Trash after approval, retaining a private recovery copy. Requires qualified native support; directories, binary files, cross-volume moves and Windows are unavailable.", json!({"type":"object","properties":{"path":path},"required":["path"],"additionalProperties":false})),
+        tool("recoveries", "List private recovery receipts for the current profile and granted folders. Does not list OS Trash or restore anything.", json!({"type":"object","properties":{},"additionalProperties":false})),
+        tool("restore_saved", "Propose restoring the saved text for a recovery receipt to its original granted path. Requires approval and refuses to overwrite an existing file.", json!({"type":"object","properties":{"receipt":{"type":"string"}},"required":["receipt"],"additionalProperties":false})),
         tool(
             "glob",
             "Find files by name pattern, newest first: `**/*.rs`, `src/**/*.test.ts`, `Cargo.toml`. A pattern without `/` matches at any depth. Skips .gitignored, hidden and dependency folders. Returns at most 100 paths.",
@@ -104,6 +108,15 @@ pub fn definitions() -> Vec<WorkModelTool> {
                 "text": {"type": "string"}
             }, "required": ["path", "text"], "additionalProperties": false}),
         ),
+        tool("python_tests", "Run 1 to 64 selected stdlib unittest modules with supplied supporting text files in a read-only copy. Requires the qualified Apple Command Line Tools Python 3.9 runtime on macOS; Windows is unavailable. Tests use relative .py paths with ordinary ASCII module names. List every needed supporting file explicitly. No third-party dependencies, subprocesses, network, file writes, pytest or general builds. Limited to 15 seconds of execution, 256 MiB memory footprint and 64 KiB output; input preparation has separate bounded checks.", json!({"type":"object","properties":{"tests":{"type":"array","items":{"type":"string","maxLength":1024},"minItems":1,"maxItems":64},"files":{"type":"array","items":{"type":"string","maxLength":1024},"maxItems":2000}},"required":["tests"],"additionalProperties":false})),
+        tool("git_changes", "Inspect working-tree content changes against the current Git index for 1 to 64 selected relative file paths. diff shows patches, status lists content-changed paths, check finds whitespace errors. Excludes staged-versus-HEAD, untracked files, modes and filter transformations; .gitattributes files cannot be included. Only ordinary text files and supported SHA-1 index/pack layouts are admitted; protected content is withheld. Runs fixed Git operations in a protected copy, never source configuration, hooks or project code. Requires a qualified operating-system build.", json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string","maxLength":4096},"minItems":1,"maxItems":64},"operation":{"type":"string","enum":["diff","status","check"]}},"required":["paths","operation"],"additionalProperties":false})),
+        tool(
+            "review_changes",
+            "Review this part's approved edits in a protected copy: diff shows the actual before/after patch, status lists those changed files, check finds whitespace errors. This is not the original repository's status or history, and it runs no project code or tests. Project .gitattributes files cannot be included. Refuses files changed again outside these approved edits. Available only on a qualified operating-system build.",
+            json!({"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["diff", "status", "check"]}
+            }, "required": ["operation"], "additionalProperties": false}),
+        ),
         tool(
             "bash",
             SHELL_DESCRIPTION,
@@ -132,7 +145,8 @@ fn optional_number(args: &Value, key: &str) -> Option<u64> {
 
 fn file_fault(error: WorkFileError, path: &str) -> ToolReply {
     ToolReply::fault(match error {
-        WorkFileError::Denied => format!("{path}: outside the granted folders."),
+        WorkFileError::Denied => "This path is not available to Work.".into(),
+        WorkFileError::Sensitive => WorkFileError::Sensitive.note().into(),
         WorkFileError::NotFound => format!("{path}: no such file or folder."),
         WorkFileError::Changed => {
             format!("{path} changed since you read it. Read it again before changing it.")
@@ -165,7 +179,7 @@ fn duration(ms: u32) -> String {
 
 /// A change the person accepted, kept to build one diff per file.
 struct Changed {
-    before: String,
+    before: Option<String>,
     after: String,
 }
 
@@ -249,7 +263,7 @@ impl ComputerTools {
             changed.push((
                 file,
                 Changed {
-                    before: before.clone(),
+                    before: Some(before.clone()),
                     after: after.clone(),
                 },
             ));
@@ -273,7 +287,7 @@ impl ComputerTools {
         for (path, change) in changed.iter() {
             if !firsts.contains_key(path) {
                 order.push(path);
-                firsts.insert(path, &change.before);
+                firsts.insert(path, change.before.as_deref().unwrap_or_default());
             }
             lasts.insert(path, &change.after);
         }
@@ -303,6 +317,14 @@ impl ComputerTools {
     }
 
     pub async fn call(&self, host: &dyn ComputerHost, name: &str, args: &Value) -> ToolReply {
+        if zephium_agentic::contains_recognized_secret(name) || sensitive_arguments(args) {
+            return ToolReply::fault(WorkFileError::Sensitive.note());
+        }
+        if matches!(name, "bash" | "delegate") {
+            if let Err(reason) = crate::work_commands::ensure_available() {
+                return ToolReply::fault(reason);
+            }
+        }
         let reply = match name {
             "glob" => self.glob(host, args).await,
             "grep" => self.grep(host, args).await,
@@ -310,6 +332,13 @@ impl ComputerTools {
             "edit" => self.edit(host, args).await,
             "write" => self.write(host, args).await,
             "bash" => self.bash(host, args).await,
+            "move_file" => self.move_file(host, args).await,
+            "trash" => self.trash(host, args).await,
+            "recoveries" => self.recoveries(host).await,
+            "restore_saved" => self.restore(host, args).await,
+            "review_changes" => self.review_changes(host, args).await,
+            "git_changes" => self.git_changes(host, args).await,
+            "python_tests" => self.python_tests(host, args).await,
             _ => Err(ToolReply::fault(format!("There is no `{name}` tool."))),
         };
         match reply {
@@ -470,7 +499,9 @@ impl ComputerTools {
         };
         let (evidence, content) = match outcome {
             Ok((target, found)) => {
-                let content = if found.total == 0 {
+                let content = if found.total == 0 && found.partial {
+                    "No matches in the inspected files. The search stopped early; results may be incomplete.".to_owned()
+                } else if found.total == 0 {
                     "No matches.".to_owned()
                 } else if output == GrepOutput::Lines {
                     let mut content = found.text.clone();
@@ -585,13 +616,11 @@ impl ComputerTools {
     }
 
     fn current_text(file: &Path) -> Result<Option<String>, WorkFileError> {
-        match std::fs::metadata(file) {
-            Err(_) => Ok(None),
-            Ok(meta) if !meta.is_file() => Err(WorkFileError::NotAFile),
-            Ok(meta) if meta.len() > MAX_FILE_BYTES => Err(WorkFileError::TooLarge),
-            Ok(_) => std::fs::read_to_string(file)
-                .map(Some)
-                .map_err(|_| WorkFileError::Binary),
+        match crate::work_files::read_text(file) {
+            Ok((_, _, Some(text))) => Ok(Some(text)),
+            Ok(_) => Err(WorkFileError::Binary),
+            Err(WorkFileError::NotFound) => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -747,11 +776,173 @@ impl ComputerTools {
         }
         let (_, added, removed) = super::diff::hunks(&before, &after);
         if let Ok(mut changed) = self.changed.lock() {
-            changed.push((file.to_path_buf(), Changed { before, after }));
+            changed.push((
+                file.to_path_buf(),
+                Changed {
+                    before: known.map(|_| before),
+                    after,
+                },
+            ));
         }
         Ok(ToolReply::ok(format!(
             "Changed {shown} (+{added} −{removed})."
         )))
+    }
+
+    async fn review_changes(
+        &self,
+        host: &dyn ComputerHost,
+        args: &Value,
+    ) -> Result<ToolReply, ToolReply> {
+        use crate::work_commands::runner::{self, ApprovedChange, Failure, ReadOperation};
+        use sha2::{Digest, Sha256};
+        let operation = text(args, "operation")?;
+        let selected = match operation {
+            "diff" => ReadOperation::Diff,
+            "status" => ReadOperation::Status,
+            "check" => ReadOperation::Check,
+            _ => return Err(ToolReply::fault("operation is diff, status or check")),
+        };
+        runner::ensure_available().map_err(|error| ToolReply::fault(error.note()))?;
+        let (changes, generation): (Vec<ApprovedChange>, usize) = {
+            let recorded = self
+                .changed
+                .lock()
+                .map_err(|_| ToolReply::fault("The edits could not be inspected"))?;
+            let mut changes = std::collections::BTreeMap::<PathBuf, ApprovedChange>::new();
+            for (path, change) in recorded.iter() {
+                let Ok(relative) = path.strip_prefix(&self.root) else {
+                    continue;
+                };
+                match changes.entry(relative.to_owned()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(ApprovedChange {
+                            path: relative.to_owned(),
+                            before: change.before.as_ref().map(|text| text.as_bytes().to_vec()),
+                            after: change.after.as_bytes().to_vec(),
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if change.before.as_deref().map(str::as_bytes)
+                            != Some(entry.get().after.as_slice())
+                        {
+                            return Err(ToolReply::fault(Failure::Changed.note()));
+                        }
+                        entry.get_mut().after = change.after.as_bytes().to_vec();
+                    }
+                }
+            }
+            (changes.into_values().collect(), recorded.len())
+        };
+        if changes.is_empty() {
+            return Ok(ToolReply::ok(
+                "No approved edits in this working folder to review.",
+            ));
+        }
+        let command = format!("review_changes {operation} (approved edits in a copied workspace)");
+        let root = self
+            .files
+            .roots()
+            .iter()
+            .filter(|root| self.root.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .ok_or_else(|| ToolReply::fault("The folder is not granted"))?;
+        let step = host
+            .begin(
+                WorkStepKindV1::RunCommand {
+                    cwd: self.root.to_string_lossy().into_owned(),
+                    command: command.clone(),
+                    timeout_secs: Some(90),
+                    decision: None,
+                },
+                Some(WorkLocalStepV1 {
+                    policy: Some(WorkCommandPolicyV1 {
+                        class: WorkCommandClassV1::Read,
+                        reason: WorkCommandReasonV1::Inspection,
+                        scope: WorkCommandApprovalScopeV1::None,
+                        root: root.to_string_lossy().into_owned(),
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(stopped)?;
+        let started = std::time::Instant::now();
+        let output = runner::review(&self.files, &self.root, &changes, selected, || async {
+            tokio::time::timeout(Duration::from_millis(100), host.cancelled())
+                .await
+                .unwrap_or(true)
+        })
+        .await;
+        let output = output.and_then(|output| {
+            if self.changed.lock().map_err(|_| Failure::Failed)?.len() != generation {
+                Err(Failure::Changed)
+            } else {
+                Ok(output)
+            }
+        });
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                host.settle(
+                    step,
+                    if error == Failure::Stopped {
+                        WorkStepStatus::Cancelled
+                    } else {
+                        WorkStepStatus::Failed
+                    },
+                    Settled::Nothing,
+                    Some(error.note().into()),
+                )
+                .await
+                .map_err(stopped)?;
+                return Err(ToolReply::fault(error.note()));
+            }
+        };
+        let content = output.text.replace('\r', "");
+        let kept = zephium_core::work::agent::clip_text(&content, MAX_WORK_FILE_TEXT_BYTES);
+        let evidence = WorkCommandEvidenceV1 {
+            cwd: self.root.to_string_lossy().into_owned(),
+            command,
+            exit: Some(output.exit),
+            signal: None,
+            elapsed_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
+            bytes: content.len() as u32,
+            digest: format!("{:x}", Sha256::digest(content.as_bytes())),
+            truncated: kept.len() != content.len(),
+            text: kept.clone(),
+        };
+        let note = if output.success {
+            "Approved edits reviewed in a copied workspace"
+        } else {
+            "Issues found in the copied approved edits"
+        };
+        let key = host
+            .settle(
+                step,
+                if output.success {
+                    WorkStepStatus::Succeeded
+                } else {
+                    WorkStepStatus::Failed
+                },
+                Settled::Command(Box::new(evidence)),
+                Some(note.into()),
+            )
+            .await
+            .map_err(stopped)?;
+        let mut answer = format!("Review of {} approved file edits in a copied workspace ({operation}). This is not original repository status or history.\n", changes.len());
+        if kept.is_empty() {
+            answer.push_str("No findings.\n");
+        } else {
+            answer.push_str(&kept);
+        }
+        if let Some(key) = key {
+            answer.push_str(&format!("\n(source {key})"));
+        }
+        Ok(ToolReply {
+            content: answer,
+            is_error: !output.success,
+        })
     }
 
     async fn bash(&self, host: &dyn ComputerHost, args: &Value) -> Result<ToolReply, ToolReply> {
@@ -972,6 +1163,7 @@ pub(super) fn delegate_tool(delegates: &[Delegate]) -> WorkModelTool {
             "agent": {"type": "string", "enum": names},
             "task": {"type": "string", "description": "A complete, self-contained brief in one paragraph of at most 3000 characters: the goal, the files involved, constraints and how to verify."}
         }, "required": ["agent", "task"], "additionalProperties": false}),
+        strict: false,
     }
 }
 
@@ -982,6 +1174,9 @@ pub(super) async fn hand_off(
     delegates: &[Delegate],
     arguments: &Value,
 ) -> ToolReply {
+    if let Err(reason) = crate::work_commands::ensure_available() {
+        return ToolReply::fault(reason);
+    }
     let Some(agent) = arguments["agent"]
         .as_str()
         .and_then(Delegate::parse)
@@ -1104,4 +1299,41 @@ fn search_evidence(root: &Path, total: usize, text: &str, partial: bool) -> Work
         after_digest: None,
         lines: None,
     }
+}
+
+// Inspect the original bounded strings before recording a step or clipping text.
+fn sensitive_arguments(value: &Value) -> bool {
+    let mut pending = vec![value];
+    let mut visited = 0usize;
+    while let Some(value) = pending.pop() {
+        visited += 1;
+        if visited > 16_384 || pending.len() > 16_384 {
+            return true;
+        }
+        match value {
+            Value::String(text) if zephium_agentic::contains_recognized_secret(text) => {
+                return true
+            }
+            Value::Array(values) => {
+                if values.len() > 16_384 - pending.len() {
+                    return true;
+                }
+                pending.extend(values);
+            }
+            Value::Object(values) => {
+                if values
+                    .keys()
+                    .any(|key| zephium_agentic::contains_recognized_secret(key))
+                {
+                    return true;
+                }
+                if values.len() > 16_384 - pending.len() {
+                    return true;
+                }
+                pending.extend(values.values());
+            }
+            _ => {}
+        }
+    }
+    false
 }

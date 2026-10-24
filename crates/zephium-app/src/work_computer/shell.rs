@@ -40,11 +40,10 @@ impl TestSummary {
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid pattern"))
 }
-fn number(captures: &regex::Captures<'_>, name: &str) -> u32 {
+fn number(captures: &regex::Captures<'_>, name: &str) -> Option<u32> {
     captures
         .name(name)
-        .and_then(|m| m.as_str().parse().ok())
-        .unwrap_or(0)
+        .map_or(Some(0), |m| m.as_str().parse().ok())
 }
 fn failure(summary: &mut TestSummary, name: &str) {
     let name = name.trim();
@@ -59,6 +58,9 @@ fn failure(summary: &mut TestSummary, name: &str) {
 /// Test counts from the runners people use most: cargo, pytest, jest,
 /// vitest, go, mocha and XCTest. None when the output shows no test run.
 pub fn tests(output: &str) -> Option<TestSummary> {
+    if zephium_agentic::contains_recognized_secret(output) {
+        return None;
+    }
     static CARGO: OnceLock<Regex> = OnceLock::new();
     static CARGO_FAIL: OnceLock<Regex> = OnceLock::new();
     static PYTEST: OnceLock<Regex> = OnceLock::new();
@@ -70,9 +72,6 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     static GO: OnceLock<Regex> = OnceLock::new();
     static MOCHA: OnceLock<Regex> = OnceLock::new();
     static XCTEST: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST_END: OnceLock<Regex> = OnceLock::new();
-    static UNITTEST_FAIL: OnceLock<Regex> = OnceLock::new();
     let mut summary = TestSummary::default();
     let mut seen = false;
 
@@ -82,9 +81,9 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     );
     for c in cargo.captures_iter(output) {
         seen = true;
-        summary.passed += number(&c, "passed");
-        summary.failed += number(&c, "failed");
-        summary.skipped += number(&c, "ignored");
+        summary.passed = summary.passed.checked_add(number(&c, "passed")?)?;
+        summary.failed = summary.failed.checked_add(number(&c, "failed")?)?;
+        summary.skipped = summary.skipped.checked_add(number(&c, "ignored")?)?;
     }
     if seen {
         for c in re(&CARGO_FAIL, r"(?m)^test (?P<name>\S+) \.\.\. FAILED").captures_iter(output) {
@@ -106,11 +105,11 @@ pub fn tests(output: &str) -> Option<TestSummary> {
         )
         .captures_iter(&line["body"])
         {
-            let n: u32 = c["n"].parse().unwrap_or(0);
+            let n: u32 = c["n"].parse().ok()?;
             match &c["what"] {
-                "passed" => summary.passed += n,
-                "skipped" | "xfailed" => summary.skipped += n,
-                _ => summary.failed += n,
+                "passed" => summary.passed = summary.passed.checked_add(n)?,
+                "skipped" | "xfailed" => summary.skipped = summary.skipped.checked_add(n)?,
+                _ => summary.failed = summary.failed.checked_add(n)?,
             }
         }
         for c in re(&PYTEST_FAIL, r"(?m)^(?:FAILED|ERROR) (?P<name>\S+)").captures_iter(output) {
@@ -129,15 +128,15 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     );
     for c in js.captures_iter(output).chain(vitest.captures_iter(output)) {
         let (p, f, s) = (
-            number(&c, "passed"),
-            number(&c, "failed"),
-            number(&c, "skipped"),
+            number(&c, "passed")?,
+            number(&c, "failed")?,
+            number(&c, "skipped")?,
         );
-        if p + f + s > 0 {
+        if p != 0 || f != 0 || s != 0 {
             seen = true;
-            summary.passed += p;
-            summary.failed += f;
-            summary.skipped += s;
+            summary.passed = summary.passed.checked_add(p)?;
+            summary.failed = summary.failed.checked_add(f)?;
+            summary.skipped = summary.skipped.checked_add(s)?;
         }
     }
     if seen {
@@ -153,10 +152,10 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     for c in re(&GO, r"(?m)^\s*--- (?P<what>PASS|FAIL|SKIP): (?P<name>\S+)").captures_iter(output) {
         seen = true;
         match &c["what"] {
-            "PASS" => summary.passed += 1,
-            "SKIP" => summary.skipped += 1,
+            "PASS" => summary.passed = summary.passed.checked_add(1)?,
+            "SKIP" => summary.skipped = summary.skipped.checked_add(1)?,
             _ => {
-                summary.failed += 1;
+                summary.failed = summary.failed.checked_add(1)?;
                 failure(&mut summary, &c["name"]);
             }
         }
@@ -166,32 +165,14 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     }
 
     if let Some(c) = re(&MOCHA, r"(?m)^\s+(?P<passed>\d+) passing[^\n]*(?:\n\s+(?P<skipped>\d+) pending)?(?:\n\s+(?P<failed>\d+) failing)?").captures(output) {
-        summary.passed = number(&c, "passed");
-        summary.skipped = number(&c, "skipped");
-        summary.failed = number(&c, "failed");
+        summary.passed = number(&c, "passed")?;
+        summary.skipped = number(&c, "skipped")?;
+        summary.failed = number(&c, "failed")?;
         return Some(summary);
     }
 
-    if let Some(ran) = re(&UNITTEST, r"(?m)^Ran (?P<total>\d+) tests? in [\d.]+s")
-        .captures_iter(output)
-        .last()
-    {
-        let total = number(&ran, "total");
-        if let Some(end) = re(
-            &UNITTEST_END,
-            r"(?m)^(?:OK|FAILED)(?: \((?:failures=(?P<failures>\d+))?(?:, )?(?:errors=(?P<errors>\d+))?(?:, )?(?:skipped=(?P<skipped>\d+))?[^)]*\))?\s*$",
-        )
-        .captures_iter(output)
-        .last()
-        {
-            summary.failed = number(&end, "failures") + number(&end, "errors");
-            summary.skipped = number(&end, "skipped");
-            summary.passed = total.saturating_sub(summary.failed + summary.skipped);
-            for c in re(&UNITTEST_FAIL, r"(?m)^(?:FAIL|ERROR): (?P<name>\S+)").captures_iter(output) {
-                failure(&mut summary, &c["name"]);
-            }
-            return Some(summary);
-        }
+    if let Some(summary) = unittest(output) {
+        return Some(summary);
     }
 
     if let Some(c) = re(
@@ -201,12 +182,74 @@ pub fn tests(output: &str) -> Option<TestSummary> {
     .captures_iter(output)
     .last()
     {
-        let total = number(&c, "total");
-        summary.failed = number(&c, "failed");
-        summary.passed = total.saturating_sub(summary.failed);
+        let total = number(&c, "total")?;
+        summary.failed = number(&c, "failed")?;
+        summary.passed = total.checked_sub(summary.failed)?;
         return Some(summary);
     }
     (!summary.is_empty()).then_some(summary)
+}
+
+/// A selected unittest run must not be mistaken for a different runner mentioned
+/// in its fixture output. Counts remain checked and malformed totals are unknown.
+pub fn unittest(output: &str) -> Option<TestSummary> {
+    if zephium_agentic::contains_recognized_secret(output) {
+        return None;
+    }
+    static UNITTEST: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_END: OnceLock<Regex> = OnceLock::new();
+    static UNITTEST_FAIL: OnceLock<Regex> = OnceLock::new();
+    let mut summary = TestSummary::default();
+    if let Some(ran) = re(&UNITTEST, r"(?m)^Ran (?P<total>\d+) tests? in [\d.]+s")
+        .captures_iter(output)
+        .last()
+    {
+        let total = number(&ran, "total")?;
+        if let Some(end) = re(
+            &UNITTEST_END,
+            r"(?m)^(?P<status>OK|FAILED)(?: \((?P<counts>[^)\r\n]*)\))?\s*$",
+        )
+        .captures_iter(output)
+        .last()
+        {
+            if end.get(0)?.start() < ran.get(0)?.end() {
+                return None;
+            }
+            if let Some(counts) = end.name("counts") {
+                let mut seen = std::collections::BTreeSet::new();
+                for count in counts.as_str().split(',') {
+                    let (kind, value) = count.trim().split_once('=')?;
+                    if !seen.insert(kind)
+                        || value.is_empty()
+                        || !value.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let count: u32 = value.parse().ok()?;
+                    match kind {
+                        "failures" | "errors" | "unexpected successes" => {
+                            summary.failed = summary.failed.checked_add(count)?
+                        }
+                        "skipped" | "expected failures" => {
+                            summary.skipped = summary.skipped.checked_add(count)?
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            if (&end["status"] == "FAILED") != (summary.failed > 0) {
+                return None;
+            }
+            summary.passed = total.checked_sub(summary.failed.checked_add(summary.skipped)?)?;
+            for c in re(&UNITTEST_FAIL, r"(?m)^(?:FAIL|ERROR): (?P<name>\S+)").captures_iter(output)
+            {
+                failure(&mut summary, &c["name"]);
+            }
+            return Some(summary);
+        }
+    }
+
+    None
 }
 
 fn is_failure_line(line: &str) -> bool {
@@ -221,6 +264,9 @@ fn is_failure_line(line: &str) -> bool {
 /// The lines the agent sees: all of short output; otherwise the first
 /// failure's neighbourhood and the tail, each marked where lines were left out.
 pub fn excerpt(output: &str) -> String {
+    if zephium_agentic::contains_recognized_secret(output) {
+        return "Recognizable credential content was withheld".into();
+    }
     let lines: Vec<&str> = output.lines().collect();
     let clip = |line: &str| -> String {
         let mut clipped: String = line.chars().take(240).collect();
@@ -263,6 +309,30 @@ pub fn excerpt(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_counts_and_secret_output_are_unknown() {
+        for output in [
+            "test result: ok. 4294967296 passed; 0 failed; 0 ignored",
+            "test result: ok. 4294967295 passed; 0 failed; 0 ignored\ntest result: ok. 1 passed; 0 failed; 0 ignored",
+            "Ran 1 tests in 0.1s\nFAILED (failures=2)",
+            "Ran 1 tests in 0.1s\nFAILED (failures=4294967295, errors=1)",
+            "Executed 1 tests, with 2 failures",
+        ] { assert!(tests(output).is_none()); }
+        let sensitive = "test result: ok. 1 passed; 0 failed; 0 ignored\nghp_inertFixtureToken";
+        assert!(tests(sensitive).is_none());
+        assert!(!excerpt(sensitive).contains("ghp_"));
+    }
+
+    #[test]
+    fn unittest_counts_expected_failures_without_mistaking_fixture_output() {
+        let output = "test result: ok. 999 passed; 0 failed; 0 ignored\nRan 3 tests in 0.01s\nOK (skipped=1, expected failures=1)\n";
+        let counts = unittest(output).unwrap();
+        assert_eq!((counts.passed, counts.failed, counts.skipped), (1, 0, 2));
+        let counts = unittest("Ran 1 test in 0.01s\nFAILED (unexpected successes=1)\n").unwrap();
+        assert_eq!((counts.passed, counts.failed), (0, 1));
+        assert!(unittest("Ran 1 test in 0.01s\nOK (unknown=1)\n").is_none());
+    }
 
     #[test]
     fn cargo_counts_and_failures() {

@@ -68,9 +68,9 @@ const NODE_KINDS: [&str; 12] = [
 ];
 
 /// The kinds the lead makes, in the order the tool lists them.
-pub(crate) const KINDS: [&str; 12] = [
+pub(crate) const KINDS: [&str; 13] = [
     "reply", "picks", "plan", "list", "sheet", "plot", "diagram", "code", "diff", "document",
-    "draft", "media",
+    "draft", "media", "subject",
 ];
 
 /// The schema of one kind's data; `None` for a kind the model never makes.
@@ -98,7 +98,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "url": string(),
                     "price": object(json!({"display": text(L::PICK_PRICE), "amount": decimal(), "currency": string(), "was": text(L::PICK_PRICE)}), &["display"]),
                     "facts": list(object(json!({
-                        "label": text(L::FACT_LABEL), "value": text(L::FACT_VALUE),
+                        "label": text(L::FACT_LABEL), "value": text(L::PICK_FACT_VALUE),
                         "kind": one_of(&["text", "yes", "no", "partial", "rating"])
                     }), &["label", "value", "kind"]), 0, L::PICK_FACTS),
                     "rating": object(json!({"value": decimal(), "max": {"type": "integer", "enum": [5, 10]}, "count": {"type": "integer", "minimum": 0}}), &["value", "max"]),
@@ -123,6 +123,7 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
             json!({
                 "steps": list(object(json!({
                     "when": text(L::STEP_WHEN),
+                    "date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
                     "title": text(L::STEP_TITLE),
                     "detail": text(L::STEP_DETAIL),
                     "kind": one_of(&["travel", "stay", "event", "task", "milestone", "note"]),
@@ -132,23 +133,26 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
                     "source": string()
                 }), &["title", "kind"]), 1, MAX_PLAN_STEPS),
                 "total": object(json!({"label": text(L::PLAN_TOTAL), "value": text(L::PLAN_TOTAL)}), &["label", "value"]),
-                "checkable": {"type": "boolean"}
+                "checkable": {"type": "boolean"},
+                "calendar": {"type": "boolean"}
             }),
             &["steps"],
         ),
         "list" => object(
             json!({
-                "style": one_of(&["todo", "messages", "reading", "requirements"]),
+                "style": one_of(&["todo", "messages", "reading", "requirements", "questions"]),
                 "items": list(object(json!({
                     "title": text(L::ITEM_TITLE),
                     "detail": text(L::ITEM_DETAIL),
                     "due": text(L::ITEM_DUE),
+                    "done": {"type": "boolean"},
                     "priority": one_of(&["high"]),
                     "from": object(json!({
                         "host": string(), "app": text(L::FROM_APP), "who": text(L::FROM_WHO),
                         "when": text(L::FROM_WHEN), "quote": text(L::FROM_QUOTE), "url": string()
                     }), &[]),
-                    "source": string()
+                    "source": string(),
+                    "record_source": {"type":"string","description":"Existing source key identifying the exact native collection row for this item's picture, independently of its prose citation. Omit if no such row is evidenced."}
                 }), &["title"]), 1, MAX_LIST_ITEMS)
             }),
             &["style", "items"],
@@ -257,6 +261,38 @@ pub(crate) fn data(kind: &str) -> Option<Value> {
             }),
             &["medium", "url"],
         ),
+        "subject" => {
+            let labelled = |label: usize, value: usize, max: usize| {
+                list(
+                    object(
+                        json!({"label": text(label), "value": text(value)}),
+                        &["label", "value"],
+                    ),
+                    0,
+                    max,
+                )
+            };
+            object(
+                json!({
+                    "noun": text(L::SUBJECT_NOUN),
+                    "reference": text(L::SUBJECT_REFERENCE),
+                    "title": text(L::SUBJECT_TITLE),
+                    "state": object(
+                        json!({
+                            "label": text(L::SUBJECT_STATE),
+                            "tone": one_of(&["active", "done", "waiting", "blocked", "closed"])
+                        }),
+                        &["label", "tone"],
+                    ),
+                    "people": labelled(L::SUBJECT_ROLE, L::SUBJECT_NAME, L::SUBJECT_PEOPLE),
+                    "facts": labelled(L::FACT_LABEL, L::FACT_VALUE, L::SUBJECT_FACTS),
+                    "labels": list(text(L::SUBJECT_LABEL), 0, L::SUBJECT_LABELS),
+                    "summary": text(L::SUBJECT_SUMMARY),
+                    "url": string()
+                }),
+                &["noun", "title", "url"],
+            )
+        }
         _ => return None,
     })
 }
@@ -272,7 +308,26 @@ pub(crate) fn any(kinds: &[&str]) -> Value {
             })
         })
         .collect();
-    json!({"anyOf": options, "description": "The kind's data: the schema whose title is the kind."})
+    let mut options = options;
+    if kinds.iter().any(|kind| matches!(*kind, "picks" | "sheet")) {
+        options.push(record_selection());
+    }
+    json!({"anyOf": options, "description": "Picks or a sheet of extracted records: data.records in desired order (r keys a read returned, with subtitle, facts and annotation from what you read); Rust copies names, prices, links and images. Write items yourself only for a shape records cannot carry, such as a flight's route. Other objects use their kind schema."})
+}
+
+pub(crate) fn record_selection() -> Value {
+    serde_json::json!({
+            "title":"native_records", "type":"object", "additionalProperties":false,
+            "properties":{"records":{"type":"array", "minItems":1, "maxItems":12, "items":{
+                "type":"object", "additionalProperties":false,
+                "properties":{
+                    "source":{"type":"string"},
+                    "subtitle":{"type":"string","maxLength":80},
+                    "facts":{"type":"array","maxItems":4,"description":"Details that decide the choice: VRAM 24 GB, Condition Used.","items":{"type":"object","additionalProperties":false,"properties":{"label":{"type":"string","maxLength":20},"value":{"type":"string","maxLength":120}},"required":["label","value"]}},
+                    "annotation":{"type":"string","maxLength":160,"description":"Why it stands out or what to watch for."},
+                    "recommended":{"type":"boolean","description":"Your pick, by condition and fit, not only price."}},
+                "required":["source"]}}}, "required":["records"]
+    })
 }
 
 /// Where the model's data leaves its kind's shape, in closed words.
@@ -547,6 +602,44 @@ fn prune_at(schema: &Value, value: &mut Value, path: &str, removed: &mut Vec<Str
 /// Leaves out the optional part a fault names: removes a member or an
 /// element, empties a cell, or keeps an array's first elements. False when
 /// the fault names nothing that can go.
+/// Brings text that runs over its limit, or onto a second line, within the
+/// limit: clipped between words, its lines joined. Required text included;
+/// what it says is the lead's own, only shorter.
+pub(crate) fn clip_within(
+    value: &mut Value,
+    fault: &WorkObjectFault,
+    within: impl Fn(&str, usize) -> String,
+) -> bool {
+    let (Some(path), Some(found)) = (fault.path, fault.found) else {
+        return false;
+    };
+    let target = fault.fill(path);
+    let mut at = value;
+    for segment in segments(&target) {
+        let next = match segment {
+            Segment::Key(key) => at.get_mut(key.as_str()),
+            Segment::Index(index) => at.get_mut(index),
+        };
+        match next {
+            Some(next) => at = next,
+            None => return false,
+        }
+    }
+    let Value::String(text) = at else {
+        return false;
+    };
+    let clipped = match (found, fault.limit) {
+        (WorkTextFound::LineBreak, _) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+        (WorkTextFound::Characters(_), Some(limit)) => within(text, limit as usize),
+        _ => return false,
+    };
+    if clipped.is_empty() || clipped == *text {
+        return false;
+    }
+    *text = clipped;
+    true
+}
+
 pub(crate) fn drop(value: &mut Value, fault: &WorkObjectFault) -> bool {
     let Some(drop) = fault.drop else {
         return false;
@@ -651,6 +744,36 @@ mod tests {
     }
 
     #[test]
+    fn checklist_completion_survives_model_schema_pruning_and_typed_storage() {
+        let mut data = json!({"style":"todo", "items":[
+            {"title":"First"}, {"title":"Middle", "done":true}, {"title":"Last", "done":false}
+        ]});
+        assert_eq!(mismatch("list", &data), None);
+        assert!(prune("list", &mut data).is_empty());
+        data["kind"] = json!("list");
+        let typed: zephium_core::work::artifact::WorkArtifactDataV1 =
+            serde_json::from_value(data).unwrap();
+        let zephium_core::work::artifact::WorkArtifactDataV1::List { items, .. } = typed else {
+            panic!("list")
+        };
+        assert_eq!(
+            items.iter().map(|item| item.done).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        let mut absent = json!({"style":"todo","items":[{"title":"Middle","done":null}]});
+        assert_eq!(mismatch("list", &absent), None);
+        assert!(prune("list", &mut absent).is_empty());
+        assert!(absent["items"][0].get("done").is_none());
+        for invalid in [json!("true"), json!(1)] {
+            assert!(mismatch(
+                "list",
+                &json!({"style":"todo","items":[{"title":"Middle","done":invalid}]})
+            )
+            .is_some());
+        }
+    }
+
+    #[test]
     fn a_shape_fault_names_its_place() {
         let plan = json!({"steps": [{"title": "Fly", "kind": "travel"}, {"title": "Land", "kind": "flight"}]});
         let found = mismatch("plan", &plan).unwrap();
@@ -658,12 +781,12 @@ mod tests {
         assert!(found
             .words
             .starts_with("steps[1].kind is \"flight\"; it is one of travel"));
-        let extra = json!({"steps": [{"title": "Fly", "kind": "travel", "date": "5 Jan"}]});
+        let extra = json!({"steps": [{"title": "Fly", "kind": "travel", "day": "5 Jan"}]});
         let found = mismatch("plan", &extra).unwrap();
         assert!(found.unknown);
         assert!(found
             .words
-            .starts_with("steps[0].date is not a field of steps[0]"));
+            .starts_with("steps[0].day is not a field of steps[0]"));
         let missing = json!({"style": "todo", "items": [{"detail": "x"}]});
         assert_eq!(
             mismatch("list", &missing).unwrap().words,
@@ -677,7 +800,7 @@ mod tests {
         let fine = json!({"facet": "stay", "items": [{"name": "Loft", "price": {"display": "$90", "amount": 90}, "subtitle": null}]});
         assert_eq!(mismatch("picks", &fine), None);
         let mut pruned = extra.clone();
-        assert_eq!(prune("plan", &mut pruned), ["steps[0].date"]);
+        assert_eq!(prune("plan", &mut pruned), ["steps[0].day"]);
         assert_eq!(mismatch("plan", &pruned), None);
     }
 

@@ -4,7 +4,7 @@
   import * as m from "$shared/i18n/messages";
   import AskReceipt from "./AskReceipt.svelte";
   import AskShell from "./AskShell.svelte";
-  import { folderName, type FolderAsk } from "./asks";
+  import { folderChoice, folderName, type FolderAsk } from "./asks";
   import { Folder01Icon } from "./icons";
 
   /**
@@ -30,16 +30,20 @@
 
   /** Where a person keeps it: `~/Dev/Lunios`. */
   const home = (path: string) => path.replace(/^\/Users\/[^/]+/u, "~");
-  const where = $derived(home(ask.path));
+  const where = $derived(ask.path ? home(ask.path) : "");
   const title = $derived(
-    ask.choose
-      ? m.work_ask_folder_choose_title({ name: ask.name })
-      : m.work_ask_folder_title({ name: ask.name }),
+    !ask.path
+      ? m.work_start_choose_folder()
+      : ask.choose
+        ? m.work_ask_folder_choose_title({ name: ask.name })
+        : m.work_ask_folder_title({ name: ask.name }),
   );
-  const allowed = $derived(!!ask.answer && ask.answer !== ask.decline);
+  const allowed = $derived(
+    !!ask.answer && ask.answer !== ask.decline && (!ask.choose || !!folderChoice(ask.answer)),
+  );
   /** The folder the person chose, which may not be the one asked for. */
   const chosen = $derived(
-    ask.choose && ask.answer?.startsWith("/") ? folderName(ask.answer) : ask.name,
+    ask.choose && folderChoice(ask.answer) ? folderName(ask.answer!) : ask.name,
   );
 </script>
 
@@ -72,6 +76,6 @@
   <AskReceipt
     tone={allowed ? "done" : "declined"}
     status={allowed ? m.work_ask_allowed() : m.work_ask_not_now()}
-    text={chosen}
+    text={chosen || m.work_start_choose_folder()}
   />
 {/if}

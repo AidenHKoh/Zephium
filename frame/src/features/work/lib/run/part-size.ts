@@ -15,9 +15,13 @@ export const PART = {
   behindX: 14,
   behindY: 10,
   shown: 3,
+  /** The count of pages hangs past the stack's right edge: a line leaves clear of it. */
+  badge: 12,
   sources: 320,
   sourceRow: 28,
   sourceRows: 3,
+  /** A search's results: enough to see what it chose and what it passed over. */
+  searchRows: 5,
   helper: 400,
   helperLines: 5,
   ask: 360,
@@ -60,14 +64,15 @@ export function partSize(shape: PartShape, measured?: number): { width: number; 
   switch (shape.kind) {
     case "pages": {
       const stack = stackSize(shape.count);
-      return { width: lead + stack.width, height: Math.max(stack.height, measured ?? 0) };
+      return {
+        width: lead + stack.width + PART.badge,
+        height: Math.max(stack.height, measured ?? 0),
+      };
     }
     case "sources":
       return {
         width: lead + PART.sources,
-        height: tall(
-          Math.min(PART.sourceRows, shape.rows) * PART.sourceRow + (shape.more ? 24 : 0),
-        ),
+        height: tall(shape.rows * PART.sourceRow + (shape.more ? 24 : 0)),
       };
     case "helper":
       return { width: lead + PART.helper, height: tall(shape.rows * 24 + 8) };

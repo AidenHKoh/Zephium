@@ -4,7 +4,8 @@
   import * as m from "$shared/i18n/messages";
   import { browserImport } from "$domain/browser-import";
   import { tabs } from "$domain/tabs";
-  import { commands } from "$shared/ipc/bindings";
+  import { preferences } from "$domain/preferences";
+  import { commands, type WorkLocalServerV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import KeyHint from "$shared/ui/KeyHint";
@@ -14,21 +15,24 @@
   import * as motion from "$session/motion.svelte";
   import { SITES, SITE_URLS } from "../lib/catalog";
   import { frame, SHOTS, STAGE, type Shot } from "../lib/camera";
-  import { neighbour, position, STEPS, type Step } from "../lib/flow";
+  import { neighbour, position, stepsFor, type Step } from "../lib/flow";
   import { formName, type Box } from "../lib/formation";
   import { keptSites } from "../lib/kept";
+  import { followUp, type Mind, type Then } from "../lib/minds";
   import Window from "./Window.svelte";
   import You from "./steps/You.svelte";
   import Import from "./steps/Import.svelte";
   import Essentials from "./steps/Essentials.svelte";
   import Launcher from "./steps/Launcher.svelte";
+  import Models from "./steps/Models.svelte";
 
   let {
     onfinish,
     windowControls,
   }: {
-    /** Hands the window to the browser; false if native refused. */
-    onfinish: () => Promise<boolean>;
+    /** Hands the window to the browser, which then opens the setup chosen
+     *  here, if any; false if native refused. */
+    onfinish: (then: Then | null) => Promise<boolean>;
     windowControls?: Snippet;
   } = $props();
 
@@ -50,6 +54,8 @@
   const current = tabs.profile()?.name ?? "";
   // Asked for and kept, and for now shown nowhere.
   let name = $state(current === "Personal" ? "" : current);
+  let mind = $state<Mind | null>(null);
+  let server = $state.raw<WorkLocalServerV1 | null>(null);
 
   let kept = $derived(keptSites(tabs.sidebarNodes(), tabs.tabs(), SITE_URLS));
   let sites = $derived([...kept.keys()].flatMap((id) => SITES.filter((site) => site.id === id)));
@@ -64,8 +70,12 @@
   let shot = $derived<Shot>(step === "welcome" ? SHOTS.peek : SHOTS[step]);
   // The fade is masked one scene past the last shot that fades, by then fully
   // open, so taking the mask away never shows as a jump.
-  let masked = $derived(step === "welcome" || step === "you" || step === "import");
-  let place = $derived(position(step));
+  let masked = $derived(
+    step === "welcome" || step === "you" || step === "import" || step === "ai" || step === "ready",
+  );
+  // Work and its models are offered only while Work and AI are on.
+  let ai = $derived(preferences.aiEnabled());
+  let place = $derived(position(step, ai));
 
   const box: Box = { x: 340, y: 266, w: 560, h: (560 * WORDMARK.height) / WORDMARK.width };
 
@@ -122,10 +132,14 @@
     if (leaving) return;
     if (step === "you") saveName();
     leaving = true;
+    const profile = tabs.profile()?.id;
+    // A server already running here is connected now, so Work opens ready.
+    if (mind === "local" && server && profile)
+      await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
     // The scene steps back to nothing first; the browser then arrives in the
     // window it leaves, with its own launch.
     await new Promise((resolve) => setTimeout(resolve, reducedMotion() ? 0 : 1000));
-    if (await onfinish()) return;
+    if (await onfinish(followUp(mind, server))) return;
     leaving = false;
     say(m.onb_finish_failed());
   }
@@ -133,10 +147,11 @@
   const primary = $derived.by((): string => {
     if (step === "you") return name.trim() ? m.onb_continue() : m.onb_not_now();
     if (step === "import") return imported ? m.onb_continue() : m.onb_skip_step();
+    if (step === "ai") return mind ? m.onb_continue() : m.onb_not_now();
     if (step === "ready") return m.onb_start();
     return m.onb_continue();
   });
-  const advance = () => (step === "ready" ? void finish() : go(neighbour(step, 1)));
+  const advance = () => (step === "ready" ? void finish() : go(neighbour(step, 1, ai)));
 
   function keydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.repeat || event.isComposing) return;
@@ -152,6 +167,7 @@
     essentials: { title: m.onb_essentials_title, body: m.onb_essentials_body },
     launcher: { title: m.onb_launcher_title, body: m.onb_launcher_body },
     work: { title: m.onb_work_title, body: m.onb_work_body },
+    ai: { title: m.onb_ai_title, body: m.onb_ai_body },
     ready: { title: m.onb_ready_title },
   };
 
@@ -227,10 +243,11 @@
       data-masked={masked}
     >
       <Window
-        mode={step === "work" ? "work" : "browse"}
+        mode={step === "work" || step === "ai" ? "work" : "browse"}
         {sites}
         {imported}
         playing={step === "work"}
+        modes={ai}
         bind:element={windowElement}
       />
     </div>
@@ -259,6 +276,8 @@
           <Essentials {kept} {landing} flights={() => flights} onfailed={failed} />
         {:else if step === "launcher"}
           <Launcher />
+        {:else if step === "ai"}
+          <Models bind:mind bind:server onsubmit={advance} />
         {/if}
       </div>
     {/key}
@@ -269,13 +288,13 @@
             variant="ghost"
             size="large"
             shape="capsule"
-            onclick={() => go(neighbour(step, -1))}>{m.onb_back()}</Button
+            onclick={() => go(neighbour(step, -1, ai))}>{m.onb_back()}</Button
           >{/if}
       </span>
       <span class="middle">
         {#if notice}<span class="notice" role="status">{notice}</span>{:else}
           <ol aria-label={m.onb_progress({ current: place.at, total: place.of })}>
-            {#each STEPS.slice(1) as candidate, index (candidate)}
+            {#each stepsFor(ai).slice(1) as candidate, index (candidate)}
               <li
                 data-state={index + 1 < place.at ? "done" : index + 1 === place.at ? "now" : ""}
               ></li>
@@ -535,6 +554,10 @@
 
   .scene[data-scene="launcher"] {
     inset-block-start: 226px;
+  }
+
+  .scene[data-scene="ai"] {
+    inset-block-start: 236px;
   }
 
   /* One quiet row for the whole journey, at the foot of the stage: nothing

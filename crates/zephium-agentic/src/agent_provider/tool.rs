@@ -15,6 +15,7 @@
 use std::fmt;
 
 use serde::Deserialize;
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
@@ -39,6 +40,9 @@ const MAX_AGENT_BROWSER_TOOL_JSON_DEPTH: u8 = 16;
 pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_ITEM_BYTES: usize = 128 * 1024;
 pub(super) const MAX_OPENAI_ENCRYPTED_REASONING_AGGREGATE_BYTES: usize = 192 * 1024;
 const MAX_OPENAI_REPLAY_ITEMS: usize = 16;
+const MAX_MODEL_TURN_PARTS: usize = 16;
+const MAX_MODEL_TURN_BYTES: usize = 64 * 1024;
+const MAX_MODEL_CALL_ID_BYTES: usize = 256;
 
 /// Private exact-order output item retained only for OpenAI stateless replay.
 #[derive(Eq, PartialEq)]
@@ -48,6 +52,12 @@ pub(super) enum OpenAiResponseReplayItem {
         encrypted_content: String,
     },
     FunctionCall,
+    /// A chosen model's own parts around its one tool call and the call
+    /// identity it gave, returned to its wire verbatim on the next call.
+    ModelTurn {
+        call_id: String,
+        parts: Vec<Value>,
+    },
 }
 
 /// Bounded opaque OpenAI output retained only until its tool-result replay.
@@ -83,7 +93,31 @@ impl OpenAiResponseReplay {
         let mut retained_bytes = 0_usize;
         let mut reasoning_ids: Vec<&str> = Vec::new();
         let mut encrypted_items: Vec<&str> = Vec::new();
+        let model_turns = items
+            .iter()
+            .filter(|item| matches!(item, OpenAiResponseReplayItem::ModelTurn { .. }))
+            .count();
+        if model_turns > 1 {
+            return None;
+        }
         for item in &items {
+            if let OpenAiResponseReplayItem::ModelTurn { call_id, parts } = item {
+                let part_bytes = parts.iter().try_fold(0_usize, |total, part| {
+                    total.checked_add(serde_json::to_vec(part).ok()?.len())
+                })?;
+                if call_id.is_empty()
+                    || call_id.len() > MAX_MODEL_CALL_ID_BYTES
+                    || call_id.chars().any(char::is_control)
+                    || parts.len() > MAX_MODEL_TURN_PARTS
+                    || part_bytes > MAX_MODEL_TURN_BYTES
+                {
+                    return None;
+                }
+                retained_bytes = retained_bytes
+                    .checked_add(call_id.len())?
+                    .checked_add(part_bytes)?;
+                continue;
+            }
             let OpenAiResponseReplayItem::Reasoning {
                 id,
                 encrypted_content,
@@ -165,6 +199,8 @@ pub enum AgentBrowserToolKind {
     Locate,
     /// Propose one bounded homogeneous semantic action batch.
     Act,
+    /// Propose a bounded, independently verified native form.
+    FillForm,
     /// Wait for one typed condition under a relative ceiling.
     Wait,
     /// Request bounded readable semantic content.
@@ -180,7 +216,7 @@ pub enum AgentBrowserToolKind {
 }
 
 impl AgentBrowserToolKind {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Navigate,
         Self::Back,
         Self::Forward,
@@ -188,6 +224,7 @@ impl AgentBrowserToolKind {
         Self::Snapshot,
         Self::Locate,
         Self::Act,
+        Self::FillForm,
         Self::Wait,
         Self::Read,
         Self::Extract,
@@ -205,6 +242,7 @@ impl AgentBrowserToolKind {
             "snapshot" => Some(Self::Snapshot),
             "locate" => Some(Self::Locate),
             "act" => Some(Self::Act),
+            "fill_form" => Some(Self::FillForm),
             "wait" => Some(Self::Wait),
             "read" => Some(Self::Read),
             "extract" => Some(Self::Extract),
@@ -225,6 +263,7 @@ impl AgentBrowserToolKind {
             Self::Snapshot => "snapshot",
             Self::Locate => "locate",
             Self::Act => "act",
+            Self::FillForm => "fill_form",
             Self::Wait => "wait",
             Self::Read => "read",
             Self::Extract => "extract",
@@ -423,7 +462,7 @@ pub struct AgentBrowserActProposal {
 }
 
 impl AgentBrowserActProposal {
-    fn try_new(
+    pub(super) fn try_new(
         actions: Vec<SemanticActionProposal>,
     ) -> Result<Self, AgentBrowserToolContractError> {
         let Some(first) = actions.first() else {
@@ -534,6 +573,8 @@ pub enum AgentBrowserToolProposal {
     },
     /// Bounded semantic action proposal.
     Act(AgentBrowserActProposal),
+    /// Form data grants no effects; each field and submit needs native admission.
+    FillForm(super::AgentBrowserFormProposal),
     /// Typed wait proposal under one relative ceiling.
     Wait {
         /// Closed condition.
@@ -569,6 +610,7 @@ impl AgentBrowserToolProposal {
             Self::Snapshot(_) => AgentBrowserToolKind::Snapshot,
             Self::Locate { .. } => AgentBrowserToolKind::Locate,
             Self::Act(_) => AgentBrowserToolKind::Act,
+            Self::FillForm(_) => AgentBrowserToolKind::FillForm,
             Self::Wait { .. } => AgentBrowserToolKind::Wait,
             Self::Read(_) => AgentBrowserToolKind::Read,
             Self::Extract { .. } => AgentBrowserToolKind::Extract,
@@ -587,6 +629,7 @@ impl fmt::Debug for AgentBrowserToolProposal {
             Self::Snapshot(scope) | Self::Read(scope) => value.field("scope", scope),
             Self::Locate { query, scope } => value.field("query", query).field("scope", scope),
             Self::Act(actions) => value.field("actions", actions),
+            Self::FillForm(form) => value.field("form", form),
             Self::Wait { condition, timeout } => value
                 .field("condition", condition)
                 .field("timeout", timeout),
@@ -607,9 +650,10 @@ impl fmt::Debug for AgentBrowserToolProposal {
 #[must_use]
 #[derive(Eq, PartialEq)]
 pub(crate) struct AgentBrowserToolCall {
+    kind: AgentBrowserToolKind,
     source_call: AgentProviderCallIdentity,
     id: AgentBrowserToolCallId,
-    proposal: Box<AgentBrowserToolProposal>,
+    proposal: Result<Box<AgentBrowserToolProposal>, (AgentBrowserToolContractError, String)>,
     provider_item_id: Option<String>,
     arguments: String,
     openai_replay: Option<Box<OpenAiResponseReplay>>,
@@ -667,6 +711,53 @@ impl AgentBrowserToolCall {
         )
     }
 
+    /// Retains a rejected action/form solely for one authenticated error result. It
+    /// contains no proposal and cannot yield native action authority.
+    pub(super) fn decode_openai_or_rejected_action(
+        source_call: AgentProviderCallIdentity,
+        provider_item_id: String,
+        id: String,
+        name: &str,
+        arguments: String,
+    ) -> Result<Self, AgentBrowserToolContractError> {
+        if !valid_provider_item_id(&provider_item_id) {
+            return Err(AgentBrowserToolContractError::CallId);
+        }
+        let id = AgentBrowserToolCallId::try_new(id)?;
+        let proposal = match decode_proposal(name, &arguments) {
+            Ok(proposal) => Ok(Box::new(proposal)),
+            Err(error)
+                if matches!(name, "act" | "fill_form")
+                    && matches!(
+                        error,
+                        AgentBrowserToolContractError::Arguments
+                            | AgentBrowserToolContractError::Action
+                            | AgentBrowserToolContractError::ActionBatch
+                            | AgentBrowserToolContractError::Reference
+                            | AgentBrowserToolContractError::Wait
+                            | AgentBrowserToolContractError::Form(_)
+                    ) =>
+            {
+                validate_json_depth(&arguments)?;
+                Err((
+                    error,
+                    browser_call_problem(name, &arguments, None).ok_or(error)?,
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            kind: AgentBrowserToolKind::parse(name)
+                .ok_or(AgentBrowserToolContractError::ToolName)?,
+            source_call,
+            id,
+            proposal,
+            provider_item_id: Some(provider_item_id),
+            arguments,
+            openai_replay: None,
+        })
+    }
+
     pub(super) fn attach_openai_replay(&mut self, replay: OpenAiResponseReplay) {
         self.openai_replay = Some(Box::new(replay));
     }
@@ -682,9 +773,10 @@ impl AgentBrowserToolCall {
         let id = AgentBrowserToolCallId::try_new(id)?;
         let proposal = Box::new(decode_proposal(name, &arguments)?);
         Ok(Self {
+            kind: proposal.kind(),
             source_call,
             id,
-            proposal,
+            proposal: Ok(proposal),
             provider_item_id,
             arguments,
             openai_replay: openai_replay.map(Box::new),
@@ -700,13 +792,13 @@ impl AgentBrowserToolCall {
     /// Closed pre-policy browser proposal.
     #[cfg(test)]
     pub fn proposal(&self) -> &AgentBrowserToolProposal {
-        self.proposal.as_ref()
+        self.proposal.as_deref().expect("validated fixture call")
     }
 
     /// Consumes the call without copying model-authored text.
     #[cfg(test)]
     pub fn into_parts(self) -> (AgentBrowserToolCallId, AgentBrowserToolProposal) {
-        (self.id, *self.proposal)
+        (self.id, *self.proposal.expect("validated fixture call"))
     }
 
     /// Splits the proposal from its exact one-shot provider-result correlation.
@@ -714,34 +806,45 @@ impl AgentBrowserToolCall {
     /// The correlation retains bounded provider-authored arguments only for a
     /// later fixed continuation request. It exposes no raw JSON or browser
     /// authority and must never be logged or persisted.
+    #[cfg(test)]
     pub(super) fn into_continuation_parts(
         self,
     ) -> (AgentProviderToolCallCorrelation, AgentBrowserToolProposal) {
-        let extraction_schema = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Extract { schema, .. } => Some(*schema),
+        let (correlation, proposal) = self.into_checked_continuation_parts();
+        (correlation, proposal.expect("validated fixture call"))
+    }
+
+    pub(super) fn into_checked_continuation_parts(
+        self,
+    ) -> (
+        AgentProviderToolCallCorrelation,
+        Result<AgentBrowserToolProposal, (AgentBrowserToolContractError, String)>,
+    ) {
+        let extraction_schema = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Extract { schema, .. }) => Some(*schema),
             _ => None,
         };
-        let extraction_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Extract { scope, .. } => Some(scope.clone()),
+        let extraction_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Extract { scope, .. }) => Some(scope.clone()),
             _ => None,
         };
-        let read_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Read(scope) => Some(scope.clone()),
+        let read_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Read(scope)) => Some(scope.clone()),
             _ => None,
         };
-        let snapshot_scope = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Snapshot(scope) => Some(scope.clone()),
+        let snapshot_scope = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Snapshot(scope)) => Some(scope.clone()),
             _ => None,
         };
-        let navigation_target = match self.proposal.as_ref() {
-            AgentBrowserToolProposal::Navigate(target) => Some(target.clone()),
+        let navigation_target = match self.proposal.as_deref().ok() {
+            Some(AgentBrowserToolProposal::Navigate(target)) => Some(target.clone()),
             _ => None,
         };
         (
             AgentProviderToolCallCorrelation {
                 source_call: self.source_call,
                 id: self.id,
-                kind: self.proposal.kind(),
+                kind: self.kind,
                 extraction_schema,
                 extraction_scope,
                 read_scope,
@@ -751,7 +854,7 @@ impl AgentBrowserToolCall {
                 arguments: self.arguments,
                 openai_replay: self.openai_replay,
             },
-            *self.proposal,
+            self.proposal.map(|proposal| *proposal),
         )
     }
 
@@ -768,7 +871,11 @@ impl fmt::Debug for AgentBrowserToolCall {
         formatter
             .debug_struct("AgentBrowserToolCall")
             .field("id", &self.id)
-            .field("proposal", &self.proposal)
+            .field("proposal", &self.proposal.as_ref().ok())
+            .field(
+                "rejection",
+                &self.proposal.as_ref().err().map(|(error, _)| error),
+            )
             .finish()
     }
 }
@@ -875,6 +982,9 @@ pub enum AgentBrowserToolContractError {
     /// Action count, text, effect, or aggregate settle ceiling was invalid.
     #[error("agent browser semantic action batch is invalid")]
     ActionBatch,
+    /// Invalid form data, identified without its private contents.
+    #[error("agent browser form is invalid: {0:?}")]
+    Form(super::AgentBrowserFormError),
     /// Standalone wait condition or relative timeout was invalid.
     #[error("agent browser wait is invalid")]
     Wait,
@@ -883,7 +993,7 @@ pub enum AgentBrowserToolContractError {
     ExtractionSchema,
 }
 
-fn decode_proposal(
+pub(super) fn decode_proposal(
     name: &str,
     arguments: &str,
 ) -> Result<AgentBrowserToolProposal, AgentBrowserToolContractError> {
@@ -900,6 +1010,18 @@ fn decode_proposal(
             }
             let target = ContextNavigationTarget::parse(&value.url)
                 .map_err(|_| AgentBrowserToolContractError::Navigation)?;
+            // A section anchor on another page ("…/functools.html#lru_cache")
+            // loads that page: the anchor only scrolls. A hash route
+            // ("#/settings", "#!/a") is the page itself and stays.
+            let target = match target.as_url().fragment() {
+                Some(fragment) if !fragment.starts_with(['/', '!']) => {
+                    let mut page = target.as_url().clone();
+                    page.set_fragment(None);
+                    ContextNavigationTarget::parse(page.as_str())
+                        .map_err(|_| AgentBrowserToolContractError::Navigation)?
+                }
+                _ => target,
+            };
             Ok(AgentBrowserToolProposal::Navigate(target))
         }
         AgentBrowserToolKind::Back => {
@@ -938,6 +1060,9 @@ fn decode_proposal(
                 AgentBrowserActProposal::try_new(actions)?,
             ))
         }
+        AgentBrowserToolKind::FillForm => super::form::decode(arguments)
+            .map(AgentBrowserToolProposal::FillForm)
+            .map_err(AgentBrowserToolContractError::Form),
         AgentBrowserToolKind::Wait => {
             let value: WaitArgumentsWire = parse(arguments)?;
             let condition = decode_standalone_wait(value.condition)?;
@@ -971,6 +1096,142 @@ fn decode_proposal(
             Ok(AgentBrowserToolProposal::ResumeAfterHuman)
         }
     }
+}
+
+/// Why a browser tool call does not decode, in words the model can correct:
+/// the exact JSON error where the arguments do not parse into the tool's
+/// schema, otherwise what the decoded values break. None when it decodes.
+/// The text may quote the model's own arguments back to it; it never carries
+/// page content and must not be logged.
+pub(crate) fn browser_call_problem(
+    name: &str,
+    arguments: &str,
+    schema: Option<&Value>,
+) -> Option<String> {
+    let error = decode_proposal(name, arguments).err()?;
+    let kind = AgentBrowserToolKind::parse(name)?;
+    let against_schema = schema.and_then(|schema| {
+        let value = serde_json::from_str::<Value>(arguments).ok()?;
+        super::call_schema::schema_problem(schema, &value)
+    });
+    let shape = against_schema.or_else(|| match kind {
+        AgentBrowserToolKind::Navigate => serde_problem::<NavigateWire>(arguments),
+        AgentBrowserToolKind::Back
+        | AgentBrowserToolKind::Forward
+        | AgentBrowserToolKind::Reload
+        | AgentBrowserToolKind::Screenshot
+        | AgentBrowserToolKind::ResumeAfterHuman => serde_problem::<EmptyWire>(arguments),
+        AgentBrowserToolKind::Snapshot | AgentBrowserToolKind::Read => {
+            serde_problem::<ScopeArgumentsWire>(arguments)
+        }
+        AgentBrowserToolKind::Locate => serde_problem::<LocateWire>(arguments),
+        AgentBrowserToolKind::Act => serde_problem::<ActWire>(arguments),
+        AgentBrowserToolKind::FillForm => super::form::decode(arguments)
+            .err()
+            .map(|error| format!("form field {:?}: {:?}", error.field, error.fault)),
+        AgentBrowserToolKind::Wait => serde_problem::<WaitArgumentsWire>(arguments),
+        AgentBrowserToolKind::Extract => serde_problem::<ExtractWire>(arguments),
+        AgentBrowserToolKind::ShowForHuman => serde_problem::<HumanWire>(arguments),
+    });
+    let detail = shape.or_else(|| action_problem(kind, arguments)).unwrap_or_else(|| {
+        let text = match error {
+            AgentBrowserToolContractError::ArgumentLimit => "the arguments are too long",
+            AgentBrowserToolContractError::Arguments => {
+                "the arguments are not one JSON object matching the tool's schema (unknown or missing fields, or nesting too deep)"
+            }
+            AgentBrowserToolContractError::Reference => {
+                "a target must be a ref exactly as the latest look prints it, such as @a12"
+            }
+            AgentBrowserToolContractError::Navigation => {
+                "url must be one absolute http(s) address without credentials, at most 8 KiB"
+            }
+            AgentBrowserToolContractError::Query => {
+                "semantic_query must be short plain text without control characters"
+            }
+            AgentBrowserToolContractError::Scope => {
+                "scope must be {\"kind\":\"initial\"} or a kind with a target ref from the latest look; a text_search needs a non-empty query and surrounding_text a bounded window"
+            }
+            AgentBrowserToolContractError::Action => {
+                "an action's kind, wait and verification do not fit together, or its value or settle_millis is out of range (settle_millis is 1 to 30000)"
+            }
+            AgentBrowserToolContractError::ActionBatch => {
+                return format!(
+                    "actions must hold 1 to {MAX_SEMANTIC_ACTIONS_PER_BATCH} actions that all declare the same effect (a consequential effect stands alone), with at most {MAX_SEMANTIC_ACTION_BATCH_SETTLE_MILLIS} ms of settle_millis and {MAX_SEMANTIC_ACTION_BATCH_TEXT_BYTES} bytes of fill text between them"
+                );
+            }
+            AgentBrowserToolContractError::Form(error) => return format!("form field {:?}: {:?}", error.field, error.fault),
+            AgentBrowserToolContractError::Wait => {
+                "the wait's condition or timeout_millis is out of range"
+            }
+            AgentBrowserToolContractError::ExtractionSchema => {
+                "schema_id must be the positive schema id the task gave"
+            }
+            AgentBrowserToolContractError::CallId | AgentBrowserToolContractError::ToolName => {
+                "the call is malformed"
+            }
+        };
+        text.to_owned()
+    });
+    Some(format!(
+        "invalid_tool_call: nothing ran. The {} call was refused: {detail}. Call one tool again with corrected arguments that match its schema exactly.",
+        kind.as_str()
+    ))
+}
+
+fn action_problem(kind: AgentBrowserToolKind, arguments: &str) -> Option<String> {
+    if kind != AgentBrowserToolKind::Act {
+        return None;
+    }
+    let value: Value = serde_json::from_str(arguments).ok()?;
+    let wire: ActWire = serde_json::from_str(arguments).ok()?;
+    for (index, action) in wire.actions.into_iter().enumerate() {
+        let Err(error) = decode_action(action) else {
+            continue;
+        };
+        let fields = &value["actions"][index];
+        let detail = match error {
+            AgentBrowserToolContractError::Action if fields["settle_millis"].as_u64().is_some_and(|n| n == 0 || n > 30000) =>
+                "settle_millis must be between 1 and 30000".to_owned(),
+            AgentBrowserToolContractError::Action if fields["value"].as_str().is_some_and(|value| SemanticActionText::try_new(value.to_owned()).is_err()) =>
+                "value exceeds the text limit or contains forbidden control characters".to_owned(),
+            AgentBrowserToolContractError::Action if matches!(fields["verification"]["kind"].as_str(), Some("page_dialog_opened" | "page_dialog_closed")) && !matches!(fields["effect"].as_str(), Some("read" | "local_write")) =>
+                "page_dialog_opened/page_dialog_closed can verify only read or local_write. A native approval prompt is not a page dialog. Keep the consequential effect and choose page_changed or another supported outcome of the actual action; native approval is still required".to_owned(),
+            AgentBrowserToolContractError::Action if fields["wait"]["kind"] == "mutation_quiet" && fields["wait"]["millis"].as_u64()? > fields["settle_millis"].as_u64()? =>
+                "wait.millis must not exceed settle_millis".to_owned(),
+            AgentBrowserToolContractError::Action => format!(
+                "kind={} effect={} is incompatible with wait={} and verification={}; choose the outcome that this action can independently verify",
+                fields["kind"].as_str()?, fields["effect"].as_str()?, fields["wait"]["kind"].as_str()?, fields["verification"]["kind"].as_str()?),
+            AgentBrowserToolContractError::Reference => "target or option must be a canonical ref from the latest look, such as @a12".to_owned(),
+            AgentBrowserToolContractError::Wait => "wait.millis is outside the permitted mutation_quiet interval".to_owned(),
+            _ => return None,
+        };
+        return Some(format!("actions[{index}]: {detail}"));
+    }
+    None
+}
+
+#[cfg(test)]
+mod action_problem_tests {
+    use super::*;
+    #[test]
+    fn communication_dialog_error_names_the_effect_instead_of_blame_on_wait() {
+        let message = browser_call_problem("act", r#"{"actions":[{"kind":"click","target":"@a1","effect":"communication","wait":{"kind":"immediate"},"verification":{"kind":"page_dialog_opened"},"settle_millis":2000}]}"#, None).unwrap();
+        assert!(message.contains("actions[0]"));
+        assert!(message.contains("only read or local_write"));
+        assert!(message.contains("native approval prompt is not a page dialog"));
+        assert!(message.contains("Keep the consequential effect"));
+    }
+}
+
+fn serde_problem<'a, T: Deserialize<'a>>(arguments: &'a str) -> Option<String> {
+    let message = serde_json::from_str::<T>(arguments).err()?.to_string();
+    // A column into arguments the model wrote as it likes tells it nothing.
+    Some(
+        message
+            .rsplit_once(" at line ")
+            .map_or(message.as_str(), |(message, _)| message)
+            .to_owned(),
+    )
 }
 
 fn parse_empty(arguments: &str) -> Result<(), AgentBrowserToolContractError> {
@@ -1590,6 +1851,22 @@ mod tests {
         let navigate =
             decode("navigate", r#"{"url":"https://example.test/path"}"#).expect("navigate");
         assert_eq!(navigate.proposal().kind(), AgentBrowserToolKind::Navigate);
+        let target = |url: &str| match decode("navigate", &format!(r#"{{"url":"{url}"}}"#))
+            .expect("navigate")
+            .proposal()
+        {
+            AgentBrowserToolProposal::Navigate(target) => target.as_url().to_string(),
+            _ => panic!("navigate"),
+        };
+        // A section anchor loads its page; a hash route is kept.
+        assert_eq!(
+            target("https://docs.example.test/library/functools.html#functools.lru_cache"),
+            "https://docs.example.test/library/functools.html"
+        );
+        assert_eq!(
+            target("https://app.example.test/#/settings"),
+            "https://app.example.test/#/settings"
+        );
         for name in [
             "back",
             "forward",
@@ -2032,5 +2309,48 @@ mod tests {
             OpenAiResponseReplayItem::FunctionCall,
         ])
         .is_none());
+    }
+
+    #[test]
+    fn rejected_form_keeps_its_own_correlation_and_has_no_action_proposal() {
+        let call = AgentBrowserToolCall::decode_openai_or_rejected_action(
+            source_call(), "fc_form".into(), "call_form".into(), "fill_form",
+            r#"{"fields":[{"target":"@a1","value":"Northport"},{"target":"@a2","value":42}],"submit":null}"#.into(),
+        ).unwrap();
+        let (correlation, proposal) = call.into_checked_continuation_parts();
+        assert_eq!(correlation.kind(), AgentBrowserToolKind::FillForm);
+        assert_eq!(correlation.id().as_str(), "call_form");
+        let (error, note) = proposal.unwrap_err();
+        assert_eq!(
+            error,
+            AgentBrowserToolContractError::Form(super::super::AgentBrowserFormError {
+                field: Some(2),
+                fault: super::super::AgentBrowserFormFault::Shape,
+            })
+        );
+        assert!(note.contains("fill_form"));
+        assert!(note.contains("Some(2)"));
+        assert!(!note.contains("Northport"));
+    }
+
+    #[test]
+    fn a_malformed_call_is_described_by_the_field_that_broke() {
+        let arguments = r#"{"actions":[{"effect":"local_write","kind":"fill","settle_millis":2000,"target":{"ref":"@a13"},"value":"x","verification":{"kind":"target_value_matches_input"},"wait":{"kind":"immediate"}}]}"#;
+        let schema = serde_json::json!({"type": "object", "properties": {"actions": {"type": "array",
+            "items": {"type": "object", "properties": {"target": {"type": "string"}}}}}});
+        let problem = browser_call_problem("act", arguments, Some(&schema)).expect("refused");
+        assert!(problem.starts_with("invalid_tool_call: nothing ran. The act call"));
+        assert!(
+            problem.contains("arguments.actions[0].target: must be a string, not object"),
+            "{problem}"
+        );
+        // Without the schema the decoder's own words, never a column.
+        let problem = browser_call_problem("act", arguments, None).expect("refused");
+        assert!(problem.contains("invalid type: map"), "{problem}");
+        assert!(!problem.contains("line 1 column"), "{problem}");
+        let problem =
+            browser_call_problem("navigate", r#"{"url":"not a url"}"#, None).expect("refused");
+        assert!(problem.contains("url must be one absolute"), "{problem}");
+        assert!(browser_call_problem("back", "{}", None).is_none());
     }
 }

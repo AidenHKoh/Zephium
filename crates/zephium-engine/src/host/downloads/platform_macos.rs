@@ -95,17 +95,29 @@ impl Downloads {
         Err(DownloadError::Unsupported)
     }
     pub(super) fn ensure_timer(self: &Rc<Self>) {
+        let (period, slow) = self.tick_period();
         if self.timer.borrow().is_some() {
-            return;
+            if self.timer_slow.get() == slow {
+                return;
+            }
+            if let Some(timer) = self.timer.borrow_mut().take() {
+                stop_timer(timer);
+            }
         }
+        self.timer_slow.set(slow);
         let weak = Rc::downgrade(self);
         let callback = RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
             if let Some(manager) = weak.upgrade() {
                 manager.tick();
             }
         });
-        let timer =
-            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.2, true, &callback) };
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                period.as_secs_f64(),
+                true,
+                &callback,
+            )
+        };
         unsafe {
             NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
         }

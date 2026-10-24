@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { watchStill } from "./still";
+  import { watchStill } from "$shared/lib/still";
 
   /**
    * Words at work: a band of light passes along them. The band is a masked

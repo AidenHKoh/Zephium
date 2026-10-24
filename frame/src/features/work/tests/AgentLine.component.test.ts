@@ -4,10 +4,13 @@ import { WorkSession } from "$domain/work";
 import type { WorkExecutionFact } from "$shared/ipc/bindings";
 import AgentLine from "../components/AgentLine.svelte";
 import { projection } from "./environment-fixtures";
-const native = vi.hoisted(() => ({ operation: vi.fn() }));
+const native = vi.hoisted(() => ({
+  operation: vi.fn(),
+  command: vi.fn(async () => ({ operation_id: "op", accepted: true })),
+}));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workOperation: native.operation });
+  return mockBindings({ workOperation: native.operation, runCommand: native.command });
 });
 
 function agentRun(status: WorkExecutionFact["status"]): WorkExecutionFact {
@@ -285,7 +288,12 @@ test("a refused steer queues the draft and the queue rides on when the run close
   session.selected = "objective";
   const execution = agentRun("running");
   session.projection = { ...structuredClone(projection), executions: [execution] };
-  const continueWith = vi.spyOn(session, "continueWith").mockResolvedValue(true);
+  const edit = vi.spyOn(session, "edit").mockResolvedValue(true);
+  const begin = vi.spyOn(session.operations, "begin").mockImplementation(async (input) => ({
+    id: "queued-operation",
+    input,
+    state: { kind: "pending", work: "objective" },
+  }));
   // A refused steer must not drop the message: it waits for the run instead.
   const steer = vi.spyOn(session, "steer").mockResolvedValue(false);
   const onsteered = vi.fn();
@@ -301,12 +309,15 @@ test("a refused steer queues the draft and the queue rides on when the run close
   expect(steer).toHaveBeenCalledExactlyOnceWith("Also compare the wireless ones");
   await expect.poll(() => session.queue).toEqual(["Also compare the wireless ones"]);
   expect(onsteered).toHaveBeenCalledOnce();
-  expect(continueWith).not.toHaveBeenCalled();
+  expect(begin).not.toHaveBeenCalled();
   session.projection = {
     ...session.projection,
     executions: [{ ...execution, status: "completed" }],
   };
-  await expect.poll(() => continueWith.mock.calls).toEqual([["Also compare the wireless ones"]]);
+  await expect
+    .poll(() => edit.mock.calls)
+    .toEqual([[{ kind: "set_objective", objective: "Also compare the wireless ones" }]]);
+  await expect.poll(() => begin.mock.calls.length).toBe(1);
   expect(session.queue).toEqual([]);
   await screen.unmount();
   session.dispose();
@@ -394,11 +405,11 @@ test("the line says why a page waits for you, in one sentence, and links to its 
     onwaitingpage,
   });
   const link = screen.getByRole("button", {
-    name: /Sign in to ferry.example so the agent can continue/,
+    name: /^Waiting for you on ferry.example/,
   });
   await expect.element(link).toBeVisible();
   // A long wait stays quiet; the countdown belongs to the last minute.
-  expect(screen.container.textContent).not.toContain("s left");
+  expect(screen.container.textContent).not.toContain(" left");
   await screen.rerender({
     session,
     waiting: {
@@ -409,7 +420,7 @@ test("the line says why a page waits for you, in one sentence, and links to its 
     },
     onwaitingpage,
   });
-  await expect.element(screen.getByText("18s left")).toBeVisible();
+  await expect.element(screen.getByText("0:18 left")).toBeVisible();
   await link.click();
   expect(onwaitingpage).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   await screen.unmount();
@@ -542,7 +553,7 @@ test("a finished run says its own sentence, never a count, and the line speaks f
   session.dispose();
 });
 
-test("a sign-in wall offers to sign in, and the run goes on by itself once the person has", async () => {
+test("a sign-in wall is only pointed at: the island shows, the card signs in", async () => {
   const session = new WorkSession("profile");
   session.selected = "objective";
   const execution = agentRun("running");
@@ -563,10 +574,12 @@ test("a sign-in wall offers to sign in, and the run goes on by itself once the p
     reason: "sign_in" as const,
     remaining: 150_000,
   };
-  const onsignin = vi.fn();
-  const screen = await render(AgentLine, { session, waiting, onsignin });
-  await screen.getByRole("button", { name: "Sign in to jobs.example.com", exact: true }).click();
-  expect(onsignin).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
+  const onwaitingpage = vi.fn();
+  const screen = await render(AgentLine, { session, waiting, onwaitingpage });
+  await expect.element(screen.getByText("Waiting for you on jobs.example.com")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Sign in", exact: true }).elements()).toHaveLength(0);
+  await screen.getByRole("button", { name: "Show", exact: true }).click();
+  expect(onwaitingpage).toHaveBeenCalledExactlyOnceWith("page:execution:read-1");
   // No "as me" retry: the run itself resumes after the sign-in.
   expect(screen.container.textContent).not.toContain("Try again as me");
   await screen.unmount();
@@ -582,7 +595,9 @@ test("an answered run says what it found and still offers a part's one remedy", 
     session,
     ended: { text: "Notion couldn’t be read", action: "Try again", onact },
   });
-  await expect.element(screen.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Try again", exact: true }))
+    .toBeVisible();
   expect(screen.container.textContent).not.toContain("Notion couldn’t be read");
   expect(screen.container.querySelector(".character.lead.stopped")).toBeNull();
   await screen.unmount();
@@ -600,9 +615,140 @@ test("a run that ended short says what is missing and offers the one thing that 
     ended: { text: "Flights couldn’t be read", action: "Try again", onact },
   });
   await expect.element(screen.getByText("Flights couldn’t be read", { exact: true })).toBeVisible();
-  await screen.getByRole("button", { name: "Try again" }).click();
+  await screen.getByRole("button", { name: "Try again", exact: true }).click();
   expect(onact).toHaveBeenCalledOnce();
   expect(screen.container.querySelector(".character.lead.stopped")).not.toBeNull();
   await screen.unmount();
   session.dispose();
+});
+
+test("a run stopped by spent Zephium AI usage says so and offers the fix", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const failed = agentRun("failed");
+  failed.steps = [
+    ...failed.steps!,
+    {
+      id: "turn-2",
+      turn: 2,
+      kind: { kind: "turn" },
+      status: "failed",
+      note: "Zephium AI's included usage is spent",
+      model_fault: "hosted_usage",
+    },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [failed] };
+  const screen = await render(AgentLine, { session });
+  await expect
+    .element(screen.getByText("You’ve used your included Zephium AI usage.", { exact: true }))
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Upgrade or use a key" }).click();
+  expect(native.command).toHaveBeenCalledWith("settings.account");
+  await screen.unmount();
+  session.dispose();
+});
+
+test.each([
+  ["plan_required", "This model needs a different Zephium plan.", "See plans", "settings.account"],
+  [
+    "billing_review",
+    "Your Zephium account is under billing review.",
+    "Open account",
+    "settings.account",
+  ],
+  [
+    "daily_limit",
+    "You’ve reached your daily limit. It resets at",
+    "Change limit",
+    "settings.account",
+  ],
+  [
+    "free_usage_paused",
+    "Free Zephium AI usage is paused right now. Credits and your own key still work.",
+    "See plans",
+    "settings.account",
+  ],
+  [
+    "hosted_paused",
+    "Zephium AI is paused for now. Try again later, or use your own key.",
+    "Use your own key",
+    "settings.ai",
+  ],
+] as const)(
+  "a hosted %s refusal says so and offers its one fix",
+  async (fault, line, label, command) => {
+    const session = new WorkSession("profile");
+    session.selected = "objective";
+    const failed = agentRun("failed");
+    failed.steps = [
+      ...failed.steps!,
+      { id: "turn-2", turn: 2, kind: { kind: "turn" }, status: "failed", model_fault: fault },
+    ];
+    session.projection = { ...structuredClone(projection), executions: [failed] };
+    const screen = await render(AgentLine, { session });
+    await expect.element(screen.getByText(line)).toBeVisible();
+    await screen.getByRole("button", { name: label, exact: true }).click();
+    expect(native.command).toHaveBeenCalledWith(command);
+    await screen.unmount();
+    session.dispose();
+  },
+);
+
+test("zephium still confirming earlier requests asks for a moment and offers a plain retry", async () => {
+  const session = new WorkSession("profile");
+  session.selected = "objective";
+  const failed = agentRun("failed");
+  failed.steps = [
+    ...failed.steps!,
+    { id: "turn-2", turn: 2, kind: { kind: "turn" }, status: "failed", model_fault: "hosted_busy" },
+  ];
+  session.projection = { ...structuredClone(projection), executions: [failed] };
+  const screen = await render(AgentLine, { session });
+  await expect
+    .element(
+      screen.getByText(
+        "Zephium AI is still confirming your earlier requests. Try again in a moment.",
+      ),
+    )
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Try again", exact: true }))
+    .toBeVisible();
+  await screen.unmount();
+  session.dispose();
+});
+
+test("a refused request says so for a moment, then the finished run's own sentence returns", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const session = new WorkSession("profile");
+    session.selected = "objective";
+    const done = agentRun("completed");
+    done.steps = [
+      ...done.steps!,
+      {
+        id: "finish",
+        turn: 2,
+        kind: { kind: "finish", followups: [] },
+        status: "succeeded",
+        note: "Planned the trip around the window.",
+      },
+    ];
+    session.projection = { ...structuredClone(projection), executions: [done] };
+    vi.spyOn(session.operations, "latest").mockReturnValue({
+      id: "again",
+      state: { kind: "refused", error: "unavailable" },
+    } as ReturnType<typeof session.operations.latest>);
+    const screen = await render(AgentLine, { session });
+    await Promise.resolve();
+    expect(screen.container.textContent).toContain("not available right now");
+    vi.advanceTimersByTime(6000);
+    await Promise.resolve();
+    expect(screen.container.textContent).toContain("Planned the trip around the window.");
+    expect(screen.container.textContent).not.toContain("not available right now");
+    await screen.unmount();
+    session.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
 });

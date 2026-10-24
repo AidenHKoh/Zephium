@@ -1,4 +1,5 @@
 import type {
+  WorkArtifactV1,
   WorkElementPlacement,
   WorkExecutionFact,
   WorkFileEvidenceV1,
@@ -14,15 +15,17 @@ import { agentDoing, isLive, type AgentDoing } from "./agent-steps";
 import { subjectFacts, subjectKey, subjectsOf } from "./subjects";
 import { firstRequest, type WorkStage } from "./project-environment-thread";
 import { host, observedTitle } from "./project-environment-stage";
-import { BOARD_PIN, laneElement, partShape } from "./project-environment-board";
+import { BOARD_PIN, laneElement, partShape, searchPart } from "./project-environment-board";
 import type { RunPart } from "./run/parts";
 import { hostOf, siteName } from "./run/site";
 import type { SourceRow } from "./project-environment-stage";
 import { RUN } from "./run/layout";
 import { pageName } from "./run/sources";
 import { PART } from "./run/part-size";
+import { settleNeeds } from "./run/needs";
 import { fileName } from "./work-files";
-import { linkVideo } from "./link-media";
+import { isBareTitle, linkVideo, splitLinkTitle } from "./link-media";
+import { ownedView } from "./board/objects";
 import { heldPage, humanPage, phaseLabel } from "./work-human";
 import { mediaUrl, pageFrameUrl } from "$domain/resources";
 import {
@@ -102,12 +105,19 @@ export function environmentPictures(
   return pictures;
 }
 
+/** The person's own objects a canvas holds, as far as they have been read. */
+export type OwnedLookup = {
+  get(id: string): { title: string; data: WorkArtifactV1["data"] } | undefined;
+  read(id: string): boolean;
+};
+
 export function environmentItems(
   snapshot: WorkEnvironmentSnapshot,
   tabs: readonly TabView[],
   notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection> = new Map(),
   media: ReadonlyMap<string, MediaAssetV1> = new Map(),
+  owned?: OwnedLookup,
 ): CanvasItem[] {
   const decisions = new Map((snapshot.decisions ?? []).map((d) => [d.element, d.choice]));
   const resources = new Map(
@@ -124,9 +134,14 @@ export function environmentItems(
     if (asset?.kind === "image")
       pictures.set(relation.from, { profile: snapshot.profile, digest: asset.digest });
   }
-  return elementItems(snapshot, tabs, notes, objectives, media).map((item) => {
+  return elementItems(snapshot, tabs, notes, objectives, media, owned).map((item) => {
     const decision = decisions.get(item.id);
-    const image = pictures.get(item.id);
+    const native = item.subject?.recordMedia;
+    const image = native
+      ? { profile: native.profile, digest: native.digest, record: native }
+      : item.subject?.mediaAttempted
+        ? undefined
+        : pictures.get(item.id);
     // A video's admitted thumbnail is its poster, read from the profile rather than the web.
     const src =
       image && item.object?.view.kind === "media" ? mediaUrl(image.profile, image.digest) : null;
@@ -149,6 +164,7 @@ function elementItems(
   notes: readonly NoteSummary[],
   objectives: ReadonlyMap<string, WorkRuntimeProjection>,
   media: ReadonlyMap<string, MediaAssetV1>,
+  owned?: OwnedLookup,
 ): CanvasItem[] {
   const pictures = subjectPictures(snapshot);
   return snapshot.elements.flatMap((element) => {
@@ -201,7 +217,23 @@ function elementItems(
           media: { profile: snapshot.profile, asset },
         };
       }
+      const own = owned?.get(resourceId);
+      const view = own ? ownedView(element.id, own.title, own.data) : null;
+      if (own && view)
+        return {
+          id: element.id,
+          type: "object" as const,
+          area: element.area,
+          kind: view.kind,
+          title: own.title,
+          detail: "",
+          status: area,
+          owned: resourceId,
+          object: { view, live: false },
+        };
       const note = notes.find((note) => note.id === resourceId);
+      // Not a note: the person's own object, drawn once it has been read.
+      if (!note && owned && !owned.read(resourceId)) return [];
       return {
         id: element.id,
         type: "note",
@@ -234,12 +266,22 @@ function elementItems(
       } catch {
         /* Rust admits the address; an unreadable one simply has no origin line. */
       }
+      const stored = splitLinkTitle(link.title);
       const title = clipText(
-        observedTitle(objectives, link.url) || link.title || host(link.url) || link.url,
+        observedTitle(objectives, link.url) || stored.title || host(link.url) || link.url,
         TITLE_TEXT,
       );
       // A video is its poster, played in place; the poster is the admitted thumbnail.
-      const video = linkVideo(element.id, link.url, link.title ? { title: link.title } : {});
+      // Its caption is the video's own name when one is known, never the bare host
+      // a pasted link is stored with.
+      const bare = isBareTitle(stored.title, link.url);
+      const observed = observedTitle(objectives, link.url);
+      const named = observed || (bare ? "" : stored.title);
+      const video = linkVideo(element.id, link.url, {
+        ...(named ? { title: clipText(named, TITLE_TEXT) } : {}),
+        // The channel belongs to the title it was stored with, not to a read's title.
+        ...(!observed && stored.channel ? { channel: stored.channel } : {}),
+      });
       if (video)
         return {
           id: element.id,
@@ -594,6 +636,20 @@ export function environmentAgents(
  * What a search part read, one row per site as its address reads, with the
  * page it read there: never a vendor's name standing in for its site.
  */
+/** A search's first results in the engine's order, the ones it opened lifted to the top. */
+function searchRows(rows: readonly SourceRow[]) {
+  return [...rows]
+    .sort((a, b) => Number(!!b.opened) - Number(!!a.opened))
+    .slice(0, PART.searchRows)
+    .map((row) => ({
+      key: row.key,
+      url: row.url,
+      where: row.where,
+      title: row.title,
+      ...(row.opened ? { opened: true } : {}),
+    }));
+}
+
 function citedSites(rows: readonly SourceRow[]) {
   const sites = new Map<string, { key: string; url: string; where: string; title: string }>();
   for (const row of rows) {
@@ -617,8 +673,11 @@ const TOOLS: Record<string, string> = { gh: "GitHub", glab: "GitLab" };
 function needView(need: NonNullable<RunPart["need"]>, host?: string): PartNeed {
   switch (need.kind) {
     case "sign_in":
+    case "check":
     case "allow_site":
       return { kind: need.kind, target: siteName(need.host), address: `https://${need.host}` };
+    case "choose_folder":
+      return { kind: need.kind, target: "" };
     case "allow_folder":
       return {
         kind: need.kind,
@@ -690,7 +749,7 @@ export function environmentParts(
     const recorded = pages(projection.work.id);
     const waiting = human(projection.work.id);
     const paused = activity(projection.work.id) === "paused";
-    for (const part of stage.parts) {
+    const built = stage.parts.map((part) => {
       const entries = part.pages.map((entry): PartPage => {
         const opened = recorded.filter((page) => entry.steps.some((step) => step.id === page.step));
         const live =
@@ -741,14 +800,45 @@ export function environmentParts(
           frame,
           live,
           ...(held ? { human: humanPage(held) } : {}),
+          ...(succeeded ? { read: true } : {}),
           ...(account ? { account } : {}),
           ...(shown ? { tab: true } : {}),
         };
       });
+      return { part, entries };
+    });
+    const settled = settleNeeds(
+      built.map(({ part, entries }) => ({
+        id: part.id,
+        ...(part.host ? { host: part.host } : {}),
+        ...(part.need ? { need: needView(part.need, part.host) } : {}),
+        pages: entries,
+      })),
+    );
+    for (const { part } of built) {
+      const { pages: entries, need: offered, pending } = settled.get(part.id)!;
+      // A settled run's ended part tells a check or a sign-in as past.
+      const need =
+        offered &&
+        !stage.live &&
+        ["done", "failed", "stopped"].includes(part.state) &&
+        (offered.kind === "check" || offered.kind === "sign_in")
+          ? { ...offered, past: true as const }
+          : offered;
       const rect = stage.lane.rects[part.id]!;
-      const needs = !!part.ask || entries.some((page) => page.human?.phase === "waiting_for_human");
+      // Every step of a handoff is the person's turn: the part stays waiting
+      // while its page is offered, open and being continued.
+      const waitingPage = entries.find(
+        (page) => !!page.human && page.human.phase !== "reading" && page.human.phase !== "released",
+      );
+      const needs = !!part.ask || !!waitingPage;
       const state = needs ? "waiting" : part.state;
-      const summary = needs ? m.work_line_waiting_for_you() : partSummary(part, stage);
+      // The helper's own label already says it is waiting; the summary says where.
+      const summary = waitingPage
+        ? m.work_part_needs_you_on({ site: host(waitingPage.url).replace(/^www\./u, "") })
+        : needs
+          ? m.work_turn_waiting()
+          : partSummary(part, stage);
       const rows: NonNullable<CanvasItem["sources"]> =
         part.helper === "research" && !part.pages.length
           ? part.sources.slice(0, SOURCE_ROWS).map((row) => ({
@@ -795,14 +885,28 @@ export function environmentParts(
           ...(part.lines ? { lines: part.lines } : {}),
           ...(part.connection ? { connection: part.connection } : {}),
           ...(part.ask ? { ask: part.ask } : {}),
-          ...(part.need ? { need: needView(part.need, part.host) } : {}),
+          ...(need ? { need } : {}),
+          ...(pending ? { pending } : {}),
           ...(stage.notes.get(part.id)?.length
             ? { notes: stage.notes.get(part.id)!.map((object) => object.view) }
             : {}),
           ...(part.helper === "research"
             ? {
-                cited: citedSites(part.sources).slice(0, PART.sourceRows),
-                citedCount: citedSites(part.sources).length,
+                ...(searchPart(part)
+                  ? {
+                      cited: searchRows(part.sources),
+                      citedCount: part.sources.length,
+                      search: true,
+                      ...(new Set(part.sources.map((row) => row.where)).size === 1
+                        ? { oneSite: true }
+                        : {}),
+                      ...(part.query ? { query: part.query } : {}),
+                      ...(part.queries ? { queries: part.queries } : {}),
+                    }
+                  : {
+                      cited: citedSites(part.sources).slice(0, PART.sourceRows),
+                      citedCount: citedSites(part.sources).length,
+                    }),
               }
             : {}),
         },

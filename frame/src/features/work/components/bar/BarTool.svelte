@@ -4,6 +4,7 @@
   import type { IconSvgElement } from "@hugeicons/svelte";
   import Icon from "$shared/ui/Icon";
   import KeyHint from "$shared/ui/KeyHint";
+  import "$shared/ui/Shine/shine.css";
 
   let {
     icon,
@@ -37,6 +38,9 @@
     onopenchange?: (open: boolean) => void;
     onclick?: () => void;
   } = $props();
+  let button = $state<HTMLElement | null>(null);
+  /** The panel stands above the sheet the tool is on, whatever height the field has grown to. */
+  const sheet = $derived(button?.closest<HTMLElement>(".surface") ?? undefined);
   /** The icon turns in only when it changes, never as the bar first draws. */
   let turned = $state(false);
   let seen: IconSvgElement | undefined;
@@ -49,9 +53,12 @@
 {#snippet face(props: Record<string, unknown>)}
   <button
     {...props}
+    bind:this={button}
     type="button"
     class="bar-tool"
     class:small
+    class:ui-shine={small}
+    class:ui-shine-press={small}
     aria-label={label}
     aria-pressed={pressed}
     aria-keyshortcuts={keys.length ? keys.join("+") : undefined}
@@ -75,10 +82,13 @@
       {#snippet child({ props })}{@render face(props)}{/snippet}
     </Popover.Trigger>
     <Popover.Content
-      class={["work-popover", wide && "work-popover-wide"].filter(Boolean).join(" ")}
+      class={["work-popover", "ui-shine-sheet", wide && "work-popover-wide"]
+        .filter(Boolean)
+        .join(" ")}
       side="top"
       align="start"
-      sideOffset={12}
+      customAnchor={sheet}
+      sideOffset={sheet ? 10 : 12}
       collisionPadding={12}
       preventScroll={false}
       aria-label={label}
@@ -98,14 +108,17 @@
     block-size: 34px;
     padding: 0;
     border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
     color: var(--color-label-secondary);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out),
       scale var(--motion-base) var(--ease-spring);
+  }
+
+  .bar-tool:not(.small) {
+    border-radius: var(--radius-control-compact);
+    background: transparent;
   }
 
   .glyph {
@@ -154,7 +167,7 @@
     padding: 5px 6px 5px 10px;
     border-radius: var(--radius-control-compact);
     background: var(--color-float);
-    box-shadow: var(--shadow-menu);
+    box-shadow: var(--shadow-menu), var(--shine-top);
     color: var(--color-text);
     font-size: var(--text-label);
     font-weight: 500;
@@ -181,22 +194,27 @@
     outline-offset: -2px;
   }
 
-  /* The field's own +: a round control, the send button's quiet twin across the field. */
+  /* The field's own +: the shine plate, round, the send button's twin across the field. */
   .bar-tool.small {
+    --shine-radius: var(--radius-capsule);
+
     inline-size: 32px;
     block-size: 32px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-control);
     color: var(--color-label-secondary);
   }
 
-  .bar-tool:hover:not(:disabled),
-  .bar-tool[data-state="open"] {
+  .bar-tool:not(.small):hover:not(:disabled),
+  .bar-tool:not(.small)[data-state="open"] {
     background: var(--color-fill-hover);
     color: var(--color-text);
   }
 
-  .bar-tool:active:not(:disabled) {
+  .bar-tool.small:hover:not(:disabled),
+  .bar-tool.small[data-state="open"] {
+    color: var(--color-text);
+  }
+
+  .bar-tool:not(.small):active:not(:disabled) {
     scale: 0.94;
     transition-duration: var(--motion-instant);
   }

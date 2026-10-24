@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+use wry::WebViewExtMacOS as _;
 
 use raw_window_handle::HasWindowHandle;
 use wry::dpi::{LogicalPosition, LogicalSize, Position, Size};
@@ -105,11 +106,117 @@ fn new_owned_agent_configuration(
             }
             Ok(configuration)
         }
-        (ContextProfileStorageClass::Durable, Some(_))
-        | (ContextProfileStorageClass::Ephemeral, None) => {
+        // A durable class with its own store is Work's persistent store.
+        (ContextProfileStorageClass::Durable, Some(store)) => {
+            let mtm = MainThreadMarker::new().ok_or(AgentOwnedViewConstructionError::Native)?;
+            if !work_store_matches(profile, store) {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            // SAFETY: `mtm` proves main-thread WebKit access; the retained
+            // store and configuration stay live for these calls.
+            let (configuration, actual_store) = unsafe {
+                let configuration = WKWebViewConfiguration::new(mtm);
+                configuration.setWebsiteDataStore(store);
+                let actual_store = configuration.websiteDataStore();
+                (configuration, actual_store)
+            };
+            if Retained::as_ptr(&actual_store) != Retained::as_ptr(store) {
+                return Err(AgentOwnedViewConstructionError::Storage);
+            }
+            Ok(configuration)
+        }
+        (ContextProfileStorageClass::Ephemeral, None) => {
             Err(AgentOwnedViewConstructionError::Storage)
         }
     }
+}
+
+/// The profile's persistent Work store, created by WebKit on first use.
+pub(crate) fn work_data_store(profile: ProfileId) -> Result<WebsiteDataStore, &'static str> {
+    use objc2_foundation::{MainThreadMarker, NSUUID};
+    use objc2_web_kit::WKWebsiteDataStore;
+
+    let mtm = MainThreadMarker::new().ok_or("WKWebsiteDataStore requires the main thread")?;
+    let identifier = NSUUID::from_bytes(crate::work_website_data::identifier(profile));
+    // SAFETY: `mtm` proves main-thread WebKit access; the UUID outlives the call.
+    let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+    if !work_store_matches(profile, &store) {
+        return Err("Work website data store identity mismatch");
+    }
+    Ok(store)
+}
+
+/// Removes every kind of data from the profile's Work store, if one exists,
+/// and replies whether a fresh fetch then finds none. Live Work pages keep
+/// running on the emptied store.
+pub(crate) fn clear_work_data_store(profile: ProfileId, reply: std::sync::mpsc::Sender<bool>) {
+    use wry::WebViewExtDarwin;
+
+    if super::initialize_data_store_enumeration().is_err() {
+        let _ = reply.send(false);
+        return;
+    }
+    let identifier = crate::work_website_data::identifier(profile);
+    let fallback = reply.clone();
+    let listed =
+        <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(move |identifiers| {
+            if !identifiers.contains(&identifier) {
+                let _ = reply.send(true);
+                return;
+            }
+            match work_data_store(profile) {
+                Ok(store) => clear_data_store(store, reply),
+                Err(_) => {
+                    let _ = reply.send(false);
+                }
+            }
+        });
+    if listed.is_err() {
+        let _ = fallback.send(false);
+    }
+}
+
+fn clear_data_store(store: WebsiteDataStore, reply: std::sync::mpsc::Sender<bool>) {
+    use objc2_foundation::{MainThreadMarker, NSArray, NSDate};
+    use objc2_web_kit::{WKWebsiteDataRecord, WKWebsiteDataStore};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        let _ = reply.send(false);
+        return;
+    };
+    // SAFETY: `mtm` proves main-thread WebKit access for every call below;
+    // each block keeps its retained store and types alive until WebKit calls it.
+    unsafe {
+        let types = WKWebsiteDataStore::allWebsiteDataTypes(mtm);
+        let epoch = NSDate::dateWithTimeIntervalSince1970(0.0);
+        let verify_store = store.clone();
+        let verify_types = types.clone();
+        let removed = block2::RcBlock::new(move || {
+            let reply = reply.clone();
+            let retained = verify_store.clone();
+            let fetched = block2::RcBlock::new(
+                move |records: std::ptr::NonNull<NSArray<WKWebsiteDataRecord>>| {
+                    let _ = &retained;
+                    let _ = reply.send(records.as_ref().count() == 0);
+                },
+            );
+            verify_store.fetchDataRecordsOfTypes_completionHandler(&verify_types, &fetched);
+        });
+        store.removeDataOfTypes_modifiedSince_completionHandler(&types, &epoch, &removed);
+    }
+}
+
+/// Whether a store is exactly the profile's persistent Work store.
+pub(crate) fn work_store_matches(profile: ProfileId, store: &WebsiteDataStore) -> bool {
+    let expected = crate::work_website_data::identifier(profile);
+    // SAFETY: callers run on the main thread; the retained store stays live.
+    let (persistent, identifier) = unsafe {
+        (
+            store.isPersistent(),
+            store.identifier().map(|id| id.as_bytes()),
+        )
+    };
+    persistent && identifier == Some(expected) && identifier != Some(profile.bytes())
 }
 
 /// Exact native page and its closed navigation policy handle.
@@ -136,6 +243,29 @@ impl AgentOwnedView {
         &self,
     ) -> Option<&crate::platform::work_document_navigation::WorkDocumentNavigation> {
         self.work_navigation.as_ref()
+    }
+
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn form_observer_world(
+        &self,
+    ) -> Option<objc2::rc::Retained<objc2_web_kit::WKContentWorld>> {
+        self.semantic.as_ref()?.form_observer_world()
+    }
+
+    pub(crate) fn sample_work_human_wall(
+        &self,
+        completion: impl FnOnce(String) + 'static,
+    ) -> Result<(), ()> {
+        // Only the original, live human-owned navigation phase may run this
+        // fixed survey. It is never an automated or hidden-decision tool.
+        self.work_navigation()
+            .and_then(|gate| gate.human_wall_probe())
+            .ok_or(())?;
+        use wry::WebViewExtMacOS as _;
+        self.semantic
+            .as_ref()
+            .ok_or(())?
+            .sample_human_wall(&self.view.webview(), completion)
     }
 
     pub(crate) fn semantic(&self) -> Option<&AgentSemanticRuntimeController> {
@@ -199,6 +329,22 @@ impl AgentOwnedView {
         self.semantic.as_mut().ok_or(())?.park_active(completion)
     }
 
+    /// Enrolls a document a hand-on load put in place, so a later admitted
+    /// navigation can park its runtime like any navigated document's.
+    pub(crate) fn enroll_handed_on_document(
+        &mut self,
+        target: zephium_agentic::ContextNavigationTarget,
+    ) -> Result<(), ()> {
+        if !self
+            .semantic
+            .as_ref()
+            .is_some_and(AgentSemanticRuntimeRegistration::active_unbound)
+        {
+            return Ok(());
+        }
+        self.enroll_current_work_history_get(target)
+    }
+
     pub(crate) fn semantic_runtime_parked(&self) -> bool {
         self.semantic
             .as_ref()
@@ -225,6 +371,13 @@ impl AgentOwnedView {
             current.as_deref().ok_or(())?,
             predecessor.as_deref().ok_or(())?,
         )
+    }
+
+    pub(crate) fn history_destination(
+        &self,
+        ticket: super::agent_history::AgentHistoryBackTicket,
+    ) -> Option<&zephium_agentic::ContextNavigationTarget> {
+        self.history.destination_target(ticket)
     }
 
     pub(crate) fn reactivate_history_destination(
@@ -296,23 +449,77 @@ impl AgentOwnedView {
             .map_err(map_semantic_dispatch_failure)
     }
 
+    pub(crate) fn record_media_ports(
+        &self,
+    ) -> Option<(
+        crate::platform::record_media::MediaDispatch,
+        crate::platform::record_media::FrameCapture,
+        crate::platform::record_media::PrivacyDispatch,
+    )> {
+        let semantic = self.semantic()?.clone();
+        let native = self.view.webview();
+        let capture = Rc::new(
+            move |crop, completion: crate::platform::record_media::FrameCompletion| {
+                super::semantic_screenshot::capture_record_frame_native(&native, crop, completion)
+            },
+        );
+        let privacy_runtime = semantic.clone();
+        let privacy = Rc::new(move |reply| privacy_runtime.dispatch_privacy(reply));
+        let dispatch = Rc::new(
+            move |plan: &zephium_agentic::SemanticRecordMediaPlan,
+                  validate: bool,
+                  fetch: crate::platform::record_media::MediaFetchAttempt,
+                  completion: crate::platform::record_media::MediaCompletion| {
+                semantic.dispatch_media(plan, validate, fetch, completion)
+            },
+        );
+        Some((dispatch, capture, privacy))
+    }
+
     pub(crate) fn dispatch_screenshot(
         &self,
         request: SemanticScreenshotNativeRequest,
         admitted_at: Instant,
         cancelled: Arc<AtomicBool>,
-        completion: impl FnOnce(Result<SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure>)
-            + 'static,
+        completion: impl FnOnce(
+                Result<
+                    crate::platform::semantic_pixel_privacy::ModelCapture<
+                        SemanticScreenshotNativeCapture,
+                    >,
+                    SemanticScreenshotNativeFailure,
+                >,
+            ) + 'static,
         callback_panicked: impl Fn() + 'static,
     ) -> Result<(), SemanticScreenshotNativeFailure> {
-        super::semantic_screenshot::capture_viewport(
-            &self.view,
-            request,
-            admitted_at,
+        let Some(semantic) = self.semantic().cloned() else {
+            return Err(SemanticScreenshotNativeFailure::NotReady);
+        };
+        let native = self.view.webview();
+        let capture_cancelled = cancelled.clone();
+        let public = request.requires_public_page();
+        crate::platform::semantic_pixel_privacy::guarded_model_capture(
+            public,
+            Rc::new(move |completion| {
+                if public {
+                    semantic.dispatch_public_privacy(completion)
+                } else {
+                    semantic.dispatch_privacy(completion)
+                }
+            }),
+            move |completion| {
+                super::semantic_screenshot::capture_viewport(
+                    &native,
+                    request,
+                    admitted_at,
+                    capture_cancelled,
+                    completion,
+                    callback_panicked,
+                )
+            },
             cancelled,
             completion,
-            callback_panicked,
-        )
+        );
+        Ok(())
     }
 
     pub(crate) fn dispatch_semantic_action(
@@ -408,6 +615,8 @@ const fn map_semantic_runtime_failure(
 pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, Invariant, Panic> {
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
+    redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    credential_denied: Option<Rc<dyn Fn()>>,
     navigation: Navigation,
     location: Location,
     renderer_lost: RendererLost,
@@ -428,12 +637,28 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         Self {
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic: None,
+            redirect: None,
+            credential_denied: None,
             navigation,
             location,
             renderer_lost,
             invariant,
             panic,
         }
+    }
+    /// Removal-only native signal, bound to this exact owned view cohort.
+    pub(crate) fn with_credential_denied(mut self, callback: impl Fn() + 'static) -> Self {
+        self.credential_denied = Some(Rc::new(callback));
+        self
+    }
+    /// Ends a public document whose first load the Work gate refused as a
+    /// redirect. Without it, that refusal is an invariant failure.
+    pub(crate) fn with_redirect(
+        mut self,
+        redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
+    ) -> Self {
+        self.redirect = Some(Rc::new(redirect));
+        self
     }
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     pub(crate) fn with_failure_diagnostic(
@@ -523,6 +748,8 @@ where
     let AgentOwnedViewCallbacks {
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         failure_diagnostic,
+        redirect: on_redirect,
+        credential_denied: on_credential_denied,
         navigation: on_navigation,
         location: on_location,
         renderer_lost: on_renderer_lost,
@@ -546,9 +773,30 @@ where
     let navigation_invariant_failure = invariant_failure_callback.clone();
     let renderer_invariant_failure = invariant_failure_callback.clone();
     let on_callback_panic = Rc::new(on_callback_panic);
+    let redirect_invariant_failure = invariant_failure_callback.clone();
+    let redirect_callback_panicked = on_callback_panic.clone();
+    // A refused redirect ends the document like any refused load, but its
+    // owner reads it as a redirect, never as a broken invariant.
+    let on_redirect: Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)> = match on_redirect {
+        Some(redirect) => Rc::new(move |destination| {
+            invoke_owned_unit_callback(
+                &|| redirect(destination.clone()),
+                redirect_callback_panicked.as_ref(),
+            );
+        }),
+        None => Rc::new(move |_| {
+            invoke_owned_unit_callback(
+                redirect_invariant_failure.as_ref(),
+                redirect_callback_panicked.as_ref(),
+            )
+        }),
+    };
+    let policy_redirect = on_redirect.clone();
+    let event_redirect = on_redirect;
     let navigation_callback_panicked = on_callback_panic.clone();
     let location_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
+    let credential_callback_panicked = on_callback_panic.clone();
     let configuration = new_owned_agent_configuration(profile, storage_class, ephemeral_store)?;
     let semantic = AgentSemanticRuntimeRegistration::install(
         &configuration,
@@ -557,6 +805,7 @@ where
     )
     .map_err(|_| AgentOwnedViewConstructionError::ExtensionIsolation)?;
     let navigation_semantic = semantic.controller().clone();
+    let redirect_semantic = semantic.controller().clone();
     let human_semantic_prepare = semantic.human_navigation_preparer();
     let follow_semantic_prepare = semantic.follow_navigation_preparer();
     let renderer_semantic = semantic.controller().clone();
@@ -580,9 +829,15 @@ where
         .with_fullscreen_enabled(false)
         .with_picture_in_picture_enabled(false)
         .with_general_autofill_enabled(false)
+        .with_credential_challenge_denied_handler(move || {
+            if let Some(notify) = on_credential_denied.as_ref() {
+                invoke_owned_unit_callback(notify.as_ref(), credential_callback_panicked.as_ref());
+            }
+        })
         .with_apple_navigation_action_handler(move |target, action| {
             let prepare_human = work_policy.as_ref().is_some_and(|gate| {
                 gate.human_load_preparation_needed(action.target_is_main_frame)
+                    && !gate.human_fragment_move(&target)
             });
             let allowed = work_policy.as_ref().map_or_else(
                 || navigation_policy.allows(&target),
@@ -593,6 +848,14 @@ where
             let allowed = allowed
                 && (!work_policy.as_ref().is_some_and(|gate| gate.take_hand_on())
                     || follow_semantic_prepare());
+            if let Some(destination) = work_policy
+                .as_ref()
+                .filter(|_| !allowed)
+                .and_then(|gate| gate.take_redirect_report())
+            {
+                redirect_semantic.cancel();
+                policy_redirect(destination);
+            }
             #[cfg(feature = "agentic-browser-qa")]
             if action.target_is_main_frame != Some(false) {
                 super::agentic_liveness_probe::trace(format_args!(
@@ -620,6 +883,10 @@ where
                     action.target_is_main_frame
                 ));
             }
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            if let Some(gate) = &work_policy {
+                gate.record_form_probe_navigation(action, allowed);
+            }
             allowed
         })
         .with_navigation_event_handler(move |event| {
@@ -633,7 +900,16 @@ where
             if let Some(gate) = &work_events {
                 match gate.observe(event) {
                     Ok((committed, notify)) => {
-                        if gate.failed() {
+                        if let Some(destination) = gate.redirected() {
+                            event_redirect(destination);
+                            navigation_semantic.cancel();
+                        } else if gate.owned_refusal() {
+                            invoke_owned_unit_callback(
+                                navigation_event_location_callback.as_ref(),
+                                location_callback_panicked.as_ref(),
+                            );
+                            navigation_semantic.cancel();
+                        } else if gate.failed() {
                             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
                             if let Some(report) = &navigation_diagnostic {
                                 report(crate::WorkResourceFailureCause::NavigationEventRefused);
@@ -862,9 +1138,13 @@ pub(crate) fn attest_owned_agent_view(
         (actual_store, persistent, identifier)
     };
     let storage_valid = match storage_class {
-        ContextProfileStorageClass::Durable => {
-            ephemeral_store.is_none() && persistent && identifier == Some(profile.bytes())
-        }
+        ContextProfileStorageClass::Durable => match ephemeral_store {
+            None => persistent && identifier == Some(profile.bytes()),
+            Some(expected) => {
+                work_store_matches(profile, &actual_store)
+                    && Retained::as_ptr(&actual_store) == Retained::as_ptr(expected)
+            }
+        },
         ContextProfileStorageClass::Ephemeral => {
             let Some(expected) = ephemeral_store else {
                 return Err(AgentOwnedViewConstructionError::Storage);

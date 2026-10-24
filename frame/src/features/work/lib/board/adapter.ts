@@ -82,7 +82,15 @@ export function boardOf(input: BoardInput): Board {
         ? (view.content.cells[index] ?? []).flatMap((cell) => cell.evidence)
         : [];
     });
-    const image = input.pictures?.get(element.id);
+    const image = subject.record_media
+      ? {
+          profile: subject.record_media.profile,
+          digest: subject.record_media.digest,
+          record: subject.record_media,
+        }
+      : subject.media_attempted
+        ? undefined
+        : input.pictures?.get(element.id);
     entities.push(
       entityOf(key, subject, subjectFacts(execution, subject), {
         element: element.id,

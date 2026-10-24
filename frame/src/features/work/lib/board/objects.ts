@@ -1,3 +1,4 @@
+import { pictureUrl, recordMediaUrl } from "$domain/resources";
 import type { WorkArtifactV1, WorkExecutionFact } from "$shared/ipc/bindings";
 import type { CellView, DocumentNodeView, EvidenceReference } from "$shared/ui/data/Artifact";
 import { styleSpec, type ChartSpec } from "$shared/ui/data/Chart";
@@ -7,12 +8,14 @@ import { artifactView } from "../project-work";
 import { plain } from "./text";
 import { siteKey, siteName } from "../run/site";
 import { leadRun } from "../agent-steps";
+import { pickCandidates } from "../link-media";
 import type {
   Block,
   Board,
   Emphasis,
   Entity,
   EntityFacet,
+  ListView,
   ObjectView,
   PickView,
   PicksView,
@@ -51,6 +54,7 @@ const NEW_KINDS = new Set([
   "draft",
   "media",
   "project",
+  "subject",
 ]);
 /** Whether an artifact is one of the lead's objects rather than a legacy result. */
 export const leadObject = (artifact: WorkArtifactV1) => NEW_KINDS.has(artifact.data.kind);
@@ -180,7 +184,7 @@ export function pickName(
 }
 
 function pickOf(entity: Entity, context: string): PickView {
-  const src = entity.image ? mediaUrl(entity.image.profile, entity.image.digest) : null;
+  const src = entity.image ? pictureUrl(entity.image) : null;
   const labelled = entity.facts.filter((fact) => fact.label.trim());
   const said = entity.facts.find((fact) => !fact.label.trim());
   const logo = hostOf(entity.homepage);
@@ -259,7 +263,7 @@ function legacyView(block: Block, board: Board): ObjectView | null {
     case "comparison": {
       const content = block.content;
       if (content.kind === "matrix")
-        return {
+        return filledSheet({
           ...base,
           kind: "sheet",
           columns: [
@@ -291,8 +295,8 @@ function legacyView(block: Block, board: Board): ObjectView | null {
               ...(logo ? { entity: { logo } } : {}),
             };
           }),
-        } satisfies SheetView;
-      return {
+        });
+      return filledSheet({
         ...base,
         kind: "sheet",
         columns: [
@@ -302,10 +306,10 @@ function legacyView(block: Block, board: Board): ObjectView | null {
         rows: content.alternatives.map((alternative) => ({
           cells: [alternative.name, ...alternative.values],
         })),
-      } satisfies SheetView;
+      });
     }
     case "table":
-      return {
+      return filledSheet({
         ...base,
         kind: "sheet",
         columns: block.columns.map((column) => ({
@@ -313,7 +317,7 @@ function legacyView(block: Block, board: Board): ObjectView | null {
           kind: COLUMN_KIND[column.type] ?? "text",
         })),
         rows: block.rows.map((cells) => ({ cells: [...cells] })),
-      };
+      });
     case "chart":
       return {
         ...base,
@@ -477,15 +481,47 @@ function namedPictures(
   };
   for (const artifact of execution.artifacts) {
     const data = artifact.data;
-    if (data.kind === "comparison_matrix")
-      for (const subject of data.subjects) add(subject.name, subject.image_candidates);
-    else if (data.kind === "picks")
-      for (const item of data.items) add(item.name, item.image_candidates);
+    if (data.kind === "comparison_matrix") {
+      for (const subject of data.subjects)
+        if (!subject.media_attempted) add(subject.name, subject.image_candidates);
+    } else if (data.kind === "picks") {
+      for (const item of data.items)
+        if (!item.media_attempted) add(item.name, item.image_candidates);
+    }
   }
   return named;
 }
 
 const IMAGE = /\.(png|jpe?g|webp|gif|avif)(\?|$)|image|photo|picture/iu;
+
+const blank = (cell: string | undefined) => !cell?.trim() || /^[-–—]$/u.test(cell.trim());
+
+/**
+ * A table the agent made keeps only the columns some row fills. With one
+ * column left it is no table: its rows read as a list under its title.
+ */
+export function filledSheet(sheet: SheetView): SheetView | ListView {
+  const kept = sheet.columns.flatMap((_, index) =>
+    sheet.rows.some((row) => !blank(row.cells[index])) ? [index] : [],
+  );
+  if (!kept.length || kept.length === sheet.columns.length) return sheet;
+  if (kept.length === 1) {
+    const { columns: _columns, rows, note: _note, ...base } = sheet;
+    return {
+      ...base,
+      kind: "list",
+      style: "reading",
+      items: rows.flatMap((row) =>
+        blank(row.cells[kept[0]!]) ? [] : [{ title: row.cells[kept[0]!]!.trim() }],
+      ),
+    };
+  }
+  return {
+    ...sheet,
+    columns: kept.map((index) => sheet.columns[index]!),
+    rows: sheet.rows.map((row) => ({ ...row, cells: kept.map((index) => row.cells[index] ?? "") })),
+  };
+}
 
 /**
  * A table of things the run pictured is shown as their cards, each with its
@@ -497,7 +533,13 @@ function pictured(
   data: Extract<WorkArtifactV1["data"], { kind: "sheet" }>,
   named: ReadonlyMap<string, Picture>,
 ): PicksView | null {
-  if (!named.size || data.rows.length < 2 || data.rows.length > 8) return null;
+  if (
+    !named.size ||
+    data.rows.some((row) => row.entity?.media_attempted || row.entity?.record_media) ||
+    data.rows.length < 2 ||
+    data.rows.length > 8
+  )
+    return null;
   const name = data.columns.findIndex((column) => column.kind === "text");
   if (name < 0) return null;
   const pictures = data.rows.map((row) => named.get(nameKey(row.cells[name] ?? "")));
@@ -565,11 +607,11 @@ function pictured(
 
 function leadView(
   id: string,
-  artifact: WorkArtifactV1,
-  execution: WorkExecutionFact,
+  artifact: Pick<WorkArtifactV1, "title" | "data"> & Partial<WorkArtifactV1>,
+  execution: WorkExecutionFact | null,
   fetched: ReadonlyMap<string, Picture> = new Map(),
 ): ObjectView | null {
-  const evidence = artifactView(artifact, execution).evidence;
+  const evidence = execution ? artifactView(artifact as WorkArtifactV1, execution).evidence : [];
   const sources: Record<string, EvidenceReference> = Object.fromEntries(
     evidence.map((reference) => [reference.key, reference]),
   );
@@ -604,14 +646,27 @@ function leadView(
           const amount = numberOf(item.price?.amount);
           const rating = numberOf(item.rating?.value);
           // The first candidate the canvas admitted is the item's own picture; its logo else.
-          const admitted = (item.image_candidates ?? [])
+          const admitted = pickCandidates(item)
             .map((candidate) => fetched.get(pictureKey(candidate)))
             .find((picture) => !!picture);
-          const src = admitted ? mediaUrl(admitted.profile, admitted.digest) : null;
+          const src = item.record_media
+            ? recordMediaUrl(item.record_media)
+            : admitted
+              ? pictureUrl(admitted)
+              : null;
           return {
             name: item.name,
             ...(item.subtitle ? { subtitle: item.subtitle } : {}),
-            ...(src ? { picture: { src } } : {}),
+            ...(src
+              ? {
+                  picture: {
+                    src,
+                    ...(item.record_media
+                      ? { width: item.record_media.width, height: item.record_media.height }
+                      : {}),
+                  },
+                }
+              : {}),
             ...(item.logo_host ? { logo: item.logo_host } : {}),
             ...(item.url ? { url: item.url } : {}),
             ...(item.price
@@ -662,15 +717,17 @@ function leadView(
         ...base,
         kind: "plan",
         checkable: !!data.checkable,
+        ...(data.calendar ? { calendar: true } : {}),
         ...(data.total ? { total: { label: data.total.label, value: data.total.value } } : {}),
         steps: data.steps.map((step) => ({
           ...(step.when ? { when: step.when } : {}),
+          ...(step.date ? { date: step.date } : {}),
           title: step.title,
           ...(step.detail ? { detail: step.detail } : {}),
           kind: step.kind,
           ...(step.cost ? { cost: step.cost } : {}),
           ...(step.place ? { place: step.place } : {}),
-          ...pickLink(step.pick, execution),
+          ...(execution ? pickLink(step.pick, execution) : {}),
         })),
       };
     case "list":
@@ -683,6 +740,7 @@ function leadView(
           ...(item.detail ? { detail: item.detail } : {}),
           ...(item.due ? { due: item.due } : {}),
           ...(item.priority ? { priority: item.priority } : {}),
+          ...(item.done ? { done: true } : {}),
           ...(item.from
             ? {
                 from: Object.fromEntries(
@@ -694,26 +752,37 @@ function leadView(
             : {}),
         })),
       };
-    case "sheet":
-      return (
-        pictured(base, data, namedPictures(execution, fetched)) ?? {
-          ...base,
-          kind: "sheet",
-          columns: data.columns.map((column) => ({
-            label: column.label,
-            kind: column.kind,
-            ...(column.unit ? { unit: column.unit } : {}),
-            ...(column.currency ? { currency: column.currency } : {}),
-            ...(column.best ? { best: column.best } : {}),
-          })),
-          rows: data.rows.map((row) => ({
+    case "sheet": {
+      const shown = pictured(base, data, execution ? namedPictures(execution, fetched) : new Map());
+      if (shown) return shown;
+      const sheet: SheetView = {
+        ...base,
+        kind: "sheet",
+        columns: data.columns.map((column) => ({
+          label: column.label,
+          kind: column.kind,
+          ...(column.unit ? { unit: column.unit } : {}),
+          ...(column.currency ? { currency: column.currency } : {}),
+          ...(column.best ? { best: column.best } : {}),
+        })),
+        rows: data.rows.map((row) => {
+          const media = row.entity?.record_media;
+          const src = media ? recordMediaUrl(media) : null;
+          const entity = {
+            ...(row.entity?.logo_host ? { logo: row.entity.logo_host } : {}),
+            ...(src && media ? { picture: { src, width: media.width, height: media.height } } : {}),
+          };
+          return {
             cells: row.cells,
-            ...(row.entity?.logo_host ? { entity: { logo: row.entity.logo_host } } : {}),
+            ...(Object.keys(entity).length ? { entity } : {}),
             ...cited(row.source),
-          })),
-          ...(data.note ? { note: data.note } : {}),
-        }
-      );
+          };
+        }),
+        ...(data.note ? { note: data.note } : {}),
+      };
+      // The person's own table keeps the columns they have yet to fill.
+      return execution ? filledSheet(sheet) : sheet;
+    }
     case "plot": {
       const spec: ChartSpec = {
         ...styleSpec(data.style),
@@ -808,6 +877,20 @@ function leadView(
             }
           : {}),
       };
+    case "subject":
+      return {
+        ...base,
+        kind: "subject",
+        noun: data.noun,
+        ...(data.reference ? { reference: data.reference } : {}),
+        heading: data.title,
+        ...(data.state ? { status: { label: data.state.label, tone: data.state.tone } } : {}),
+        people: (data.people ?? []).map((person) => ({ role: person.label, name: person.value })),
+        facts: (data.facts ?? []).map((fact) => ({ label: fact.label, value: fact.value })),
+        labels: data.labels ?? [],
+        ...(data.summary ? { summary: data.summary } : {}),
+        url: data.url,
+      };
     default:
       return null;
   }
@@ -872,6 +955,15 @@ const HERO = new Set(["diagram", "picks", "sheet", "plan", "project"]);
  * A run's objects: the reply that heads its result, then everything else it
  * made, legacy blocks turned into the objects they are now.
  */
+/** The person's own object, drawn by the renderer the agent's objects use; it cites nothing. */
+export function ownedView(
+  id: string,
+  title: string,
+  data: WorkArtifactV1["data"],
+): ObjectView | null {
+  return leadView(id, { title, data }, null);
+}
+
 export function runObjects(input: ObjectsInput): { reply?: RunObject; objects: RunObject[] } {
   const objects: RunObject[] = [];
   let reply: RunObject | undefined;

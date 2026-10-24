@@ -533,6 +533,12 @@ impl Items {
         }
     }
 
+    pub fn set_last_active(&mut self, id: ItemId, at_ms: u64) {
+        if let Some(tab) = self.tab_mut(id) {
+            tab.last_active_ms = Some(at_ms);
+        }
+    }
+
     /// Roll back the optimistic `view` bit when the native engine cannot
     /// create a controller. The next explicit navigation/activation can then
     /// retry instead of leaving an unrecoverable blank tab.
@@ -547,10 +553,17 @@ impl Items {
         }
     }
 
-    pub fn set_title(&mut self, id: ItemId, title: String) {
-        if let Some(tab) = self.tab_mut(id) {
-            tab.title = sanitize_page_title(&title);
+    /// Whether the tab's title changed.
+    pub fn set_title(&mut self, id: ItemId, title: String) -> bool {
+        let Some(tab) = self.tab_mut(id) else {
+            return false;
+        };
+        let title = sanitize_page_title(&title);
+        if tab.title == title {
+            return false;
         }
+        tab.title = title;
+        true
     }
 
     pub fn set_loading(&mut self, id: ItemId, loading: bool) {
@@ -728,6 +741,7 @@ mod tests {
                 id,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             }));
         }
 

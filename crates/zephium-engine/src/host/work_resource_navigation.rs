@@ -14,12 +14,23 @@ pub(super) struct WorkNavigation {
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
     stage: WorkNavigationStage,
+    /// The site-session document this load departs from, until a failed
+    /// load has gone back to it once.
+    departure: Option<zephium_agentic::ContextNavigationTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkNavigationStage {
     Parking,
     Navigating,
+}
+/// The closed name of where a navigation ran out of time, for the page
+/// task's failure line.
+fn navigation_timeout_stage(stage: WorkNavigationStage) -> &'static str {
+    match stage {
+        WorkNavigationStage::Parking => "navigation_dispatch",
+        WorkNavigationStage::Navigating => "navigation_load",
+    }
 }
 impl WorkNavigation {
     pub(super) fn refuse(mut self, failure: ContextPortFailure) {
@@ -32,7 +43,9 @@ pub(super) struct WorkHistoryBack {
     task: WorkHistoryBackTask,
     timer: Option<crate::platform::imp::ContentPolicyTimeout>,
     deadline: Instant,
-    ticket: crate::platform::imp::AgentHistoryBackTicket,
+    /// None: the page's history no longer joins the ledger (it pushed its
+    /// own entries), so Back loads the predecessor's address afresh.
+    ticket: Option<crate::platform::imp::AgentHistoryBackTicket>,
     stage: WorkNavigationStage,
 }
 impl WorkHistoryBack {
@@ -209,6 +222,7 @@ impl WorkNativeResource {
             self.record_successor_navigation_failure(
                 crate::WorkSuccessorNavigationFailure::HostDeadlineExpired,
             );
+            crate::agent_context_port::note_action_timeout_stage(navigation_timeout_stage(stage));
             Some(Err(ContextPortFailure::TimedOut))
         } else if let Some(now) = work_browser_monotonic_now() {
             if now >= lease.deadline() {
@@ -216,6 +230,9 @@ impl WorkNativeResource {
                 self.record_successor_navigation_failure(
                     crate::WorkSuccessorNavigationFailure::LeaseDeadlineExpired,
                 );
+                crate::agent_context_port::note_action_timeout_stage(navigation_timeout_stage(
+                    stage,
+                ));
                 Some(Err(ContextPortFailure::TimedOut))
             } else if !(match stage {
                 WorkNavigationStage::Parking => self
@@ -308,6 +325,9 @@ impl WorkNativeResource {
             Some(Err(ContextPortFailure::TimedOut))
         };
         if let Some(outcome) = outcome {
+            if outcome.is_err() && self.return_to_departure(erased) {
+                return;
+            }
             if outcome.is_err() {
                 self.guard.fail();
                 if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
@@ -341,6 +361,78 @@ impl WorkNativeResource {
             }
         }
     }
+    /// A site-session load that failed after it was sent leaves its page
+    /// wherever it stopped. The page it departed from is loaded again, once,
+    /// under the same operation, so the run carries on from where it was
+    /// and the model hears the address did not open.
+    fn return_to_departure(&mut self, erased: bool) -> bool {
+        let Some((lease, source, operation)) = self
+            .navigation
+            .as_ref()
+            .filter(|pending| {
+                pending.stage == WorkNavigationStage::Navigating && pending.departure.is_some()
+            })
+            .and_then(|pending| pending.task.request())
+            .map(|request| {
+                (
+                    request.lease().clone(),
+                    request.source(),
+                    request.navigation().operation(),
+                )
+            })
+        else {
+            return false;
+        };
+        let Some(departure) = self
+            .navigation
+            .as_mut()
+            .and_then(|pending| pending.departure.take())
+        else {
+            return false;
+        };
+        let Some(now) = work_browser_monotonic_now() else {
+            return false;
+        };
+        if erased
+            || !self.guard.is_healthy()
+            || now >= lease.deadline()
+            || !self
+                .guard
+                .navigation_dispatch_current(&lease, operation, now)
+        {
+            return false;
+        }
+        let dispatched = self.view.as_mut().is_some_and(|view| {
+            view.prepare_semantic_document_load().is_ok()
+                && view.work_navigation().is_some_and(|gate| {
+                    gate.arm_departure(source, operation, departure.clone())
+                        .is_ok()
+                })
+                && view.view().load_url(departure.as_url().as_str()).is_ok()
+        });
+        if !dispatched {
+            return false;
+        }
+        let duration = NAVIGATION_BUDGET.min(Duration::from_millis(
+            lease.deadline().millis().saturating_sub(now.millis()),
+        ));
+        let timeout_guard = self.guard.clone();
+        let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
+            let rejected = timeout_guard.clone();
+            if !crate::host::try_with_agent_context_terminal(move |host| {
+                host.timeout_work_navigation(&timeout_guard, operation)
+            }) {
+                rejected.fail();
+            }
+        });
+        let Some(navigation) = self.navigation.as_mut() else {
+            return false;
+        };
+        navigation.deadline = Instant::now() + duration;
+        navigation.timer = timer;
+        true
+    }
+
     pub(super) fn progress_history_back(&mut self, erased: bool) {
         let Some(pending) = self.history_back.as_ref() else {
             return;
@@ -400,6 +492,25 @@ impl WorkNativeResource {
                 .as_ref()
                 .and_then(|view| view.work_navigation())
                 .cloned();
+            let Some(ticket) = ticket else {
+                #[cfg(target_os = "macos")]
+                let dispatched = self.view.as_mut().is_some_and(|view| {
+                    view.prepare_semantic_document_load().is_ok()
+                        && gate.as_ref().is_some_and(|gate| {
+                            gate.arm_history_reload(source, operation, expected.clone())
+                                .is_ok()
+                        })
+                        && view.view().load_url(expected.as_url().as_str()).is_ok()
+                });
+                #[cfg(not(target_os = "macos"))]
+                let dispatched = false;
+                if !dispatched {
+                    self.finish_history_back(Err(ContextPortFailure::NativeRefused));
+                } else if let Some(pending) = self.history_back.as_mut() {
+                    pending.stage = WorkNavigationStage::Navigating;
+                }
+                return;
+            };
             let dispatched = self.view.as_mut().is_some_and(|view| {
                 view.reactivate_history_destination(ticket)
                     .is_ok_and(|target| target == expected)
@@ -465,6 +576,7 @@ impl WorkNativeResource {
                 self.guard.fail();
                 return;
             };
+            let reload = pending.ticket.is_none();
             if self
                 .view
                 .as_ref()
@@ -472,11 +584,13 @@ impl WorkNativeResource {
                 .is_none_or(|gate| gate.failed())
             {
                 Some(Err(ContextPortFailure::NativeRefused))
-            } else if !self
-                .view
-                .as_ref()
-                .is_some_and(|view| view.semantic_runtime_ready_for_history())
-            {
+            } else if !self.view.as_ref().is_some_and(|view| {
+                if reload {
+                    view.semantic_pending_for_audit() == Some(false)
+                } else {
+                    view.semantic_runtime_ready_for_history()
+                }
+            }) {
                 return;
             } else {
                 let terminal = self
@@ -492,7 +606,14 @@ impl WorkNativeResource {
                     .as_ref()
                     .and_then(|pending| pending.task.request())
                     .map(|request| request.target().clone());
-                if actual != operation || outcome.as_ref().ok() != expected.as_ref() {
+                // A site page Back reached may already have routed itself
+                // within its document; it is still the page Back loaded.
+                let arrived = expected.filter(|expected| {
+                    outcome.as_ref().is_ok_and(|target| {
+                        target == expected || zephium_agentic::same_work_site(expected, target)
+                    })
+                });
+                if actual != operation || arrived.is_none() {
                     Some(Err(ContextPortFailure::NativeRefused))
                 } else {
                     let current = self
@@ -505,15 +626,21 @@ impl WorkNativeResource {
                         .and_then(|view| view.work_navigation())
                         .is_some_and(|gate| gate.ready(current.as_deref()));
                     let ticket = self.history_back.as_ref().map(|pending| pending.ticket);
-                    let settled = match ticket {
-                        Some(ticket) if ready => self
+                    let settled = match (ticket, arrived.clone()) {
+                        (Some(Some(ticket)), _) if ready => self
                             .view
                             .as_mut()
                             .is_some_and(|view| view.settle_history_back(ticket).is_ok()),
+                        #[cfg(target_os = "macos")]
+                        (Some(None), Some(target)) if ready => {
+                            self.view.as_mut().is_some_and(|view| {
+                                view.enroll_current_work_history_get(target).is_ok()
+                            })
+                        }
                         _ => false,
                     };
-                    if settled {
-                        Some(outcome)
+                    if let (true, Some(arrived)) = (settled, arrived) {
+                        Some(Ok(arrived))
                     } else {
                         Some(Err(ContextPortFailure::NativeRefused))
                     }
@@ -521,21 +648,32 @@ impl WorkNativeResource {
             }
         };
         if let Some(outcome) = outcome {
-            if outcome.is_err() {
-                self.guard.fail();
-                if let Some(ticket) = self.history_back.as_ref().map(|pending| pending.ticket) {
-                    if let Some(view) = self.view.as_mut() {
-                        let _ = view.refuse_history_back(ticket);
-                    }
-                }
-                if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
-                    gate.refuse();
+            self.finish_history_back(outcome);
+        }
+    }
+
+    fn finish_history_back(
+        &mut self,
+        outcome: Result<zephium_agentic::ContextNavigationTarget, ContextPortFailure>,
+    ) {
+        if outcome.is_err() {
+            self.guard.fail();
+            if let Some(ticket) = self
+                .history_back
+                .as_ref()
+                .and_then(|pending| pending.ticket)
+            {
+                if let Some(view) = self.view.as_mut() {
+                    let _ = view.refuse_history_back(ticket);
                 }
             }
-            if let Some(mut pending) = self.history_back.take() {
-                pending.timer = None;
-                pending.task.complete(outcome);
+            if let Some(gate) = self.view.as_ref().and_then(|view| view.work_navigation()) {
+                gate.refuse();
             }
+        }
+        if let Some(mut pending) = self.history_back.take() {
+            pending.timer = None;
+            pending.task.complete(outcome);
         }
     }
 }
@@ -548,6 +686,8 @@ impl EngineHost {
         };
         let lease = request.lease().clone();
         let operation = request.operation();
+        #[cfg(target_os = "macos")]
+        let expected = request.target().clone();
         let Some(resource) = self
             .work_resources
             .get_mut(&guard.resource().identity().context())
@@ -584,9 +724,22 @@ impl EngineHost {
             task.complete(Err(ContextPortFailure::Stale));
             return;
         };
-        let Ok(ticket) = view.prepare_history_back() else {
-            task.complete(Err(ContextPortFailure::NativeRefused));
-            return;
+        let ticket = match view.prepare_history_back() {
+            // The ledger's predecessor is not the one the run recorded (a
+            // navigation that landed back on its own page): load that one.
+            #[cfg(target_os = "macos")]
+            Ok(ticket) if view.history_destination(ticket) != Some(&expected) => {
+                let _ = view.refuse_history_back(ticket);
+                None
+            }
+            Ok(ticket) => Some(ticket),
+            #[cfg(target_os = "macos")]
+            Err(()) => None,
+            #[cfg(not(target_os = "macos"))]
+            Err(()) => {
+                task.complete(Err(ContextPortFailure::NativeRefused));
+                return;
+            }
         };
         let timeout_guard = guard.clone();
         let timer = crate::platform::imp::schedule_content_policy_timeout(duration, move || {
@@ -695,11 +848,17 @@ impl EngineHost {
                 rejected.fail();
             }
         });
+        let departure = resource
+            .view
+            .as_ref()
+            .and_then(|view| view.work_navigation())
+            .and_then(|gate| gate.departure());
         resource.navigation = Some(WorkNavigation {
             task,
             timer,
             deadline,
             stage: WorkNavigationStage::Parking,
+            departure,
         });
         let mut dispatched = true;
         if resource
@@ -737,6 +896,21 @@ impl EngineHost {
                     dispatched = false;
                 }
                 Some(_) => {}
+            }
+        }
+        // A document a hand-on load put in place (a saved consent, a bot
+        // check that reloaded its page) was never enrolled by a navigation.
+        #[cfg(target_os = "macos")]
+        if dispatched {
+            let settled = resource
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .and_then(|gate| gate.settled_target());
+            if let (Some(view), Some(target)) = (resource.view.as_mut(), settled) {
+                if view.enroll_handed_on_document(target).is_err() {
+                    dispatched = false;
+                }
             }
         }
         if dispatched {

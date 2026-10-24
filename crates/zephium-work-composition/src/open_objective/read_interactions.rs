@@ -15,7 +15,7 @@ enum Interaction {
 
 /// Dismiss names in preference order: refusing optional cookies first, then
 /// acknowledging. Matched as whole words, English and Polish.
-const CONSENT_REFUSE: [&str; 14] = [
+const CONSENT_REFUSE: [&str; 16] = [
     "reject",
     "reject all",
     "decline",
@@ -30,6 +30,8 @@ const CONSENT_REFUSE: [&str; 14] = [
     "odrzuć",
     "odrzuć wszystkie",
     "tylko niezbędne",
+    "nie zgadzam się",
+    "nie akceptuję",
 ];
 const CONSENT_ACKNOWLEDGE: [&str; 12] = [
     "accept",
@@ -350,6 +352,14 @@ fn consequential(text: &str) -> bool {
 }
 
 impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
+    fn prefers_direct_extraction(&self) -> bool {
+        true
+    }
+
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        super::site_work::reading_wall(observation)
+    }
+
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,
@@ -536,6 +546,10 @@ impl AgentWorkLocalActionPolicy for ReadingInteractionPolicy {
 pub(super) struct SessionReadingPolicy;
 
 impl AgentWorkLocalActionPolicy for SessionReadingPolicy {
+    fn human_wall(&self, observation: &SemanticObservation) -> Option<AgentBrowserHumanReason> {
+        super::site_work::reading_wall(observation)
+    }
+
     fn decision_action_recipe(
         &self,
         operation: &DecisionOperation,

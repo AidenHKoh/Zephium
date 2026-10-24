@@ -191,7 +191,6 @@ test("seven subjects with picture candidates all end up with a picture", async (
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),

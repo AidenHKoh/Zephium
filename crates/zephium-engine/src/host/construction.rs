@@ -669,6 +669,16 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let navigation_site_scope = site_scope.clone();
         let navigation = NavigationEpochTracker::new();
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        let page_reader: super::page_reader::ReaderSlot = Rc::default();
+        #[cfg(all(
+            feature = "agentic-browser",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        let load_reader = Rc::downgrade(&page_reader);
         #[cfg(target_os = "macos")]
         super::webext::bind_auth_cleanup_fence(
             partition.profile(),
@@ -707,14 +717,32 @@ impl EngineHost {
         // request the person answers in chrome. One per second per view, so
         // a page cannot flood it.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let page_asked = Rc::new(std::cell::RefCell::new(
+            std::collections::HashSet::<String>::new(),
+        ));
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let app_link = {
             let permit = event_permit.clone();
             let sink = self.sink.clone();
             let item = id.clone();
             let last = Cell::new(None::<std::time::Instant>);
-            Rc::new(move |target: &str| -> bool {
-                if zephium_core::navigation::external_app_link(target).is_none() {
+            let page_asked = page_asked.clone();
+            Rc::new(move |target: &str, user_gesture: bool| -> bool {
+                use zephium_core::navigation::{app_link_outcome, AppLinkOutcome};
+                let Some(link) = zephium_core::navigation::external_app_link(target) else {
                     return false;
+                };
+                // A page acting alone is heard once per kind of link until
+                // the person follows one themselves; checked before the app
+                // lookup so a looping script costs nothing.
+                if user_gesture {
+                    page_asked.borrow_mut().clear();
+                } else if !page_asked.borrow_mut().insert(link.scheme().to_owned()) {
+                    return true;
+                }
+                let app = crate::platform::imp::external_app_name(target);
+                if app_link_outcome(app.is_some(), user_gesture) == AppLinkOutcome::Silent {
+                    return true;
                 }
                 let now = std::time::Instant::now();
                 if last
@@ -727,7 +755,8 @@ impl EngineHost {
                         EngineEvent::ExternalAppRequested {
                             id: item.get(),
                             url: target.to_owned(),
-                            app: crate::platform::imp::external_app_name(target),
+                            app,
+                            user_gesture,
                         },
                     );
                 }
@@ -1042,7 +1071,7 @@ impl EngineHost {
                 // shared one-per-second limit keeps that to one request.
                 #[cfg(target_os = "windows")]
                 if !admitted {
-                    navigation_app_link(&target);
+                    navigation_app_link(&target, false);
                 }
                 // WebView2 asks only about top-level loads here; WebKit asks
                 // about frames too, so focus is checked for it below, where
@@ -1111,6 +1140,8 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let replay = replay_safety.clone();
+            #[cfg(feature = "agentic-browser")]
+            let action_reader = Rc::downgrade(&page_reader);
             let auth_tab = id.clone();
             let action_app_link = app_link.clone();
             builder = builder.with_apple_navigation_action_handler(move |target, action| {
@@ -1125,7 +1156,11 @@ impl EngineHost {
                 }
                 let admitted = frame_permit.allows_navigation(&target)
                     && frame_navigation.admits_target(&target);
-                if !admitted && action_app_link(&target) {
+                let gesture = matches!(
+                    action.navigation_type,
+                    wry::AppleNavigationType::LinkActivated
+                );
+                if !admitted && action_app_link(&target, gesture) {
                     return false;
                 }
                 if admitted
@@ -1146,8 +1181,21 @@ impl EngineHost {
                 if admitted && action.target_is_main_frame == Some(true) && focus_shuts(&target) {
                     return false;
                 }
+                #[cfg(feature = "agentic-browser")]
+                if admitted && action.target_is_main_frame == Some(true) {
+                    super::page_reader::back_forward(
+                        &action_reader,
+                        action.navigation_type == wry::AppleNavigationType::BackForward,
+                    );
+                }
                 if admitted {
                     replay.observe(&target, action);
+                    if action.navigation_type == wry::AppleNavigationType::BackForward
+                        && action.target_is_main_frame == Some(true)
+                        && frame_navigation.current_committed().is_some()
+                    {
+                        crate::haptic(crate::Haptic::Level);
+                    }
                 }
                 admitted
             });
@@ -1190,7 +1238,7 @@ impl EngineHost {
             let popup_sink = self.sink.clone();
             let popup_app_link = app_link.clone();
             builder = builder.with_new_window_req_handler(move |url, features| {
-                if features.user_initiated && popup_app_link(&url) {
+                if features.user_initiated && popup_app_link(&url, true) {
                     return wry::NewWindowResponse::Deny;
                 }
                 // Bound script-triggered bursts without delaying ordinary rapid
@@ -1246,8 +1294,12 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         {
             let scope = site_scope.clone();
+            #[cfg(feature = "agentic-browser")]
+            let attempt_reader = Rc::downgrade(&page_reader);
             builder = builder.with_main_frame_navigation_attempt_handler(move |target| {
-                scope.navigating(&target)
+                scope.navigating(&target);
+                #[cfg(feature = "agentic-browser")]
+                super::page_reader::attempt(&attempt_reader, &target);
             });
         }
         for script in wry_document_start_scripts(&scripts) {
@@ -1525,6 +1577,8 @@ impl EngineHost {
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
+                    #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+                    super::page_reader::begin_load(&load_reader);
                     #[cfg(target_os = "macos")]
                     super::page_permissions::queue_navigation_revocation(
                         id,
@@ -1548,6 +1602,15 @@ impl EngineHost {
                     // SourceChanged ordering, authorizes rendered-content
                     // attribution to the final redirect destination.
                     if load_navigation.is_current(epoch) {
+                        #[cfg(all(
+                            feature = "agentic-browser",
+                            any(target_os = "macos", target_os = "windows")
+                        ))]
+                        super::page_reader::commit(
+                            &load_reader,
+                            epoch.presentation_id().into_raw(),
+                            &event.url,
+                        );
                         queue_navigation_commit(id, &load_permit, &load_navigation, epoch);
                     }
                 }
@@ -1698,6 +1761,23 @@ impl EngineHost {
         if zephium_webext_macos::tracing() {
             unsafe { crate::platform::imp::native_webview(&view).setInspectable(true) };
         }
+        // Private windows never get the Ask panel's reader.
+        #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+        if !matches!(partition, Partition::Ephemeral(_)) {
+            let committed = navigation.clone();
+            let settled = navigation.clone();
+            *page_reader.borrow_mut() = crate::platform::macos::browse_reader::BrowseReader::new(
+                &crate::platform::imp::native_webview(&view),
+                id.clone(),
+                super::page_reader::enabled(),
+                Rc::new(move || {
+                    committed
+                        .current_committed()
+                        .map(|epoch| epoch.presentation_id().into_raw())
+                }),
+                Rc::new(move || settled.current() == settled.current_committed()),
+            );
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             // Capture before every fallible post-build step. In particular,
@@ -1797,8 +1877,8 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         {
             let link = app_link.clone();
-            if let Err(error) = security_policy.route_external_uris(move |uri| {
-                link(uri);
+            if let Err(error) = security_policy.route_external_uris(move |uri, user_gesture| {
+                link(uri, user_gesture);
             }) {
                 eprintln!("security: content WebView2 app-link routing failed: {error}");
                 if report_failure {
@@ -1848,6 +1928,21 @@ impl EngineHost {
             !report_failure && !native_popup,
         )
         .ok();
+        // Private windows never get the Ask panel's reader.
+        #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
+        if !matches!(partition, Partition::Ephemeral(_)) {
+            let committed = navigation.clone();
+            *page_reader.borrow_mut() = crate::platform::windows::browse_reader::BrowseReader::new(
+                wry::WebViewExtWindows::webview(&view),
+                id.clone(),
+                super::page_reader::enabled(),
+                Rc::new(move || {
+                    committed
+                        .current_committed()
+                        .map(|epoch| epoch.presentation_id().into_raw())
+                }),
+            );
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Err(error) = crate::platform::imp::configure(
             &view,
@@ -2109,6 +2204,8 @@ impl EngineHost {
             return None;
         }
         Some(ObservedView {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            automatic_pip_sequence: Rc::new(Cell::new(0)),
             #[cfg(target_os = "macos")]
             _capture_observer: capture_observer,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2160,6 +2257,11 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             find: None,
+            #[cfg(all(
+                feature = "agentic-browser",
+                any(target_os = "macos", target_os = "windows")
+            ))]
+            page_reader,
             view,
             native_resource: None,
         })
@@ -2179,13 +2281,32 @@ pub(super) enum WindowsProfileEnvironmentFailure {
 }
 
 /// A page-inert, counted native owner that bridges environment bootstrap
-/// into real Work controller construction. It never loads a site or survives
-/// the synchronous constructor; failed close retains the exact native debt.
+/// into real Work controller construction. It never loads a site. It ends
+/// with the synchronous constructor unless a Work site page borrows it, while
+/// no tab of the profile is open, as the person's own profile for one bounded
+/// cookie sync; failed close retains the exact native debt.
 #[cfg(target_os = "windows")]
 pub(super) struct WindowsWorkEnvironmentBootstrap {
     view: wry::WebView,
     profile: zephium_core::ids::ProfileId,
     resource: Option<super::resources::NativeResourceLease>,
+}
+#[cfg(all(target_os = "windows", feature = "agentic-browser"))]
+impl WindowsWorkEnvironmentBootstrap {
+    /// The person's own profile cookies, through this controller of that
+    /// profile in the exact expected environment.
+    pub(super) fn profile_cookie_manager(
+        &self,
+        expected_environment: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment,
+    ) -> Result<
+        webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2CookieManager,
+        zephium_agentic::ContextCookieTransferFailure,
+    > {
+        crate::platform::imp::selected_profile_cookie_manager(&self.view, expected_environment)
+    }
+    pub(super) const fn profile(&self) -> zephium_core::ids::ProfileId {
+        self.profile
+    }
 }
 #[cfg(target_os = "windows")]
 impl Drop for WindowsWorkEnvironmentBootstrap {

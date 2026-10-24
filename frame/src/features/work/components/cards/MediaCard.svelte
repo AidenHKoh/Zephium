@@ -1,13 +1,20 @@
 <script lang="ts">
+  import { getContext } from "svelte";
   import { mediaSize, mediaUrl } from "$domain/resources";
   import CardFrame from "./CardFrame.svelte";
+  import { canvasFar } from "../../lib/canvas-context";
   import { File01Icon, Image01Icon, Pdf01Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import * as m from "$shared/i18n/messages";
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const asset = $derived(item.media?.asset);
+  /** The picture box is about 224 wide; seen from far, half that is plenty. */
+  const scale = getContext<{ readonly far: boolean } | undefined>(canvasFar);
+  const width = $derived(scale?.far ? 240 : 480);
   const url = $derived(
-    item.media && asset?.kind === "image" ? mediaUrl(item.media.profile, asset.digest) : null,
+    item.media && asset?.kind === "image"
+      ? mediaUrl(item.media.profile, asset.digest, width)
+      : null,
   );
   let failed = $state(false);
   const icon = $derived(
@@ -25,7 +32,13 @@
 >
   {#if url && !failed}
     <div class="preview">
-      <img src={url} alt={item.title} loading="lazy" onerror={() => (failed = true)} />
+      <img
+        src={url}
+        alt={item.title}
+        loading="lazy"
+        decoding="async"
+        onerror={() => (failed = true)}
+      />
     </div>
   {:else if asset}
     <div class="file">
@@ -56,6 +69,13 @@
     max-block-size: 100%;
     object-fit: contain;
     display: block;
+  }
+
+  /* While the canvas moves (layers.ts), the photo is a layer of its own: the
+     compositor rounds it, instead of every repaint clipping it to the corners. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  :global(.svelte-flow__viewport[data-held]) .preview img {
+    will-change: transform;
   }
 
   .file {

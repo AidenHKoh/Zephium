@@ -36,7 +36,9 @@ mod macos {
             );
     }
 
-    pub fn post(title: &str, body: &str) {
+    /// One identifier per subject, so a newer alert replaces the last
+    /// instead of stacking a column of stale ones.
+    pub fn post(identifier: &str, title: &str, body: &str) {
         if !bundled() {
             return;
         }
@@ -44,10 +46,8 @@ mod macos {
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
-        // One identifier, so a newer phase replaces the last instead of
-        // stacking a column of stale ones.
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-            &NSString::from_str("app.zephium.focus"),
+            &NSString::from_str(identifier),
             &content,
             None,
         );
@@ -58,20 +58,37 @@ mod macos {
 
 /// The session started: the moment to ask for permission to notify.
 pub fn session_started() {
+    ask_to_notify();
+}
+
+/// Asks once for permission to notify, when the first alert is near.
+pub(crate) fn ask_to_notify() {
     #[cfg(target_os = "macos")]
     macos::ask();
 }
 
-/// `alert` is the shell's `focus.alert=` value.
-pub fn phase_ended(app: &tauri::AppHandle, alert: &str) {
+/// Posts a system notification; a later one with the same identifier replaces it.
+pub(crate) fn notify(identifier: &str, title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    macos::post(identifier, title, body);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (identifier, title, body);
+}
+
+/// One of Zephium's windows is in front, so chrome's own notice is enough.
+pub(crate) fn in_front(app: &tauri::AppHandle) -> bool {
     use tauri::Manager;
-    let in_front = [crate::MAIN_LABEL, crate::overlay::PANEL_LABEL]
+    [crate::MAIN_LABEL, crate::overlay::PANEL_LABEL]
         .iter()
         .any(|label| {
             app.get_webview_window(label)
                 .is_some_and(|window| window.is_focused().unwrap_or(false))
-        });
-    if in_front {
+        })
+}
+
+/// `alert` is the shell's `focus.alert=` value.
+pub fn phase_ended(app: &tauri::AppHandle, alert: &str) {
+    if in_front(app) {
         return;
     }
     let (title, body) = match alert {
@@ -86,8 +103,5 @@ pub fn phase_ended(app: &tauri::AppHandle, alert: &str) {
         "focus" => ("Back to focus", "A new round has started."),
         _ => return,
     };
-    #[cfg(target_os = "macos")]
-    macos::post(title, body);
-    #[cfg(not(target_os = "macos"))]
-    let _ = (title, body);
+    notify("app.zephium.focus", title, body);
 }

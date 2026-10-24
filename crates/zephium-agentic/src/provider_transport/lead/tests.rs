@@ -40,6 +40,7 @@ fn sse(events: &[(&str, Value)]) -> String {
 
 pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
     WorkModelRequest {
+        image_fence: ModelImageGate::new(Some(true)).fence(),
         model: WorkModelRef {
             provider: WorkModelProvider::OpenAi,
             wire,
@@ -59,6 +60,7 @@ pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
             name: "web_fetch".into(),
             description: "Read a page.".into(),
             schema: json!({"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}),
+            strict: false,
         }],
         messages: vec![WorkModelMessage::User(vec![
             WorkModelPart::Text("Plan my trip".into()),
@@ -71,6 +73,9 @@ pub(super) fn request(wire: WorkModelWire, model: &str) -> WorkModelRequest {
         reasoning: Some(WorkModelReasoning::Medium),
         native_search: true,
         parallel_tools: true,
+        tool_choice: WorkModelToolChoice::Auto,
+        volatile_tail: 0,
+        cache_key: None,
     }
 }
 
@@ -378,6 +383,7 @@ fn cost_follows_the_catalog_price_and_search_fees() {
         usage: WorkModelUsage {
             input_tokens: 1_000_000,
             cached_input_tokens: 500_000,
+            cache_write_input_tokens: 0,
             output_tokens: 100_000,
             ..Default::default()
         },
@@ -387,25 +393,27 @@ fn cost_follows_the_catalog_price_and_search_fees() {
     };
     // 400k fresh × $4 + 500k cached × $0.20 + 100k written × $5 + 100k out × $20 + 2 × $0.01
     let expected = 1_600_000 + 100_000 + 500_000 + 2_000_000 + 20_000;
-    assert_eq!(client.usage(&decoded).cost_micros, Some(expected));
+    let usage = client.usage(&decoded);
+    assert_eq!(usage.cost_micros, Some(expected));
+    assert_eq!(usage.cache_write_input_tokens, 100_000);
 }
 
 #[test]
 fn targets_build_exact_urls_for_direct_and_cloud() {
     let gemini = LeadTarget::direct(WorkModelProvider::Google).unwrap();
     assert_eq!(
-        gemini.call_url("gemini-3.8-flash").unwrap().as_str(),
+        gemini.call_url("gemini-3.8-flash", false).unwrap().as_str(),
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
     );
-    assert!(gemini.call_url("../../x").is_err());
+    assert!(gemini.call_url("../../x", false).is_err());
     let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::DeepSeek).unwrap();
     assert_eq!(
-        cloud.call_url("deepseek-flash").unwrap().as_str(),
+        cloud.call_url("deepseek-flash", false).unwrap().as_str(),
         "https://api.zephium.app/deepseek/v1/chat/completions"
     );
     let cloud = LeadTarget::cloud(ZEPHIUM_CLOUD_BASE, WorkModelProvider::OpenAi).unwrap();
     assert_eq!(
-        cloud.call_url("gpt-6-sol").unwrap().as_str(),
+        cloud.call_url("gpt-6-sol", false).unwrap().as_str(),
         "https://api.zephium.app/openai/v1/responses"
     );
     assert!(LeadTarget::compatible("http://example.com/v1").is_err());
@@ -420,7 +428,7 @@ fn targets_build_exact_urls_for_direct_and_cloud() {
 }
 
 /// A loopback server answering each connection with the next canned reply.
-fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+pub(super) fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = format!("http://{}/v1", listener.local_addr().unwrap());
     let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -455,7 +463,7 @@ fn serve(replies: Vec<String>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
     (address, seen)
 }
 
-fn http_reply(status: &str, headers: &str, body: &str) -> String {
+pub(super) fn http_reply(status: &str, headers: &str, body: &str) -> String {
     format!(
         "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
         body.len()
@@ -493,6 +501,7 @@ async fn a_rate_limited_call_retries_after_the_hint_then_streams() {
         upstream: WorkModelProvider::OpenAi,
         base: Url::parse(&base).unwrap(),
         cloud: false,
+        search_calls: None,
     };
     let client = LeadClient::new(
         target,
@@ -531,6 +540,7 @@ async fn an_unauthorized_call_fails_closed_without_retrying() {
         upstream: WorkModelProvider::OpenAi,
         base: Url::parse(&base).unwrap(),
         cloud: false,
+        search_calls: None,
     };
     let client = LeadClient::new(
         target,
@@ -548,4 +558,590 @@ async fn an_unauthorized_call_fails_closed_without_retrying() {
         .err();
     assert_eq!(error, Some(WorkModelError::Unauthorized));
     assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+fn hosted(refusal: HostedRefusal) -> WorkModelError {
+    WorkModelError::Hosted {
+        refusal,
+        retry_after_ms: None,
+    }
+}
+
+#[test]
+fn cloud_refusals_never_read_as_a_bad_session_unless_they_are() {
+    use HostedRefusal::*;
+    let refused = |status: u16, code: &str| {
+        let body = format!("{{\"error\":{{\"code\":\"{code}\"}},\"request_id\":\"r\"}}");
+        classify_cloud(StatusCode::from_u16(status).unwrap(), body.as_bytes())
+    };
+    assert_eq!(refused(401, "unauthorized"), WorkModelError::Unauthorized);
+    assert_eq!(
+        refused(403, "model_not_allowed"),
+        WorkModelError::BadRequest
+    );
+    for (status, code, refusal) in [
+        (403, "plan_required", PlanRequired),
+        (403, "billing_review_required", BillingReview),
+        (402, "insufficient_credits", OutOfCredits),
+        (402, "daily_limit_reached", DailyLimit),
+        (429, "free_usage_limit_reached", FreeUsagePaused),
+        (429, "usage_confirmation_limited", ConfirmationLimited),
+        (503, "cloud_budget_exhausted", Paused),
+        (409, "request_in_progress", AlreadySent),
+        (409, "request_already_recorded", AlreadySent),
+        (400, "invalid_audio", InvalidAudio),
+        (415, "unsupported_audio_format", UnsupportedAudio),
+        (422, "audio_too_long", AudioTooLong),
+    ] {
+        assert_eq!(refused(status, code), hosted(refusal), "{status} {code}");
+    }
+    assert_eq!(
+        refused(400, "input_limit_exceeded"),
+        WorkModelError::ContextTooLong
+    );
+    assert_eq!(
+        refused(400, "context_limit_exceeded"),
+        WorkModelError::ContextTooLong
+    );
+    assert_eq!(refused(503, "cloud_disabled"), WorkModelError::Overloaded);
+    assert!(matches!(
+        refused(429, "concurrency_limited"),
+        WorkModelError::RateLimited { .. }
+    ));
+}
+
+#[test]
+fn the_larger_server_wait_wins_and_never_shortens() {
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("7"));
+    let body = br#"{"error":{"code":"x","retry_after":30},"request_id":null}"#;
+    assert_eq!(
+        cloud::server_wait(&headers, body, true),
+        Some(Duration::from_secs(30))
+    );
+    let small = br#"{"error":{"code":"x","retry_after":2}}"#;
+    assert_eq!(
+        cloud::server_wait(&headers, small, true),
+        Some(Duration::from_secs(7))
+    );
+    headers.insert("retry-after-ms", HeaderValue::from_static("45000"));
+    assert_eq!(
+        cloud::server_wait(&headers, small, true),
+        Some(Duration::from_secs(45))
+    );
+    // A provider's own body is not Cloud's contract.
+    assert_eq!(cloud::server_wait(&HeaderMap::new(), body, false), None);
+    assert_eq!(
+        cloud::server_wait(&HeaderMap::new(), b"{\"error\":{\"retry_after\":-1}}", true),
+        None
+    );
+}
+
+#[test]
+fn a_cloud_wait_lands_on_the_error_that_carries_it() {
+    let wait = Some(Duration::from_secs(90));
+    assert_eq!(
+        cloud::with_wait(hosted(HostedRefusal::FreeUsagePaused), wait, true),
+        WorkModelError::Hosted {
+            refusal: HostedRefusal::FreeUsagePaused,
+            retry_after_ms: Some(90_000)
+        }
+    );
+    // A 503 that says when to come back is a wait, not an outage.
+    assert_eq!(
+        cloud::with_wait(WorkModelError::Overloaded, wait, true),
+        WorkModelError::RateLimited {
+            retry_after_ms: Some(90_000)
+        }
+    );
+    assert_eq!(
+        cloud::with_wait(WorkModelError::Overloaded, wait, false),
+        WorkModelError::Overloaded
+    );
+    assert_eq!(
+        cloud::with_wait(WorkModelError::Overloaded, None, true),
+        WorkModelError::Overloaded
+    );
+    // The daily limit resets at 00:00 UTC without being told.
+    let noon = std::time::UNIX_EPOCH + Duration::from_secs(19_000 * 86_400 + 12 * 3_600);
+    assert_eq!(
+        cloud::with_wait_at(hosted(HostedRefusal::DailyLimit), None, true, noon),
+        WorkModelError::Hosted {
+            refusal: HostedRefusal::DailyLimit,
+            retry_after_ms: Some(12 * 3_600 * 1_000)
+        }
+    );
+}
+
+#[tokio::test]
+async fn hosted_refusals_are_not_retried_and_a_budget_stop_is_not_an_outage() {
+    for (status, code, refusal) in [
+        (
+            "503 Service Unavailable",
+            "cloud_budget_exhausted",
+            HostedRefusal::Paused,
+        ),
+        (
+            "429 Too Many Requests",
+            "free_usage_limit_reached",
+            HostedRefusal::FreeUsagePaused,
+        ),
+        (
+            "429 Too Many Requests",
+            "usage_confirmation_limited",
+            HostedRefusal::ConfirmationLimited,
+        ),
+    ] {
+        let (base, seen) = serve(vec![
+            http_reply(
+                status,
+                "retry-after: 0\r\n",
+                &format!("{{\"error\":{{\"code\":\"{code}\",\"retry_after\":3600}},\"request_id\":null}}"),
+            ),
+            http_reply("200 OK", "content-type: text/event-stream\r\n", &completed_stream()),
+        ]);
+        let (client, _) = cloud_client(&base);
+        let error = client
+            .call(
+                request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+                &|_| {},
+            )
+            .await
+            .err();
+        assert_eq!(
+            error,
+            Some(WorkModelError::Hosted {
+                refusal,
+                retry_after_ms: Some(3_600_000)
+            })
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1, "{code} was sent again");
+    }
+}
+
+#[tokio::test]
+async fn a_cloud_503_that_names_a_long_wait_is_not_retried_here() {
+    let (base, seen) = serve(vec![
+        http_reply(
+            "503 Service Unavailable",
+            "retry-after: 120\r\n",
+            "{\"error\":{\"code\":\"provider_unavailable\"},\"request_id\":null}",
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, _) = cloud_client(&base);
+    let error = client
+        .call(
+            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+            &|_| {},
+        )
+        .await
+        .err();
+    assert_eq!(
+        error,
+        Some(WorkModelError::RateLimited {
+            retry_after_ms: Some(120_000)
+        })
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_409_on_the_key_is_already_sent_and_is_never_sent_again() {
+    let id = "0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c";
+    let (base, seen) = serve(vec![
+        http_reply(
+            "409 Conflict",
+            &format!("x-zephium-request-id: {id}\r\n"),
+            &format!("{{\"error\":{{\"code\":\"request_in_progress\"}},\"request_id\":\"{id}\"}}"),
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    let error = client
+        .call(
+            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+            &|_| {},
+        )
+        .await
+        .err();
+    assert_eq!(error, Some(hosted(HostedRefusal::AlreadySent)));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let record = records.lock().unwrap()[0].clone();
+    assert_eq!(record.request_id.as_deref(), Some(id));
+    assert!(record.unsettled(), "the receipt check still runs");
+}
+
+fn completed_stream() -> String {
+    sse(&[(
+        "response.completed",
+        json!({"type": "response.completed", "response": {"usage": {
+        "input_tokens": 10, "output_tokens": 1}}}),
+    )])
+}
+
+type Records = std::sync::Arc<Mutex<Vec<LeadCloudRecord>>>;
+
+fn cloud_client(base: &str) -> (LeadClient, Records) {
+    let root = base.trim_end_matches("/v1");
+    let target = LeadTarget::cloud(root, WorkModelProvider::OpenAi).unwrap();
+    let records: Records = Default::default();
+    let log = records.clone();
+    let client = LeadClient::new(
+        target,
+        Arc::new(LeadStaticCredential::new(
+            LeadSecret::new("session-token".into()).unwrap(),
+        )),
+        None,
+    )
+    .with_cloud_observer(Arc::new(move |record| log.lock().unwrap().push(record)));
+    (client, records)
+}
+
+fn idempotency_keys(seen: &Mutex<Vec<String>>) -> Vec<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let request = request.to_ascii_lowercase();
+            assert!(request.starts_with("post /openai/v1/responses "));
+            assert!(request.contains("authorization: bearer session-token"));
+            let line = request
+                .lines()
+                .find_map(|line| line.strip_prefix("idempotency-key: "))
+                .unwrap()
+                .to_owned();
+            assert_eq!(line.len(), 36);
+            assert_eq!(&line[14..15], "4");
+            assert!(matches!(&line[19..20], "8" | "9" | "a" | "b"));
+            line
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cloud_keeps_one_key_per_generation_unless_an_attempt_was_admitted() {
+    let (base, seen) = serve(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "retry-after: 0\r\n",
+            "{\"error\":{\"code\":\"concurrency_limited\",\"retry_after\":1},\"request_id\":null}",
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, _) = cloud_client(&base);
+    let call = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    client.call(call.clone(), &|_| {}).await.unwrap();
+    let keys = idempotency_keys(&seen);
+    assert_eq!(keys.len(), 2);
+    assert_eq!(
+        keys[0], keys[1],
+        "nothing was admitted, so it is the same call"
+    );
+
+    // The provider's own 429 came after admission and was released unspent:
+    // trying again is a new logical call with its own key.
+    let (base, seen) = serve(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "retry-after: 0\r\nx-zephium-request-id: 0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\r\n",
+            "{\"error\":{\"code\":\"provider_rate_limited\"},\"request_id\":\"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\"}",
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    client.call(call, &|_| {}).await.unwrap();
+    let keys = idempotency_keys(&seen);
+    assert_ne!(keys[0], keys[1]);
+    let records = records.lock().unwrap();
+    assert_eq!(records[0].accounting, LeadCloudAccounting::Refused);
+    assert_eq!(records[0].idempotency_key, keys[0]);
+}
+
+#[tokio::test]
+async fn a_cloud_stream_is_read_to_its_end_for_the_accounting_trailer() {
+    let stream = format!(
+        "{}: zephium {{\"request_id\":\"0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\",\"usage\":\"settled\",\"charged\":\"812\"}}\n\n",
+        sse(&[
+            (
+                "response.output_text.delta",
+                json!({"type": "response.output_text.delta", "delta": "Hi"}),
+            ),
+            (
+                "response.output_item.done",
+                json!({"type": "response.output_item.done", "item": {
+                "type": "message", "content": [{"type": "output_text", "text": "Hi", "annotations": []}]}}),
+            ),
+            (
+                "response.completed",
+                json!({"type": "response.completed", "response": {"usage": {
+                "input_tokens": 10, "output_tokens": 1}}}),
+            ),
+        ])
+    );
+    let (base, _) = serve(vec![http_reply(
+        "200 OK",
+        "content-type: text/event-stream\r\nx-zephium-request-id: 0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c\r\nx-zephium-policy-revision: 7\r\n",
+        &stream,
+    )]);
+    let (client, records) = cloud_client(&base);
+    let texts = Mutex::new(String::new());
+    let sink = |event: WorkModelEvent| {
+        if let WorkModelEvent::Text(text) = event {
+            texts.lock().unwrap().push_str(&text);
+        }
+    };
+    let outcome = client
+        .call(request(WorkModelWire::OpenAiResponses, "gpt-6-luna"), &sink)
+        .await
+        .unwrap();
+    assert_eq!(outcome.stop, WorkModelStop::EndTurn);
+    assert_eq!(
+        *texts.lock().unwrap(),
+        "Hi",
+        "the trailer is not model text"
+    );
+    let records = records.lock().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].request_id.as_deref(),
+        Some("0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c")
+    );
+    assert_eq!(records[0].policy_revision.as_deref(), Some("7"));
+    assert_eq!(
+        records[0].accounting,
+        LeadCloudAccounting::Settled {
+            charged: Some("812".into())
+        }
+    );
+    assert!(!records[0].unsettled());
+}
+
+#[tokio::test]
+async fn a_cloud_call_that_may_have_run_is_never_sent_again() {
+    let id = "0b3c6a3e-8f7d-4a59-9a3c-1d2e3f4a5b6c";
+    // The provider failed after admission: the server holds the charge open.
+    let (base, seen) = serve(vec![
+        http_reply(
+            "502 Bad Gateway",
+            &format!("x-zephium-request-id: {id}\r\n"),
+            &format!(
+                "{{\"error\":{{\"code\":\"provider_request_failed\"}},\"request_id\":\"{id}\"}}"
+            ),
+        ),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    let call = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    let error = client.call(call.clone(), &|_| {}).await.err();
+    assert_eq!(error, Some(WorkModelError::Protocol));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let record = records.lock().unwrap()[0].clone();
+    assert_eq!(record.accounting, LeadCloudAccounting::Unknown);
+    assert!(record.unsettled());
+
+    // A stream cut after admission, before any output, is not retried either,
+    // and its interruption trailer still reaches the record.
+    let cut = format!(
+        "event: response.created\ndata: {}\n\n: zephium {{\"request_id\":\"{id}\",\"error\":\"provider_idle_timeout\"}}\n\n",
+        json!({"type": "response.created", "response": {}})
+    );
+    let (base, seen) = serve(vec![
+        http_reply("200 OK", "content-type: text/event-stream\r\n", &cut),
+        http_reply(
+            "200 OK",
+            "content-type: text/event-stream\r\n",
+            &completed_stream(),
+        ),
+    ]);
+    let (client, records) = cloud_client(&base);
+    let error = client.call(call.clone(), &|_| {}).await.err();
+    assert_eq!(error, Some(WorkModelError::Protocol));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(
+        records.lock().unwrap()[0].accounting,
+        LeadCloudAccounting::Interrupted
+    );
+
+    // A 409 on the key means an earlier send was recorded: nothing replays.
+    let (base, seen) = serve(vec![http_reply(
+        "409 Conflict",
+        "",
+        "{\"error\":{\"code\":\"request_in_progress\"},\"request_id\":null}",
+    )]);
+    let (client, _) = cloud_client(&base);
+    assert_eq!(
+        client.call(call, &|_| {}).await.err(),
+        Some(hosted(HostedRefusal::AlreadySent))
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cloud_credit_and_cap_refusals_are_out_of_credits_and_final() {
+    let (base, seen) = serve(vec![http_reply(
+        "402 Payment Required",
+        "",
+        "{\"error\":{\"code\":\"insufficient_credits\"},\"request_id\":null}",
+    )]);
+    let (client, records) = cloud_client(&base);
+    let error = client
+        .call(
+            request(WorkModelWire::OpenAiResponses, "gpt-6-luna"),
+            &|_| {},
+        )
+        .await
+        .err();
+    assert_eq!(error, Some(hosted(HostedRefusal::OutOfCredits)));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert!(records.lock().unwrap().is_empty());
+}
+
+#[test]
+fn another_providers_reasoning_is_never_replayed() {
+    let mut request = request(WorkModelWire::ChatCompletions, "deepseek-flash");
+    let from = |origin: Option<&str>| {
+        let mut part = json!({"wire": "chat", "value": {"reasoning_content": "thought"}});
+        if let Some(origin) = origin {
+            part["origin"] = json!(origin);
+        }
+        WorkModelPart::Replay(part)
+    };
+    request.messages.push(WorkModelMessage::Assistant(vec![
+        from(Some("deepseek")),
+        from(Some("groq")),
+        from(Some("deepseek@zephium")),
+        from(None),
+        WorkModelPart::Text("answer".into()),
+    ]));
+    strip_foreign_replays(&mut request, "deepseek");
+    let Some(WorkModelMessage::Assistant(parts)) = request.messages.last() else {
+        panic!("assistant turn kept");
+    };
+    let origins: Vec<Option<&str>> = parts
+        .iter()
+        .filter_map(|part| match part {
+            WorkModelPart::Replay(value) => Some(value.get("origin").and_then(Value::as_str)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(origins, vec![Some("deepseek"), None]);
+    assert_eq!(parts.len(), 3);
+}
+
+fn cloud_target(upstream: WorkModelProvider, calls: Option<u32>) -> LeadTarget {
+    let mut target = LeadTarget::cloud("https://api.zephium.app", upstream).unwrap();
+    target.search_calls = calls;
+    target
+}
+
+fn search_tools(body: &Value, tool_type: &str) -> Vec<Value> {
+    body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|tool| tool["type"] == tool_type)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn cloud_native_search_follows_the_rows_call_cap() {
+    let openai_call = request(WorkModelWire::OpenAiResponses, "gpt-6-luna");
+    let capped = openai::body(
+        &openai_call,
+        &cloud_target(WorkModelProvider::OpenAi, Some(3)),
+    )
+    .unwrap();
+    assert_eq!(search_tools(&capped, "web_search").len(), 1);
+    assert_eq!(capped["max_tool_calls"], 3);
+    let uncapped =
+        openai::body(&openai_call, &cloud_target(WorkModelProvider::OpenAi, None)).unwrap();
+    assert!(uncapped.get("max_tool_calls").is_none());
+    let none = openai::body(
+        &openai_call,
+        &cloud_target(WorkModelProvider::OpenAi, Some(0)),
+    )
+    .unwrap();
+    assert!(search_tools(&none, "web_search").is_empty());
+    assert!(none.get("max_tool_calls").is_none());
+    assert!(!none["include"].to_string().contains("web_search"));
+    let direct = openai::body(
+        &openai_call,
+        &LeadTarget::direct(WorkModelProvider::OpenAi).unwrap(),
+    )
+    .unwrap();
+    assert!(direct.get("max_tool_calls").is_none());
+
+    let anthropic_call = request(WorkModelWire::AnthropicMessages, "claude-sonnet-5");
+    let uses = |calls| {
+        let body = anthropic::body(
+            &anthropic_call,
+            &cloud_target(WorkModelProvider::Anthropic, calls),
+        )
+        .unwrap();
+        search_tools(&body, "web_search_20250305")
+            .first()
+            .map(|tool| tool["max_uses"].clone())
+    };
+    assert_eq!(uses(Some(3)), Some(json!(3)));
+    assert_eq!(
+        uses(Some(20)),
+        Some(json!(8)),
+        "never above the local ceiling"
+    );
+    assert_eq!(uses(None), Some(json!(8)));
+    assert_eq!(uses(Some(0)), None);
+}
+
+#[test]
+fn hosted_google_never_sends_google_search() {
+    let call = request(WorkModelWire::Gemini, "gemini-3.5-flash");
+    let has_search = |target: &LeadTarget| {
+        gemini::body(&call, target).unwrap()["tools"]
+            .to_string()
+            .contains("googleSearch")
+    };
+    assert!(has_search(
+        &LeadTarget::direct(WorkModelProvider::Google).unwrap()
+    ));
+    assert!(!has_search(&cloud_target(WorkModelProvider::Google, None)));
+    assert!(!has_search(&cloud_target(
+        WorkModelProvider::Google,
+        Some(5)
+    )));
+}
+
+#[test]
+fn a_rows_stream_limits_wait_a_little_past_the_servers_own() {
+    let client = LeadClient::new(
+        cloud_target(WorkModelProvider::OpenAi, None),
+        Arc::new(LeadStaticCredential::new(
+            LeadSecret::new("session-token".into()).unwrap(),
+        )),
+        None,
+    )
+    .with_call_limits(Some(90_000), Some(600_000));
+    assert_eq!(client.idle_timeout, Some(Duration::from_secs(105)));
+    assert_eq!(client.call_timeout, Some(Duration::from_secs(615)));
 }

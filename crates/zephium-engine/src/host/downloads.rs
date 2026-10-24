@@ -27,7 +27,9 @@ use zephium_core::ids::{DownloadId, ProfileId};
 use zephium_core::permissions::PageOrigin;
 use zephium_core::ports::{engine::Partition, store::Store};
 
-use super::download_files::{verify_file, Destination};
+#[cfg(target_os = "macos")]
+use super::download_files::verify_file;
+use super::download_files::Destination;
 use super::permits::EventPermit;
 use crate::navigation_epoch::{NavigationActivity, NavigationEpochTracker};
 
@@ -58,6 +60,10 @@ const MAX_UI_CALLS: usize = 4;
 // records can leave the active map before slow filesystem cleanup returns.
 const MAX_BACKGROUND_WORK: usize = 32;
 const RECENT_LIMIT: usize = 64;
+/// How often moving transfers are sampled for progress.
+const MOVING_TICK: std::time::Duration = std::time::Duration::from_millis(200);
+/// How often transfers that only wait are looked at.
+const WAITING_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecisionPhase {
@@ -190,6 +196,8 @@ pub(crate) struct Downloads {
     sender: mpsc::Sender<Message>,
     receiver: RefCell<mpsc::Receiver<Message>>,
     timer: RefCell<Option<Timer>>,
+    /// The running timer is the slow one: nothing is moving, only waiting.
+    timer_slow: Cell<bool>,
     stopping: Cell<bool>,
     retired: RefCell<HashSet<ProfileId>>,
     drained_profiles: RefCell<HashSet<ProfileId>>,
@@ -246,6 +254,7 @@ impl Downloads {
             sender,
             receiver: RefCell::new(receiver),
             timer: RefCell::new(None),
+            timer_slow: Cell::new(false),
             stopping: Cell::new(false),
             retired: RefCell::new(HashSet::new()),
             drained_profiles: RefCell::new(HashSet::new()),
@@ -486,6 +495,32 @@ impl Downloads {
             self.cleanup(destination);
         }
         self.persist(id);
+    }
+
+    /// Whether every transfer only waits, on a save panel left open or paused,
+    /// with no reply in flight: then nothing needs sampling five times a
+    /// second, only its deadline and its page looked at now and then.
+    fn only_waiting(&self) -> bool {
+        self.work.get() == 0
+            && !self.stopping.get()
+            && self.calls.borrow().is_empty()
+            && self.waiters.borrow().is_empty()
+            && self.active.borrow().values().all(|transfer| {
+                !transfer.cancelling
+                    && matches!(
+                        transfer.record.state,
+                        DownloadState::Pending | DownloadState::Paused
+                    )
+            })
+    }
+
+    /// The timer's period for what is going on now, and whether that is the slow one.
+    fn tick_period(&self) -> (std::time::Duration, bool) {
+        if self.only_waiting() {
+            (WAITING_TICK, true)
+        } else {
+            (MOVING_TICK, false)
+        }
     }
 
     fn tick(self: &Rc<Self>) {

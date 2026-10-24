@@ -462,6 +462,7 @@ mod tests {
                 id: space,
                 profile,
                 name: "Space".into(),
+                look: Default::default(),
             }],
             items: Vec::new(),
             active_space: Some(space),

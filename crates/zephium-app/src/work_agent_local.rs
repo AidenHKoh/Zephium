@@ -6,6 +6,9 @@ impl Driver {
         mut kind: WorkStepKindV1,
         files: &WorkFileGrant,
     ) -> Result<Option<WorkAttemptStatus>, WorkError> {
+        if !matches!(kind, WorkStepKindV1::RunCommand { .. }) {
+            return Err(WorkError::Invalid);
+        }
         let WorkStepKindV1::RunCommand {
             cwd,
             command,
@@ -58,10 +61,18 @@ impl Driver {
             }),
             ..Default::default()
         }));
+        if let Err(note) = crate::work_commands::ensure_available() {
+            step.status = WorkStepStatus::Failed;
+            step.note = Some(note.into());
+            self.begin(step, vec![], None).await?;
+            self.notice(note);
+            return Ok(None);
+        }
         let id = self.begin(step, vec![], None).await?;
         if scope != WorkCommandApprovalScopeV1::None {
             self.probe.record_activity(WorkActivityV1::WaitingForHuman);
             let since = self.wait();
+            let mut changes = self.probe.changes();
             loop {
                 let state = self.probe.runtime_projection().await?;
                 let decision = state
@@ -86,7 +97,7 @@ impl Driver {
                         .await?;
                     return Ok(Some(WorkAttemptStatus::Cancelled));
                 }
-                tokio::time::sleep(ASK_POLL).await;
+                changes.next(crate::work_changes::FALLBACK).await;
             }
         }
         if self.cancelled().await {

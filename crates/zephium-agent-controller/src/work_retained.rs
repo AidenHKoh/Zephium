@@ -3,10 +3,24 @@
 use super::*;
 use std::task::Waker;
 
+/// How long one look may stay unanswered, queued behind other pages' looks
+/// included, before the page ends as too slow instead of waiting out the
+/// run's whole deadline.
+const OBSERVATION_STALL: Duration = Duration::from_secs(90);
+/// How long a page load may stay unsettled; slow sites settle well inside.
+const NAVIGATION_STALL: Duration = Duration::from_secs(90);
+
 /// Narrow application-owned lease adapter. The implementation retains original
 /// operation slots outside the worker; no native port or registry is exposed.
 /// Registration is immutable, bounded and precedes every native dispatch.
 pub trait AgentWorkRetainedBrowser: Send {
+    /// Returns only the original lease-bound image source broker. Registration
+    /// precedes the first provider call and cannot select another native owner.
+    fn screenshot_source_port(
+        &self,
+    ) -> Option<std::sync::Arc<dyn zephium_agentic::SemanticScreenshotSourcePort>> {
+        None
+    }
     /// Whether this exact retained backing can own a bounded native viewport
     /// capture callback for its leased document.
     fn supports_screenshots(&self) -> bool {
@@ -29,7 +43,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         &mut self,
         _now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Whether the exact backing owns authorized semantic action callbacks.
     /// This is ownership support only; the task and policy still approve
@@ -52,7 +66,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         &mut self,
         _now: AgentPolicyInstant,
     ) -> Result<Option<SemanticActionNativeSettlement>, AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Original-row description only; this is not read admission.
     fn binding(&self) -> &WorkBrowserReadBinding;
@@ -73,7 +87,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         &self,
         _now: AgentPolicyInstant,
     ) -> Result<ContextAutomationState, AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Retires old read authority and reserves one original successor owner.
     fn prepare_navigation(
@@ -81,11 +95,11 @@ pub trait AgentWorkRetainedBrowser: Send {
         _source: ContextJoin,
         _now: AgentPolicyInstant,
     ) -> Result<ContextOperationJoin, AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Explicitly accounts an original preparation that never reached dispatch.
     fn cancel_navigation_preparation(&mut self) -> Result<(), AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Binds only the original policy's active operation; no arbitrary URL port.
     fn dispatch_navigation(&mut self, _active: &AgentActiveNavigation) -> ContextDispatch {
@@ -103,7 +117,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         &mut self,
         _now: AgentPolicyInstant,
     ) -> Result<Option<ContextNavigationSettlement>, AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Whether a pre-dispatch NotReady may consume another initial read.
     /// One-shot capture adapters refuse retries without replacing that receipt.
@@ -120,7 +134,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
         if capability != WorkBrowserObservationCapability::RESTRICTED {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         self.begin_observation(now)
     }
@@ -137,7 +151,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         _kind: SemanticExpansionKind,
         _now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
-        Err(AgentWorkFailure::Contract)
+        Err(crate::contract!())
     }
     /// Reserves an expansion with the same immutable disclosure capability.
     /// Legacy adapters remain restricted by default.
@@ -151,7 +165,7 @@ pub trait AgentWorkRetainedBrowser: Send {
         now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
         if capability != WorkBrowserObservationCapability::RESTRICTED {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         self.begin_expansion(previous, acknowledgement, target, kind, now)
     }
@@ -285,6 +299,10 @@ impl AgentWorkRetainedRecovery {
     pub const fn failure(&self) -> AgentWorkFailure {
         self.0.failure
     }
+    /// Closed reason the original unsuccessful cleanup could not settle.
+    pub fn cleanup_failure(&self) -> Option<AgentWorkFailure> {
+        self.0.state.cleanup_failure
+    }
     /// Content-free original audit debt; not reconciliation or closure authority.
     pub fn audit_status(&mut self) -> Result<AgentAuditLedgerStatus, AgentWorkFailure> {
         self.0.audit_reconciliation_status()
@@ -363,7 +381,7 @@ impl WorkBrowser<'_> {
     ) -> Result<ContextShutdownDispatch, AgentWorkFailure> {
         match self {
             Self::Legacy(browser) => Ok(browser.seal_for_shutdown(audit)),
-            Self::Retained => Err(AgentWorkFailure::Contract),
+            Self::Retained => Err(crate::contract!()),
         }
     }
 }
@@ -387,7 +405,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -399,7 +417,7 @@ impl AgentWorkRetainedController {
         AgentWorkFailure,
     > {
         Self::validate_human_successor(waiting, browser.as_ref())?;
-        Self::try_new(input, browser, transport, credential, audit, task)
+        Self::try_new(input, browser, transport, access, audit, task)
     }
 
     #[cfg(feature = "probe-harness")]
@@ -410,7 +428,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -422,7 +440,7 @@ impl AgentWorkRetainedController {
         AgentWorkFailure,
     > {
         Self::validate_human_successor(waiting, browser.as_ref())?;
-        Self::try_new_for_probe(input, browser, transport, credential, audit, task)
+        Self::try_new_for_probe(input, browser, transport, access, audit, task)
     }
 
     fn validate_human_successor(
@@ -432,13 +450,13 @@ impl AgentWorkRetainedController {
         let prior = waiting.request();
         let expected_resource = prior
             .retained_resource()
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or_else(|| crate::contract!())?;
         let binding = browser.binding();
         if binding.lease().resource().identity() != expected_resource
             || binding.lease().run() == prior.context().identity().owner()
             || binding.frame().context().identity().owner() != binding.lease().run()
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         Ok(())
     }
@@ -462,7 +480,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -479,7 +497,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::Stateless,
@@ -492,7 +510,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -507,7 +525,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::Stateless,
@@ -520,7 +538,7 @@ impl AgentWorkRetainedController {
         input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransportConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<super::super::AgentBrowserModelAccess>,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<
@@ -537,7 +555,7 @@ impl AgentWorkRetainedController {
             input,
             browser,
             transport,
-            credential,
+            access.into(),
             audit,
             task,
             AgentBrowserRetention::InspectablePublicData,
@@ -549,7 +567,7 @@ impl AgentWorkRetainedController {
         mut input: AgentWorkRunInput,
         browser: Box<dyn AgentWorkRetainedBrowser>,
         transport: AgentProviderTransport,
-        credential: AgentProviderCredential,
+        access: super::super::AgentBrowserModelAccess,
         audit: Arc<dyn AgentAuditPort>,
         task: Box<dyn AgentWorkTask>,
         retention: AgentBrowserRetention,
@@ -562,11 +580,7 @@ impl AgentWorkRetainedController {
         AgentWorkFailure,
     > {
         let sampled_at = Instant::now();
-        let now = input
-            .settings
-            .clock
-            .now()
-            .map_err(|_| AgentWorkFailure::Contract)?;
+        let now = input.settings.clock.now().map_err(|_| crate::contract!())?;
         browser.check_health(now)?;
         let binding = browser.binding();
         let origin_admitted = settled_origin_admitted(
@@ -589,30 +603,28 @@ impl AgentWorkRetainedController {
                 > input
                     .manifest
                     .plan_node(input.lease.node())
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or_else(|| crate::contract!())?
                     .expires_at()
             || binding.lease().deadline() <= now
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         input.settings.deadline = input.settings.deadline.min(
             sampled_at + Duration::from_millis(binding.lease().deadline().millis() - now.millis()),
         );
-        let snapshot = transport
-            .snapshot()
-            .map_err(|_| AgentWorkFailure::Contract)?;
+        let snapshot = transport.snapshot().map_err(|_| crate::contract!())?;
         if snapshot.is_sealed() || !snapshot.is_idle() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let scope = zephium_agent_runtime::AgentRuntimeScopedBinding::try_new(
             binding.lease().clone(),
             &input.manifest,
         )
-        .map_err(|_| AgentWorkFailure::Contract)?;
+        .map_err(|_| crate::contract!())?;
         let (mut controller, handle) = AgentWorkController::with_transport(
             input,
             transport,
-            credential,
+            access,
             audit,
             task,
             retention,
@@ -632,8 +644,8 @@ impl AgentWorkRetainedController {
 }
 
 /// The frame a retained page starts on: the requested origin, or for a site
-/// session another origin of its site the load settled on (a consent or
-/// locale host), when the frame stands for that settled document.
+/// session or a results page another origin of its site the load settled on
+/// (a consent or locale host), when the frame stands for that settled document.
 fn settled_origin_admitted(
     policy: zephium_agentic::WorkBrowserDocumentPolicy,
     requested: &SemanticOrigin,
@@ -641,7 +653,7 @@ fn settled_origin_admitted(
     document: &ContextNavigationTarget,
 ) -> bool {
     frame == requested
-        || (policy == zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+        || (policy.follows_site_loads()
             && SemanticOrigin::parse(document.as_url().as_str())
                 .is_ok_and(|origin| &origin == frame))
 }
@@ -655,13 +667,13 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                     controller
                         .state
                         .as_mut()
-                        .ok_or(AgentWorkFailure::Contract)
+                        .ok_or_else(|| crate::contract!())
                         .and_then(|state| {
                             state
                                 .native
                                 .retained
                                 .as_mut()
-                                .ok_or(AgentWorkFailure::Contract)
+                                .ok_or_else(|| crate::contract!())
                         })
                         .and_then(|browser| browser.register_listener(cx.waker().clone())),
                 )
@@ -704,10 +716,16 @@ impl zephium_agent_runtime::AgentRuntimeScopedController for AgentWorkRetainedCo
                                 .is_ok_and(|journal| journal.audit.is_quiescent())
                         })
                     {
-                        let _ = controller.publish_terminal(&mut worker).await;
+                        let cleanup = controller.publish_terminal(&mut worker).await;
+                        if let (Err(failure), Some(state)) = (cleanup, controller.state.as_mut()) {
+                            state.cleanup_failure = Some(failure);
+                        }
                     }
                 } else {
-                    let _ = controller.close_retained(&mut worker, Some(deadline)).await;
+                    let cleanup = controller.close_retained(&mut worker, Some(deadline)).await;
+                    if let (Err(failure), Some(state)) = (cleanup, controller.state.as_mut()) {
+                        state.cleanup_failure = Some(failure);
+                    }
                 }
             }
         })
@@ -750,19 +768,21 @@ impl WorkNative {
         let clock = self
             .clock
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .clone();
-        let retained = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let retained = self.retained.as_mut().ok_or_else(|| crate::contract!())?;
         let deadline = if let Some(deadline) = action {
-            let now = clock.now().map_err(|_| AgentWorkFailure::Contract)?;
+            let now = clock.now().map_err(|_| crate::contract!())?;
             Instant::now()
                 .checked_add(Duration::from_millis(
                     deadline.millis().saturating_sub(now.millis()),
                 ))
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or_else(|| crate::contract!())?
                 .min(self.deadline)
         } else {
-            self.deadline
+            Instant::now()
+                .checked_add(NAVIGATION_STALL)
+                .map_or(self.deadline, |stall| stall.min(self.deadline))
         };
         let result = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
             let event = worker.next_event();
@@ -773,31 +793,28 @@ impl WorkNative {
                 {
                     return std::task::Poll::Ready(Err(event));
                 }
-                match clock
-                    .now()
-                    .map_err(|_| AgentWorkFailure::Contract)
-                    .and_then(|now| {
-                        if action.is_some() {
-                            // The original action is evidence debt, not a
-                            // new admission. Poll before observing health,
-                            // including when terminal publication wins the
-                            // race with the resource-health notification.
-                            retained.poll_action(now).map(|terminal| {
-                                terminal.map(AgentRuntimeEvent::SemanticActionTerminal)
+                match clock.now().map_err(|_| crate::contract!()).and_then(|now| {
+                    if action.is_some() {
+                        // The original action is evidence debt, not a
+                        // new admission. Poll before observing health,
+                        // including when terminal publication wins the
+                        // race with the resource-health notification.
+                        retained
+                            .poll_action(now)
+                            .map(|terminal| terminal.map(AgentRuntimeEvent::SemanticActionTerminal))
+                    } else {
+                        // As with actions, wait for the original receipt even
+                        // if health failed before its publication. Absence
+                        // remains pending under the original deadline.
+                        retained.poll_navigation(now).map(|terminal| {
+                            terminal.map(|terminal| {
+                                AgentRuntimeEvent::NativeTerminal(
+                                    ContextNativeEvent::NavigationSettled(terminal),
+                                )
                             })
-                        } else {
-                            // As with actions, wait for the original receipt even
-                            // if health failed before its publication. Absence
-                            // remains pending under the original deadline.
-                            retained.poll_navigation(now).map(|terminal| {
-                                terminal.map(|terminal| {
-                                    AgentRuntimeEvent::NativeTerminal(
-                                        ContextNativeEvent::NavigationSettled(terminal),
-                                    )
-                                })
-                            })
-                        }
-                    }) {
+                        })
+                    }
+                }) {
                     Ok(None) => std::task::Poll::Pending,
                     Ok(Some(terminal)) => std::task::Poll::Ready(Ok(Ok(terminal))),
                     Err(error) => std::task::Poll::Ready(Ok(Err(error))),
@@ -828,9 +845,9 @@ impl WorkNative {
             let now = self
                 .clock
                 .as_ref()
-                .ok_or(AgentWorkFailure::Contract)?
+                .ok_or_else(|| crate::contract!())?
                 .now()
-                .map_err(|_| AgentWorkFailure::Contract)?;
+                .map_err(|_| crate::contract!())?;
             browser.check_health(now)?;
         }
         Ok(())
@@ -859,10 +876,10 @@ impl WorkNative {
         let clock = self
             .clock
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .clone();
-        let browser = self.retained.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let now = clock.now().map_err(|_| AgentWorkFailure::Contract)?;
+        let browser = self.retained.as_mut().ok_or_else(|| crate::contract!())?;
+        let now = clock.now().map_err(|_| crate::contract!())?;
         match expansion {
             Some((previous, acknowledgement, target, kind)) => browser
                 .begin_expansion_with_capability(
@@ -875,32 +892,30 @@ impl WorkNative {
                 )?,
             None => browser.begin_observation_with_capability(capability, now)?,
         }
-        let result =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
-                let event = worker.next_event();
-                tokio::pin!(event);
-                std::future::poll_fn(|cx| {
-                    if let std::task::Poll::Ready(event) =
-                        std::future::Future::poll(event.as_mut(), cx)
-                    {
-                        return std::task::Poll::Ready(Err(event));
-                    }
-                    let result = clock
-                        .now()
-                        .map_err(|_| AgentWorkFailure::Contract)
-                        .and_then(|now| {
-                            browser.check_health(now)?;
-                            browser.poll_observation(now)
-                        });
-                    match result {
-                        Ok(None) => std::task::Poll::Pending,
-                        Ok(Some(observation)) => std::task::Poll::Ready(Ok(Ok(observation))),
-                        Err(error) => std::task::Poll::Ready(Ok(Err(error))),
-                    }
-                })
-                .await
+        let stall = Instant::now()
+            .checked_add(OBSERVATION_STALL)
+            .map_or(self.deadline, |stall| stall.min(self.deadline));
+        let result = tokio::time::timeout_at(tokio::time::Instant::from_std(stall), async {
+            let event = worker.next_event();
+            tokio::pin!(event);
+            std::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(event) = std::future::Future::poll(event.as_mut(), cx)
+                {
+                    return std::task::Poll::Ready(Err(event));
+                }
+                let result = clock.now().map_err(|_| crate::contract!()).and_then(|now| {
+                    browser.check_health(now)?;
+                    browser.poll_observation(now)
+                });
+                match result {
+                    Ok(None) => std::task::Poll::Pending,
+                    Ok(Some(observation)) => std::task::Poll::Ready(Ok(Ok(observation))),
+                    Err(error) => std::task::Poll::Ready(Ok(Err(error))),
+                }
             })
-            .await;
+            .await
+        })
+        .await;
         match result {
             Ok(Ok(result)) => result,
             Ok(Err(Ok(
@@ -938,7 +953,7 @@ impl AgentWorkController {
             std::future::poll_fn(|_| {
                 match clock
                     .now()
-                    .map_err(|_| AgentWorkFailure::Contract)
+                    .map_err(|_| crate::contract!())
                     .and_then(|now| browser.poll_action(now))
                 {
                     Ok(None) => std::task::Poll::Pending,
@@ -994,7 +1009,7 @@ impl AgentWorkController {
                 std::future::poll_fn(|_| {
                     match clock
                         .now()
-                        .map_err(|_| AgentWorkFailure::Contract)
+                        .map_err(|_| crate::contract!())
                         .and_then(|now| browser.poll_navigation(now))
                     {
                         Ok(None) => std::task::Poll::Pending,
@@ -1028,13 +1043,13 @@ impl AgentWorkController {
         worker: &mut AgentRuntimeWorker,
         cleanup: Option<Instant>,
     ) -> Result<(), AgentWorkFailure> {
-        let state = self.state.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let state = self.state.as_mut().ok_or_else(|| crate::contract!())?;
         if state.drained.is_some() || state.native.resources.is_some() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         let terminal_intent = match cleanup {
             Some(_) => WorkTerminalIntent::ClosedUnsuccessfully(
-                state.failure.ok_or(AgentWorkFailure::Contract)?,
+                state.failure.ok_or_else(|| crate::contract!())?,
             ),
             None => state.model_human_request.map_or(
                 WorkTerminalIntent::Succeeded,
@@ -1045,7 +1060,7 @@ impl AgentWorkController {
         // source-bound result; task `Complete` before mapping is insufficient.
         let waiting = matches!(terminal_intent, WorkTerminalIntent::WaitingForHuman(_));
         if cleanup.is_none() && state.extraction.is_none() && !waiting {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         if cleanup.is_none() {
             state.native.check_control(worker, &WorkBrowser::Retained)?;
@@ -1056,20 +1071,20 @@ impl AgentWorkController {
             .native
             .clock
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .clone();
         let browser = state
             .native
             .retained
             .as_mut()
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or_else(|| crate::contract!())?;
         if state.native.retained_delivery.is_none() {
             let delivery = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 std::future::poll_fn(|_| {
                     match clock
                         .now()
-                        .map_err(|_| AgentWorkFailure::Contract)
+                        .map_err(|_| crate::contract!())
                         .and_then(|now| browser.poll_revocation(now))
                     {
                         Ok(None) => std::task::Poll::Pending,
@@ -1082,7 +1097,7 @@ impl AgentWorkController {
             .map_err(|_| AgentWorkFailure::Deadline)??;
             state.native.retained_delivery = Some(delivery);
         }
-        let session = state.session.take().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.take().ok_or_else(|| crate::contract!())?;
         let terminal = match if !matches!(terminal_intent, WorkTerminalIntent::Succeeded) {
             session.try_finish_unsuccessful()
         } else {
@@ -1097,7 +1112,7 @@ impl AgentWorkController {
         };
         if state.terminal_intent.replace(terminal_intent).is_some() {
             state.session = Some(*terminal.session);
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         state.model_human_request = None;
         // Mirror the legacy closure boundary: an accepted model handoff whose
@@ -1152,6 +1167,12 @@ mod settled_origin_tests {
             Policy::SiteSession,
             &requested,
             &origin("https://accounts.google.com/"),
+            &consent
+        ));
+        assert!(settled_origin_admitted(
+            Policy::PublicResultsPage,
+            &requested,
+            &origin("https://consent.google.com/"),
             &consent
         ));
         // Other policies keep the exact origin.

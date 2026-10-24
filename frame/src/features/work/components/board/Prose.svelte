@@ -1,5 +1,6 @@
 <script lang="ts">
   import LazyView from "$shared/ui/LazyView";
+  import { stillWhenUnseen } from "$shared/lib/still";
   import { loadCodeBlock } from "$shared/ui/data/Code";
   import type { DocumentNodeView as Node, EvidenceReference } from "$shared/ui/data/Artifact";
   import type { ProseBlock } from "../../lib/board/types";
@@ -58,7 +59,7 @@
   >{/snippet}
 
 {#if block.state === "pending"}
-  <div class="pending" role="status">
+  <div class="pending" role="status" use:stillWhenUnseen>
     <p class="label">{block.pending || m.work_board_pending()}</p>
     <span class="line"></span><span class="line"></span><span class="line short"></span>
   </div>
@@ -231,6 +232,10 @@
     border-radius: var(--radius-capsule);
     background: var(--color-fill);
     animation: breathe calc(var(--motion-page) * 3) var(--ease-in-out) infinite alternate;
+  }
+
+  .pending:global([data-still]) .line {
+    animation-play-state: paused;
   }
 
   .line.short {

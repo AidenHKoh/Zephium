@@ -4,8 +4,6 @@
   import * as m from "$shared/i18n/messages";
   import ExtensionActionIcon from "./ExtensionActionIcon.svelte";
 
-  let { variant = "grid" }: { variant?: "grid" | "stack" } = $props();
-
   let profileId = $derived(tabs.profile()?.id ?? null);
   let tabId = $derived(tabs.activeId());
   let actions = $derived(extensions.activeActions(profileId, tabId));
@@ -75,15 +73,14 @@
 </script>
 
 <!--
-  The extensions' own buttons. In the tray they are a grid of tiles named by
-  their tooltips; stacked in the rail's tool case they are glyph rows like
-  the tools beside them. Either way they are items of the menu around them,
-  so choosing one closes it and arrow keys travel over them.
+  The extensions' own buttons, a grid of tiles in the tray named by their
+  tooltips. They are items of the menu around them, so choosing one closes it
+  and arrow keys travel over them. At rail width they are rows of the
+  column's native menu instead.
 -->
 <div
   bind:this={actionRoot}
   class="actions"
-  data-variant={variant}
   aria-label={m.webext_page_title()}
   data-zephium-extension-actions
 >
@@ -96,7 +93,7 @@
       title={action.label || m.webext_action()}
       disabled={!action.enabled || extensions.isInvoking(action.runtime.install_id)}
       data-extension-install={action.runtime.install_id}
-      class={variant === "stack" ? "ui-menu-item shelf-item tile" : "tile"}
+      class="tile"
       onclick={(event) => invoke(event, action)}
     >
       <span class="glyph">
@@ -112,23 +109,23 @@
 </div>
 
 {#if failure !== null}
-  <p role="status" aria-live="polite" class="failure" class:sr-only={variant === "stack"}>
+  <p role="status" aria-live="polite" class="failure">
     {failureMessage(failure)}
   </p>
 {/if}
 
 <style>
-  .actions[data-variant="grid"] {
+  .actions {
     display: grid;
     grid-template-columns: repeat(5, 36px);
     gap: 4px;
   }
 
-  .actions[data-variant="grid"]:empty {
+  .actions:empty {
     display: none;
   }
 
-  .actions[data-variant="grid"] .tile {
+  .actions .tile {
     display: grid;
     place-items: center;
     width: 36px;
@@ -142,16 +139,16 @@
     transition: background-color var(--motion-instant) var(--ease-smooth);
   }
 
-  .actions[data-variant="grid"] .tile:hover,
-  .actions[data-variant="grid"] .tile:focus-visible {
+  .actions .tile:hover,
+  .actions .tile:focus-visible {
     background: var(--row-hover);
   }
 
-  .actions[data-variant="grid"] .tile:active {
+  .actions .tile:active {
     background: var(--row-pressed);
   }
 
-  .actions[data-variant] .tile:disabled {
+  .actions .tile:disabled {
     opacity: 0.45;
   }
 

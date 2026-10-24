@@ -47,7 +47,9 @@
     const dy = from.y - y + offset(down).y;
     for (const leg of legs) leg.cancel();
     legs = [];
-    if ((Math.abs(dx) < 1 && Math.abs(dy) < 1) || reducedMotion()) return;
+    // A card that settles a few pixels as its text is measured is not somewhere new to walk to:
+    // walking for it would make the mark bob and ring again at every projection.
+    if (Math.hypot(dx, dy) < 12 || reducedMotion()) return;
     const time = Math.min(1100, Math.max(560, 380 + Math.hypot(dx, dy) * 0.45));
     const curve = easing("in-out");
     legs = [

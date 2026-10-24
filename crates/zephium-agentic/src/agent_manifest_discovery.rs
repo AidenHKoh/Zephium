@@ -193,6 +193,16 @@ impl AgentNavigationDiscovery {
         Ok(self)
     }
 
+    /// A browser search's results page: its first document may settle on
+    /// a same-site redirect. No hop, path or authenticated scope is added.
+    pub fn with_results_page_redirects(mut self) -> Result<Self, AgentManifestContractError> {
+        if !self.is_public_web() || self.max_hops != 0 {
+            return Err(AgentManifestContractError::NavigationRoute);
+        }
+        self.document_policy = crate::WorkBrowserDocumentPolicy::PublicResultsPage;
+        Ok(self)
+    }
+
     /// This capability never permits authenticated state or effects.
     pub const fn is_public_web(&self) -> bool {
         matches!(self.profile, DiscoveryProfile::PublicWeb)
@@ -717,6 +727,24 @@ mod tests {
         )
         .unwrap()
         .with_same_document_query_updates()
+        .is_err());
+        let results =
+            AgentNavigationDiscovery::try_new_public_page(target("https://example.com/search?q=x"))
+                .unwrap()
+                .with_results_page_redirects()
+                .unwrap();
+        assert_eq!(results.max_hops(), 0);
+        assert_eq!(
+            results.document_policy(),
+            crate::WorkBrowserDocumentPolicy::PublicResultsPage
+        );
+        assert!(AgentNavigationDiscovery::try_new_public_web(
+            target("https://example.com/search?q=x"),
+            2,
+            1
+        )
+        .unwrap()
+        .with_results_page_redirects()
         .is_err());
         assert!(AgentNavigationDiscovery::try_new(
             target("https://example.com/catalog"),

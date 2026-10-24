@@ -28,14 +28,14 @@ const node = (id: string): SidebarNodeView => ({
   section: "today",
   kind: { type: "tab", tab_id: id },
 });
-const select = (active: string) => {
+const select = (active: string, space: string | null = null, only = open) => {
   emitNativeEvent("itemsChanged", {
     projection_revision: revision((projection += 1)),
     profile: null,
     spaces: [],
-    active_space_id: null,
-    nodes: open.map((tab) => node(tab.id)),
-    tabs: open,
+    active_space_id: space,
+    nodes: only.map((tab) => node(tab.id)),
+    tabs: only,
     active,
     split_group: null,
   });
@@ -76,4 +76,22 @@ test("a second change mid-flight carries on from where the plate has got to", as
   expect(document.querySelectorAll(".selection-glide")).toHaveLength(1);
   expect(row("d").hasAttribute("data-gliding")).toBe(false);
   expect(row("b").hasAttribute("data-gliding")).toBe(true);
+});
+
+test("the current tab's plate never crosses from one space's list to another's", async () => {
+  await page.viewport(900, 700);
+  await surface.init();
+  await tabs.init();
+  select("a", "home", open.slice(0, 2));
+  await render(Shell);
+
+  // Another space is another sheet: its current tab is simply lit there.
+  select("d", "studio", open.slice(2));
+  expect(document.querySelector(".selection-glide")).toBeNull();
+  expect(row("d").hasAttribute("data-gliding")).toBe(false);
+  expect(row("d").dataset.selected).toBe("true");
+
+  // Within a space it travels as ever.
+  select("c", "studio", open.slice(2));
+  expect(document.querySelector(".selection-glide")).not.toBeNull();
 });

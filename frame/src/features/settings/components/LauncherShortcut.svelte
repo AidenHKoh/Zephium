@@ -23,7 +23,9 @@
 
   const reasons: Record<Rejection, () => string> = {
     invalid: m.launcher_shortcut_invalid,
-    needs_modifier: m.launcher_shortcut_needs_modifier,
+    needs_modifier: IS_MAC
+      ? m.launcher_shortcut_needs_modifier
+      : m.launcher_shortcut_needs_modifier_windows,
     system: m.launcher_shortcut_system,
     app_command: m.launcher_shortcut_app_command,
     unavailable: m.launcher_shortcut_unavailable,
@@ -115,15 +117,18 @@
 
   onMount(() => {
     void refresh();
-    // Permission is granted in System Settings, which tells nobody; look
-    // again while this page is waiting for it, and only then.
-    const poll = setInterval(() => {
-      if (waiting && document.visibilityState === "visible") void refresh();
-    }, 1500);
     return () => {
-      clearInterval(poll);
       if (recording) void commands.launcherRecordShortcut(false).catch(() => {});
     };
+  });
+  // Permission is granted in System Settings, which tells nobody; look
+  // again while this page is waiting for it, and only then.
+  $effect(() => {
+    if (!waiting) return;
+    const poll = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 1500);
+    return () => clearInterval(poll);
   });
 </script>
 

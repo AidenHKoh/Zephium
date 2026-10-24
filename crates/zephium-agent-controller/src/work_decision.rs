@@ -60,12 +60,56 @@ impl AgentWorkController {
                         frame.completeness() == SemanticCompleteness::Complete
                     }),
                 })?;
-            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             if session.decisions.is_none() || progress == AgentWorkTaskProgress::Complete {
                 break;
             }
+            let actions_only = session.actions_only_decisions();
+            if state
+                .decision_answers
+                .as_ref()
+                .is_some_and(|answers| !answers.matches_observation(&observation, session.account))
+            {
+                state.decision_answers = None;
+            }
             if state.decision_answers.is_none() {
-                if !state.human_request {
+                if actions_only {
+                    if state.task.human_wall(&observation).is_some()
+                        || looks_like_human_challenge(&observation)
+                    {
+                        let (fresh, held) =
+                            Self::settle_human_challenge(state, worker, browser, observation)
+                                .await?;
+                        observation = fresh;
+                        captured_at = SemanticCaptureInstant::from_millis(
+                            state
+                                .session
+                                .as_mut()
+                                .ok_or_else(|| crate::contract!())?
+                                .policy_now()
+                                .map_err(AgentWorkFailure::Browser)?
+                                .millis(),
+                        );
+                        progress = state.task_progress(&observation)?;
+                        if held {
+                            return Ok((observation, captured_at, progress, true));
+                        }
+                    }
+                    state.refresh_account(worker, browser)?;
+                    let authority = state.action_authority(&observation)?;
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+                    if session.account.account() != AgentAccountScope::Anonymous {
+                        break;
+                    }
+                    state.decision_answers = Self::provider(
+                        &mut state.native,
+                        worker,
+                        browser,
+                        session.cancellation.clone(),
+                        session.decide_observation(&observation, &authority, None, false),
+                    )
+                    .await?;
+                } else if !state.human_request {
                     if Self::classify_human_challenge(
                         state,
                         worker,
@@ -85,7 +129,7 @@ impl AgentWorkController {
                         state
                             .session
                             .as_mut()
-                            .ok_or(AgentWorkFailure::Contract)?
+                            .ok_or_else(|| crate::contract!())?
                             .policy_now()
                             .map_err(AgentWorkFailure::Browser)?
                             .millis(),
@@ -100,6 +144,13 @@ impl AgentWorkController {
                 }
             }
             let Some(mut answers) = state.decision_answers.take() else {
+                if actions_only {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::Unavailable,
+                        ))?;
+                }
                 break;
             };
             // A catalog read finishes from the records it found, after at most
@@ -109,9 +160,9 @@ impl AgentWorkController {
             if let Some(schema) = state
                 .extraction_schema
                 .clone()
-                .filter(SemanticExtractionSchema::is_row_collection)
+                .filter(|schema| !actions_only && schema.is_row_collection())
             {
-                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 if let Some(discovery) = answers
                     .take_row_discovery(&observation, session.account, &schema)
                     .map_err(AgentWorkFailure::DecisionRead)?
@@ -155,8 +206,8 @@ impl AgentWorkController {
             }
             let mut gap: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
             let mut candidate: Option<Box<zephium_agentic::DecisionReadSelection>> = None;
-            if let Some(schema) = state.extraction_schema.clone() {
-                let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            if let Some(schema) = state.extraction_schema.clone().filter(|_| !actions_only) {
+                let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                 if let Some((selection, ready)) = answers
                     .take_read_progress_retaining_evidence(
                         &observation,
@@ -192,7 +243,7 @@ impl AgentWorkController {
                     });
                     if ready || confirmed.is_some() || joined.is_some() {
                         state.refresh_account(worker, browser)?;
-                        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
                         // The earlier look's values come from the evidence it
                         // retained, cited under the current observation.
                         let evidence = std::mem::take(&mut state.retained_read_evidence);
@@ -248,7 +299,7 @@ impl AgentWorkController {
                     }
                 }
             }
-            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             let more_below = answers
                 .take_more_below(&observation, session.account)
                 .map_err(AgentWorkFailure::DecisionMoreBelow)?;
@@ -258,7 +309,7 @@ impl AgentWorkController {
                 && session
                     .policy
                     .remaining_operations(session.lease.lease())
-                    .map_err(|_| AgentWorkFailure::Contract)?
+                    .map_err(|_| crate::contract!())?
                     >= 3;
             // A consent dialog the wall head recognised is dismissed first by
             // the task's own recipe, once per read, with no provider choosing.
@@ -287,6 +338,21 @@ impl AgentWorkController {
                 matches!(selection.operation(), DecisionOperation::Scroll(_))
             }) && more_below != Some(true)
             {
+                if actions_only {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::ScrollUnverified,
+                        ))?;
+                }
+                break;
+            }
+            if actions_only && proposed.is_none() {
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::DecisionPlanner(
+                        AgentWorkDecisionRoute::Uncertain,
+                    ))?;
                 break;
             }
             // Rust's own re-observation is optimistic: if the page refuses it,
@@ -358,7 +424,7 @@ impl AgentWorkController {
                             }) {
                                 state.refresh_account(worker, browser)?;
                                 let session =
-                                    state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+                                    state.session.as_ref().ok_or_else(|| crate::contract!())?;
                                 let located = match gap.prepare_completing(
                                     &observation,
                                     session.account,
@@ -387,20 +453,50 @@ impl AgentWorkController {
                 }
             };
             let _ = gap;
-            let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
             let Some(recipe) = state
                 .task
                 .decision_action_recipe(selection.operation(), &observation)?
             else {
+                if actions_only {
+                    let reason = match selection.operation() {
+                        DecisionOperation::Type(_) => AgentWorkDecisionRoute::TextRequired,
+                        DecisionOperation::Done => AgentWorkDecisionRoute::CompletionUnverified,
+                        DecisionOperation::Blocked => AgentWorkDecisionRoute::BlockUnverified,
+                        _ => AgentWorkDecisionRoute::Unsupported,
+                    };
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(reason))?;
+                }
                 break;
             };
+            let progress_key = recipe.progress_fingerprint(&observation);
+            if actions_only && state.no_progress.refuses(progress_key) {
+                state
+                    .journal_mut()?
+                    .emit(AgentWorkEventKind::DecisionPlanner(
+                        AgentWorkDecisionRoute::NoProgress,
+                    ))?;
+                break;
+            }
             let frames = observation
                 .frames()
                 .iter()
                 .map(|frame| frame.frame().clone())
                 .collect::<Vec<_>>();
             let batch = SemanticActionBatchId::new(session.next_action)
-                .ok_or(AgentWorkFailure::Contract)?;
+                .ok_or_else(|| crate::contract!())?;
+            // A step Rust takes on answers an earlier look gave (a scroll to
+            // find more rows, a disclosure) may act on a look no model has
+            // been sent: the look taints the run as a model's reading would,
+            // as for Rust's own consent press.
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+            let account = session.account;
+            session
+                .policy
+                .admit_owned_observation(&observation, account)
+                .map_err(|_| crate::contract!())?;
             let proposal = match crate::AgentBrowserActionProposal::bind_decision(
                 selection,
                 recipe,
@@ -414,13 +510,33 @@ impl AgentWorkController {
             };
             let assessment = match state.task.assess_observed(proposal.action(), &observation) {
                 Ok(assessment) => assessment,
-                Err(AgentWorkFailure::ActionDenied) => break,
+                Err(AgentWorkFailure::ActionDenied) => {
+                    if actions_only {
+                        state
+                            .journal_mut()?
+                            .emit(AgentWorkEventKind::DecisionPlanner(
+                                AgentWorkDecisionRoute::Policy,
+                            ))?;
+                    }
+                    break;
+                }
+                Err(AgentWorkFailure::EffectRequired(_)) if actions_only => {
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::Policy,
+                        ))?;
+                    break;
+                }
                 Err(error) => return Err(error),
             };
             state
                 .journal_mut()?
                 .emit(AgentWorkEventKind::ToolProposed(AgentBrowserToolKind::Act))?;
             Self::retain_action_read_evidence(state, &proposal, &observation, captured_at)?;
+            if actions_only {
+                state.no_progress.remember(progress_key);
+            }
             let executed = Self::execute_prepared_action(
                 state,
                 worker,
@@ -432,6 +548,41 @@ impl AgentWorkController {
             .await;
             let (current, at, transition) = match executed {
                 Ok(settled) => settled,
+                Err(AgentWorkFailure::Browser(error))
+                    if actions_only
+                        && matches!(
+                            error,
+                            AgentBrowserProviderError::Action(_)
+                                | AgentBrowserProviderError::ActionRejected(_)
+                                | AgentBrowserProviderError::ActionUnverified
+                        ) =>
+                {
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+                    let _ = session.take_rejected_refusal();
+                    if !session
+                        .close_failed_owned_action()
+                        .map_err(AgentWorkFailure::Browser)?
+                    {
+                        return Err(AgentWorkFailure::Browser(error));
+                    }
+                    state
+                        .journal_mut()?
+                        .emit(AgentWorkEventKind::DecisionPlanner(
+                            AgentWorkDecisionRoute::NativeRefused,
+                        ))?;
+                    observation = Box::pin(Self::observe(state, worker, browser)).await?;
+                    captured_at = SemanticCaptureInstant::from_millis(
+                        state
+                            .session
+                            .as_mut()
+                            .ok_or_else(|| crate::contract!())?
+                            .policy_now()
+                            .map_err(AgentWorkFailure::Browser)?
+                            .millis(),
+                    );
+                    progress = state.task_progress(&observation)?;
+                    break;
+                }
                 Err(AgentWorkFailure::Browser(AgentBrowserProviderError::Action(_)))
                     if reobserving =>
                 {
@@ -441,7 +592,7 @@ impl AgentWorkController {
             };
             let batch = transition
                 .batch_result()
-                .ok_or(AgentWorkFailure::Contract)?;
+                .ok_or_else(|| crate::contract!())?;
             unchanged = if batch
                 .final_state()
                 .and_then(SemanticActionResult::diff)
@@ -459,6 +610,9 @@ impl AgentWorkController {
             captured_at = at;
             progress = state.task_progress(&observation)?;
             if unchanged >= MAX_UNCHANGED_DECISION_OBSERVATIONS {
+                if actions_only {
+                    break;
+                }
                 return Err(AgentWorkFailure::Browser(
                     AgentBrowserProviderError::NoProgress,
                 ));
@@ -483,7 +637,7 @@ impl AgentWorkController {
     ) -> Result<bool, AgentWorkFailure> {
         state.refresh_account(worker, browser)?;
         let mut cells = if discovery.needs_cells() {
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
             Self::provider(
                 &mut state.native,
                 worker,
@@ -495,7 +649,7 @@ impl AgentWorkController {
         } else {
             None
         };
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         let found = u8::try_from(discovery.rows()).unwrap_or(u8::MAX);
         let asked = cells.is_some();
         let prepared = discovery.prepare(observation, session.account, captured_at, cells.as_mut());
@@ -522,7 +676,7 @@ impl AgentWorkController {
         state.journal_mut()?.emit(AgentWorkEventKind::ToolProposed(
             AgentBrowserToolKind::Extract,
         ))?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let result = Self::provider(
             &mut state.native,
             worker,
@@ -532,14 +686,10 @@ impl AgentWorkController {
         )
         .await?;
         if state.task.accept_extraction(&result)? != AgentWorkTaskProgress::Complete {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         state.check_task_contract()?;
-        state.extraction = Some(
-            result
-                .into_owned()
-                .map_err(|_| AgentWorkFailure::Contract)?,
-        );
+        state.extraction = Some(result.into_owned().map_err(|_| crate::contract!())?);
         Ok(())
     }
 
@@ -554,7 +704,7 @@ impl AgentWorkController {
                 state
                     .session
                     .as_ref()
-                    .ok_or(AgentWorkFailure::Contract)?
+                    .ok_or_else(|| crate::contract!())?
                     .check_live()
                     .map_err(AgentWorkFailure::Browser)?;
                 let read = read_semantic_observation_for_schema(
@@ -562,7 +712,7 @@ impl AgentWorkController {
                     SemanticReadAuthority::Acknowledged(proposal.baseline()),
                     captured_at,
                     SemanticReadSensitivityLimit::PublicOnly,
-                    SemanticReadBudget::STANDARD,
+                    schema.extraction_read_budget(),
                     schema,
                 )
                 .map_err(|error| {
@@ -595,7 +745,24 @@ impl AgentWorkController {
         AgentWorkFailure,
     > {
         state.refresh_account(worker, browser)?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let rewritable = state.task.rewritable_field(proposal.action(), baseline);
+        let discard_listing_view = state
+            .extraction_schema
+            .as_ref()
+            .is_some_and(SemanticExtractionSchema::is_row_collection)
+            && !Self::preserves_listing_view(
+                proposal.action().kind(),
+                baseline.frames().iter().find_map(|frame| {
+                    proposal
+                        .action()
+                        .target_node(frame)
+                        .map(SemanticNode::reference)
+                }),
+                baseline,
+            );
+        let predecessor = proposal.baseline().clone();
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+        session.rewritable_fill = rewritable;
         let id = state.native.identity.id();
         let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
         let automation = if let Some(retained) = &state.native.retained {
@@ -607,6 +774,14 @@ impl AgentWorkController {
                 .automation_state(id)
                 .map_err(|_| AgentWorkFailure::Context)?
         };
+        if discard_listing_view {
+            state
+                .retained_read_evidence
+                .discard_view_before_action(&predecessor)
+                .map_err(|error| {
+                    AgentWorkFailure::Browser(AgentBrowserProviderError::Read(error))
+                })?;
+        }
         let request = session
             .authorize_action(
                 proposal,
@@ -622,7 +797,9 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session)
         {
-            let request = request.with_follow(state.follow.clone());
+            let request = request
+                .with_follow(state.follow.clone())
+                .with_settle_quiet();
             if state.consent_press {
                 request.with_consent()
             } else {
@@ -661,11 +838,11 @@ impl AgentWorkController {
         };
         state.native.action_pending = false;
         state.native_terminal = Some(terminal);
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let terminal = state
             .native_terminal
             .take()
-            .ok_or(AgentWorkFailure::Contract)?;
+            .ok_or_else(|| crate::contract!())?;
         let mut wake = session
             .begin_action_settlement(terminal)
             .map_err(AgentWorkFailure::Browser)?;
@@ -693,13 +870,17 @@ impl AgentWorkController {
                 .map_err(AgentWorkFailure::Browser)?;
         }
         if wake.is_some() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
         state.journal_mut()?.emit(AgentWorkEventKind::Verifying)?;
         // A step that loaded a new page on the site is verified once that
         // page has settled; a page still loading is looked at again, briefly.
         let mut waits = 0u8;
+        // Evidence is dated by when its look began: a slow capture on a
+        // throttled page still shows the page as it was within the window.
+        let mut looked;
         let current = loop {
+            looked = Self::look_begins(state)?;
             match Self::observe(state, worker, browser).await {
                 Err(AgentWorkFailure::Observation(
                     SemanticRuntimePortFailure::NotReady
@@ -737,7 +918,7 @@ impl AgentWorkController {
             .as_ref()
             .is_some_and(AgentNavigationDiscovery::is_site_session);
         for _ in 0..if site_app { 4 } else { 0 } {
-            let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
             let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
             if !session.action_awaits_page_change(
                 &current,
@@ -758,21 +939,78 @@ impl AgentWorkController {
                 }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
             }
+            looked = Self::look_begins(state)?;
             current = Self::observe(state, worker, browser).await?;
         }
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
-        let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+        // A tab's panel or a sheet a click opened can still be drawing when
+        // the click is proven: Expedia's flight form was not there yet.
+        for _ in 0..if site_app { 3 } else { 0 } {
+            let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+            let now = session.policy_now().map_err(AgentWorkFailure::Browser)?;
+            if !session
+                .action_may_still_draw(&current, SemanticSettleInstant::from_millis(now.millis()))
+            {
+                break;
+            }
+            let wake =
+                Instant::now() + Duration::from_millis(crate::action::PAGE_CHANGE_LOOK_MILLIS);
+            if wake >= state.native.deadline {
+                break;
+            }
+            tokio::select! {
+                biased;
+                event = state.native.next_event(worker, browser) => {
+                    state.native.retain(event?)?;
+                    return Err(AgentWorkFailure::Mailbox);
+                }
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+            }
+            looked = Self::look_begins(state)?;
+            let next = Self::observe(state, worker, browser).await?;
+            let settled = look_digest(&next) == look_digest(&current);
+            current = next;
+            if settled {
+                break;
+            }
+        }
+        // The model is shown the page an action opened up (a filter panel, a
+        // long results list) by its leading part, as a first look is, and the
+        // action is verified on that same look.
+        let current = Self::fit_model_observation(current)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let (_, transition) = session
             .verify_action_settlement(
                 baseline,
                 &current,
-                SemanticSettleInstant::from_millis(now.millis()),
+                SemanticSettleInstant::from_millis(looked.millis()),
             )
             .map_err(AgentWorkFailure::Browser)?;
         Ok((
             current,
-            SemanticCaptureInstant::from_millis(now.millis()),
+            SemanticCaptureInstant::from_millis(looked.millis()),
             transition,
         ))
     }
+
+    fn look_begins(state: &mut WorkState) -> Result<AgentPolicyInstant, AgentWorkFailure> {
+        state
+            .session
+            .as_mut()
+            .ok_or_else(|| crate::contract!())?
+            .policy_now()
+            .map_err(AgentWorkFailure::Browser)
+    }
+}
+
+/// What a look shows, by role, name, text and value: two equal digests are
+/// the same page drawn twice.
+fn look_digest(observation: &SemanticObservation) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in observation.frames().iter().flat_map(|frame| frame.nodes()) {
+        format!("{:?}{:?}", node.role(), node.states()).hash(&mut hasher);
+        node.name().map(|name| name.as_str()).hash(&mut hasher);
+        node.text().map(|text| text.as_str()).hash(&mut hasher);
+    }
+    hasher.finish()
 }

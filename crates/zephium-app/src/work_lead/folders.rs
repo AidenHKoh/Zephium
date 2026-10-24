@@ -139,22 +139,31 @@ pub(crate) fn earlier(
         {
             add(&mut granted, folder);
         }
-        for step in &execution.steps {
-            if let WorkStepKindV1::Ask {
-                purpose: Some(WorkAskPurposeV1::Folder),
-                answer: Some(answer),
-                ..
-            } = &step.kind
-            {
-                if let Some(folder) = step.local.as_ref().and_then(|l| l.folder.clone()) {
-                    if answer == ALLOW {
-                        add(&mut allowed, folder);
-                    }
-                }
-            }
+        for folder in execution.steps.iter().filter_map(allowed_answer) {
+            add(&mut allowed, folder);
         }
     }
     (granted, allowed)
+}
+
+/// Only a settled human answer can carry a folder choice across follow-ups.
+fn allowed_answer(step: &WorkStepFact) -> Option<String> {
+    if step.status != WorkStepStatus::Succeeded {
+        return None;
+    }
+    let WorkStepKindV1::Ask {
+        purpose: Some(WorkAskPurposeV1::Folder),
+        answer: Some(answer),
+        ..
+    } = &step.kind
+    else {
+        return None;
+    };
+    if answer == ALLOW {
+        chosen_root(step.local.as_ref()?.folder.as_deref()?)
+    } else {
+        chosen_root(answer)
+    }
 }
 
 /// This request's own folders are the canvas's folders no earlier request
@@ -286,6 +295,20 @@ pub(crate) fn resolve(named: &str, home: &Path) -> Option<PathBuf> {
 /// this run's grant at once, under the same policy as a folder given with
 /// the request. Returns the lead's tool result.
 pub(crate) async fn request(run: &LeadRun, named: &str, why: &str) -> (String, bool) {
+    if named.trim().is_empty() {
+        return if choose(run, why, None).await {
+            (
+                "The person chose a folder; this run can use it now. Continue the computer work."
+                    .into(),
+                false,
+            )
+        } else {
+            (
+                "No folder was chosen. Do not guess a path or ask again in this run.".into(),
+                true,
+            )
+        };
+    }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return ("No home folder on this Mac".into(), true);
     };
@@ -370,6 +393,61 @@ pub(crate) async fn request(run: &LeadRun, named: &str, why: &str) -> (String, b
     }
 }
 
+/// No inferred location: only the native picker's returned path can grant a root.
+pub(crate) async fn choose(
+    run: &LeadRun,
+    why: &str,
+    part: Option<zephium_core::work::WorkPartId>,
+) -> bool {
+    let mut chosen = run.folder_picker.lock().await;
+    if run.files().is_some() {
+        return true;
+    }
+    if let Some(answered) = *chosen {
+        return answered;
+    }
+    if run.cancelled().await {
+        return false;
+    }
+    let why = super::call::clip(why.trim(), 160);
+    let prompt = if why.is_empty() {
+        "Choose a folder?".to_owned()
+    } else {
+        format!("Choose a folder? {why}")
+    };
+    let answer = run
+        .ask_with(
+            WorkAskPurposeV1::Folder,
+            prompt,
+            vec![CHOOSE.into(), NOT_NOW.into()],
+            part,
+            Some(WorkLocalStepV1::default()),
+        )
+        .await;
+    let granted = match answer {
+        Ok(Some(answer)) => chosen_root(&answer)
+            .map(|root| {
+                run.grant_folder(&root);
+            })
+            .is_some(),
+        _ => false,
+    };
+    *chosen = Some(granted);
+    granted
+}
+
+fn chosen_root(answer: &str) -> Option<String> {
+    // Button labels and a model's relative/default location are never a choice.
+    if !Path::new(answer).is_absolute() || matches!(answer, ALLOW | CHOOSE | NOT_NOW) {
+        return None;
+    }
+    let (grant, _) = crate::work_files::WorkFileGrant::admit(&[answer.to_owned()]);
+    grant
+        .roots()
+        .first()
+        .map(|root| root.to_string_lossy().into_owned())
+}
+
 /// Lines for the lead's context about the folders it may read.
 pub(crate) fn context(run: &LeadRun, named: &[Named]) -> String {
     let folders = run.folders();
@@ -406,6 +484,59 @@ pub(crate) fn context(run: &LeadRun, named: &[Named]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picker_answers_persist_only_real_settled_roots_without_a_starting_path() {
+        let folder = tempfile::Builder::new()
+            .prefix("zephium-picker-home-")
+            .tempdir()
+            .unwrap();
+        let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
+        let project = folder.path().join("Documents/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let canonical = project
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let step = |answer: &str, status: &str| {
+            serde_json::from_value::<WorkStepFact>(serde_json::json!({
+            "id":"01M4K000000000000000000001","turn":1,"status":status,"local":{},
+            "kind":{"kind":"ask","purpose":"folder","prompt":"Choose a folder?","options":[CHOOSE,NOT_NOW],"answer":answer}
+        })).unwrap()
+        };
+        assert_eq!(
+            allowed_answer(&step(&canonical, "succeeded")),
+            Some(canonical.clone())
+        );
+        assert!(allowed_answer(&step(&canonical, "cancelled")).is_none());
+        for label in [ALLOW, CHOOSE, NOT_NOW] {
+            assert!(allowed_answer(&step(label, "succeeded")).is_none());
+        }
+    }
+
+    #[test]
+    fn a_pathless_picker_never_grants_a_button_label_or_default_root() {
+        for answer in ["", ALLOW, CHOOSE, NOT_NOW, "Documents", "~/Documents", "/"] {
+            assert!(chosen_root(answer).is_none(), "{answer}");
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(chosen_root(&home).is_none());
+        }
+        let folder = tempfile::Builder::new()
+            .prefix("zephium-picker-home-")
+            .tempdir()
+            .unwrap();
+        let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
+        let project = folder.path().join("Documents/project");
+        std::fs::create_dir_all(&project).unwrap();
+        let canonical = project
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(chosen_root(&canonical), Some(canonical));
+    }
 
     #[test]
     fn paths_in_a_request_are_found_once_without_their_punctuation() {

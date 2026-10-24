@@ -1,6 +1,6 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { flushSync } from "svelte";
-import type { ItemsState, TabMenuContext, TabView } from "$shared/ipc/bindings";
+import type { ItemsState, SpaceLookInputV1, TabMenuContext, TabView } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -15,6 +15,7 @@ export const splitGroup = () => state.split_group;
 export const profile = () => state.profile;
 export const spaces = () => state.spaces;
 export const activeSpaceId = () => state.active_space_id;
+export const activeSpace = () => state.spaces.find((space) => space.id === state.active_space_id);
 export const sidebarNodes = () => state.nodes;
 export const activeTab = (): TabView | undefined =>
   state.tabs.find((tab) => tab.id === state.active);
@@ -113,6 +114,13 @@ export function dispose() {
 export const open = () => void commands.tabsOpen();
 export const activate = (id: string) => void commands.tabsActivate(id);
 export const close = (id: string) => void commands.tabsClose(id);
+/** The window's one tab, with nothing open in it yet. Closing it would only
+ *  put another empty tab in its place, so it offers no close. */
+export const loneNewTab = (id: string) => {
+  const all = state.tabs;
+  const tab = all.length === 1 ? all[0] : undefined;
+  return tab?.id === id && !tab.url && (tab.content ?? "web") === "web";
+};
 export const navigate = (id: string, input: string) => void commands.tabsNavigate(id, input);
 
 const onActive = (fn: (id: string) => void) => () => {
@@ -195,3 +203,16 @@ function copyLink(url: string | null | undefined): Promise<boolean> {
     () => false,
   );
 }
+
+/** Space intents settle on native's answer; the projection carries the result. */
+export const switchSpace = (id: string) => settle(commands.spacesSwitch(id));
+export const stepSpace = (step: 1 | -1) => settle(commands.spacesStep(step));
+export const createSpace = (name: string, look: SpaceLookInputV1) =>
+  settle(commands.spacesCreate(name, look));
+export const updateSpace = (id: string, name: string, look: SpaceLookInputV1) =>
+  settle(commands.spacesUpdate(id, name, look));
+export const deleteSpace = (id: string) => settle(commands.spacesDelete(id));
+export const reorderSpace = (id: string, before: string | null) =>
+  settle(commands.spacesReorder(id, before));
+export const moveTabToSpace = (tab: string, space: string) =>
+  settle(commands.spacesMoveTab(tab, space));

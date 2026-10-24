@@ -4,12 +4,14 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
-//! Read-only ordinary-profile authority for the Windows agent cookie bridge.
+//! Ordinary-profile authority for the Windows agent cookie bridge.
 //!
 //! This is the sole seam allowed to join private agent execution to ordinary
 //! Browse storage. It exposes only an attested profile-scoped native cookie
 //! manager to the sibling host owner; no `ItemId`, cookie field, page value,
 //! extension principal, or model-facing representation crosses the seam.
+//! The manager is read to refresh a Work site store, and written only by a
+//! site-scoped add-or-update that returns a sign-in made in a Work page.
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2CookieManager, ICoreWebView2Environment,

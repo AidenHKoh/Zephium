@@ -47,6 +47,8 @@ mod native;
 mod native_work_clock;
 #[cfg(feature = "native-work")]
 mod open_objective;
+#[cfg(feature = "durable-runtime")]
+pub mod page_assist;
 #[cfg(feature = "macos-work")]
 pub use native::NativeWorkComposition as MacosWorkComposition;
 #[cfg(feature = "native-work")]
@@ -94,3 +96,5 @@ pub mod retained_qualification;
 
 #[cfg(feature = "durable-runtime")]
 mod human;
+#[cfg(feature = "durable-runtime")]
+pub use human::WaitingHumanPage;

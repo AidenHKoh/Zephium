@@ -55,11 +55,13 @@ impl WorkPublicSearchProvider for NoSearch {
 
 #[tokio::test]
 async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
-    for (unknown, slow, slow_fails) in [
-        (false, false, false),
-        (true, false, false),
-        (false, true, false),
-        (false, true, true),
+    for (unknown, slow, slow_fails, turn_limit) in [
+        (false, false, false, false),
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, true, true, false),
+        (false, false, false, true),
+        (false, false, true, true),
     ] {
         let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
         let (mut shell, queue, handle, profile) = fixture(store);
@@ -89,6 +91,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -99,6 +102,7 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -170,10 +174,17 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }
                                 }),
                                 intervention: None,
-                                measurements: None,
+                                measurements: ((first || retry_failed) && turn_limit).then(|| {
+                                    WorkStepMeasurementsV1 {
+                                        outcome: Some(WorkPageOutcomeV1::TooManySteps),
+                                        ..Default::default()
+                                    }
+                                }),
                                 // The first page's human check was taken and continued.
-                                helped: first && !slow,
-                                note: if first {
+                                helped: first && !slow && !turn_limit,
+                                note: if first && turn_limit {
+                                    None
+                                } else if first {
                                     Some(
                                         if slow {
                                             read_note::CONSTRUCTION_TIMEOUT
@@ -202,7 +213,10 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                                     }]
                                 },
                                 held_back: false,
+                                committed: Vec::new(),
                                 rerun: false,
+                                search: None,
+                                redirect: None,
                             })
                         }
                     },
@@ -423,6 +437,7 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -433,6 +448,7 @@ async fn work_parallel_searches_share_and_recalculate_the_remaining_grant() {
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,
@@ -514,6 +530,7 @@ impl WorkPublicSearchProvider for RankedSearch {
                             title: id.to_string(),
                             start_index: id * 2,
                             end_index: id * 2 + 1,
+                            snippet: None,
                         })
                         .collect(),
                     actual_input_tokens: 100,
@@ -644,6 +661,7 @@ async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unkno
                         command: WorkCommandId::generate(),
                         intent: WorkRuntimeIntent::BeginAgent {
                             grant: WorkAgentGrantV1 {
+                                draft: None,
                                 lead: None,
                                 provider: WorkSearchProvider::OpenAi,
                                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -654,6 +672,7 @@ async fn work_search_ranking_preserves_sources_and_accounts_for_refused_or_unkno
                                 accounts: Vec::new(),
                                 private: false,
                                 skill: None,
+                                search_fallback: None,
                             },
                             limits: WorkExecutionLimits {
                                 model_tokens: 100_000,

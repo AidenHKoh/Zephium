@@ -1,5 +1,6 @@
 import { commands } from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
+import { tabs } from "$domain/tabs";
 let id = $state<string | null>(null);
 let over = $state(false);
 let failed = $state(false);
@@ -13,8 +14,17 @@ export function begin(value: string) {
   id = value;
   failed = false;
 }
+/** Only a web page can be kept: a tab with nothing open yet, or one the
+ *  browser itself owns, has no site to keep. */
+export function keepable(value: string) {
+  const tab = tabs.tabs().find((candidate) => candidate.id === value);
+  return !!tab?.url && (tab.content ?? "web") === "web";
+}
 export function hover(x: number, y: number) {
-  over = !!document.elementFromPoint(x, y)?.closest("[data-essentials-drop]");
+  over =
+    id !== null &&
+    keepable(id) &&
+    !!document.elementFromPoint(x, y)?.closest("[data-essentials-drop]");
 }
 export function end() {
   const active = id !== null;

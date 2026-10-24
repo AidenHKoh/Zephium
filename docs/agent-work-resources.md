@@ -397,6 +397,58 @@ reloads, unsolicited destinations and observed post-ready location changes
 cannot authorize a replacement document. The empty-source construction path is
 retained but cannot issue an observation.
 
+A public document's first load is the one exception to "refused means lost".
+When a public policy's gate refuses a main-frame GET while its initial load
+is loading, committed or finalizing (a server redirect, or the page's script
+replacing it before it is ready), and the destination is a safe public HTTPS
+address a new public read could be admitted to, the gate keeps it and ends
+the document at once. The view reports that through its own redirect callback,
+never the invariant callback: the native guard records the destination in the
+construction's `WorkBrowserRedirect` slot (bound only to anonymous public
+construction) and fails, the content-free cause is `Redirected`, and the
+application names the read's failure `AgentWorkFailure::Redirected`. The
+destination never enters diagnostics. Any other refusal (after ready, an
+unsafe destination, the requested address itself, `Exact` and site-session
+policies) keeps today's failure. Windows applies the same gate to WebView2's
+navigation-starting requests for the main frame.
+
+`PublicResultsPage` is a browser search's results page. Like a site session,
+its gate follows same-site GET loads (registrable domain, safe public HTTPS)
+until the first document is ready, at most six, and the settled document may
+sit on another origin of the site; a cross-site load is refused. Once ready it
+is held like `PublicSameDocumentQuery`. A load the gate follows after a commit
+prepares the semantic runtime for the new document, as an action's own load
+does, so the next commit is not a replaced-document invariant; site sessions
+share this.
+
+A site session's first document may also reload itself once it is ready:
+the same scheme, host and path (any query), within 20 s of its commit, before
+any action or successor navigation, and within the same six loads. Bot checks
+(AWS WAF, DataDome's device check, Amazon's interstitial) serve an empty page
+that reloads itself once the check clears; cancelling that reload left the
+task on an empty shell. The reload settles like an action's hand-on load, and a
+document a hand-on load put in place is enrolled in Work history before the
+next admitted navigation parks its runtime. The same early self-reload, or the
+same path on the brand's country domain (yelp.com to yelp.pl, from the closed
+brand list), is followed the same way.
+
+Any other same-site GET a ready site-session page starts by itself, with no
+action of the model's in flight (a bot check that cleared after a navigation,
+a timed refresh, a script redirect), is cancelled and kept for the controller
+in the run's follow slot, which the gate learns with the run's first action.
+The controller follows it through the policy as its own navigation before the
+page agent's next step: the pending step is retired unexecuted, the load gets
+its own navigation receipt, and the account and context move to the new
+document exactly as after an admitted navigation. Following the load in the
+gate instead (as the first page's reload is) left the session bound to the
+old document and ended the page with `Account(ContextChanged)`. A page that
+reloads itself may be followed to its own address; a model navigation there
+is still refused as already open. Cross-site loads stay cancelled.
+
+WebKit navigation ids are object addresses and can be reused by a later load.
+A load starting while the gate waits for its armed load is that load, even when
+its id equals the superseded one's.
+
 `construct_document_with_policy` additionally offers the explicit trusted
 `InitialQueryFinalization` startup policy. `Exact` remains the default (and the
 synthetic retained fixture policy). This opt-in accepts only an initially

@@ -20,6 +20,7 @@
     file: () => import("./File.svelte"),
     folder: () => import("./Folder.svelte"),
     project: () => import("./Project.svelte"),
+    subject: () => import("./Subject.svelte"),
   };
   const loaded: Partial<Record<ObjectKind, Renderer>> = {};
 </script>
@@ -62,4 +63,8 @@
 </script>
 
 {#if object.kind === "reply"}<Reply {object} {centre} />
+{:else if object.kind === "sheet" && actions.edit}{#await import("./TableBlock.svelte") then block}<block.default
+      {object}
+      {actions}
+    />{/await}
 {:else if Drawn}<Drawn {object} {actions} {centre} />{/if}

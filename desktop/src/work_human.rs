@@ -13,6 +13,7 @@ enum Operation {
     Present(WorkHumanPageIdV1, WorkHumanRegionV1),
     Continue(WorkHumanPageIdV1, WorkHumanAccountV1),
     Release(WorkHumanPageIdV1),
+    Extend(WorkHumanPageIdV1),
 }
 async fn human_command(
     caller: WebviewWindow,
@@ -45,6 +46,10 @@ async fn human_command(
                 }
                 Operation::Release(id) => {
                     browser.release_human_page(profile, work, id)?;
+                    true
+                }
+                Operation::Extend(id) => {
+                    browser.extend_human_page(profile, work, id)?;
                     true
                 }
             };
@@ -138,4 +143,61 @@ pub(crate) async fn work_human_release(
         Operation::Release(page),
     )
     .await
+}
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_human_extend(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    page: WorkHumanPageIdV1,
+) -> WorkHumanResponseV1 {
+    human_command(caller, app, expected_profile, work, Operation::Extend(page)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_human_check(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    expected_profile: String,
+    work: WorkId,
+    page: WorkHumanPageIdV1,
+) -> WorkHumanCheckResponseV1 {
+    let outcome = async {
+        if !crate::authorize(&caller, crate::CallerPolicy::Main, "work_human") {
+            return WorkHumanCheckOutcomeV1::Unavailable;
+        }
+        let Ok(profile) = selected_work(&app, &expected_profile, work).await else {
+            return WorkHumanCheckOutcomeV1::Unavailable;
+        };
+        #[cfg(all(
+            feature = "work-product",
+            any(target_os = "macos", target_os = "windows")
+        ))]
+        {
+            app.state::<WorkProductState>()
+                .providers
+                .browser
+                .check_human_page(profile, work, page)
+                .await
+        }
+        #[cfg(not(all(
+            feature = "work-product",
+            any(target_os = "macos", target_os = "windows")
+        )))]
+        {
+            let _ = profile;
+            WorkHumanCheckOutcomeV1::Unavailable
+        }
+    }
+    .await;
+    WorkHumanCheckResponseV1 {
+        version: 1,
+        profile: expected_profile,
+        work,
+        page,
+        outcome,
+    }
 }

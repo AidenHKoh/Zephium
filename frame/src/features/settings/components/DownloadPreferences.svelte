@@ -17,19 +17,19 @@
   });
 </script>
 
-{#if session.error}<p role="alert">
-    {session.error === "unsupported"
-      ? m.download_error_unsupported()
-      : m.download_error_unavailable()}
-  </p>{/if}
-{#if !session.preferences && !session.error}<p role="status">
-    {m.download_settings_loading()}
-  </p>{/if}
-<SettingsGroup title={m.section_downloads()}>
+<SettingsGroup
+  title={m.section_downloads()}
+  description={session.error === "unsupported"
+    ? m.download_error_unsupported()
+    : session.error
+      ? m.download_error_unavailable()
+      : undefined}
+>
   <SettingsRow
     settingId="downloads.path"
     title={m.pref_downloads_path()}
-    description={session.preferences?.directory ?? m.download_default_directory()}
+    description={session.preferences?.directory ??
+      (session.error ? m.download_default_directory() : m.download_settings_loading())}
   >
     <Button
       disabled={session.busy || !session.preferences || !session.supported}

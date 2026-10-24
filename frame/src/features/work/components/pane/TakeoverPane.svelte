@@ -3,7 +3,7 @@
   import type { WorkHumanAccountV1 } from "$shared/ipc/bindings";
   import Button from "$shared/ui/Button";
   import { paneGeometry, remember, type PaneRect } from "../../lib/pane-geometry";
-  import { countdownLabel, reasonSentence, type HumanPage } from "../../lib/work-human";
+  import { countdownLabel, reasonSentence, remembers, type HumanPage } from "../../lib/work-human";
   import * as m from "$shared/i18n/messages";
   let {
     host,
@@ -111,14 +111,16 @@
       /* synthetic pointers have no capture */
     }
   }
+  /** Once the page stands in the well, the well stays where it is. */
+  const fixed = $derived(page.phase !== "waiting_for_human");
   function beginMove(event: PointerEvent) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || fixed) return;
     if ((event.target as HTMLElement).closest("button, input, a")) return;
     drag = { kind: "move", edge: "", startX: event.clientX, startY: event.clientY, from: rect };
     capture(event);
   }
   function beginResize(event: PointerEvent, edge: string) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || fixed) return;
     drag = { kind: "resize", edge, startX: event.clientX, startY: event.clientY, from: rect };
     capture(event);
     event.preventDefault();
@@ -197,6 +199,7 @@
         <span class="skip">{m.work_human_release_help()}</span>
       </div>
     {/if}
+    {#if remembers(page) && !handingBack}<p class="kept">{m.work_human_remembers()}</p>{/if}
     {#if error}<p class="failed" role="alert">{error}</p>{/if}
   </div>
   <div
@@ -208,7 +211,7 @@
   >
     {#if !presented && !handingBack}<p class="placeholder">{m.work_human_opening()}</p>{/if}
   </div>
-  {#each ["n", "e", "s", "w", "ne", "se", "sw", "nw"] as edge (edge)}
+  {#each fixed ? [] : ["n", "e", "s", "w", "ne", "se", "sw", "nw"] as edge (edge)}
     <span
       class={`grip grip-${edge}`}
       role="presentation"
@@ -302,6 +305,7 @@
   }
 
   .handing,
+  .kept,
   .failed {
     margin: 0;
     font-size: var(--text-label);
@@ -309,6 +313,11 @@
 
   .handing {
     color: var(--color-muted);
+  }
+
+  .kept {
+    color: var(--color-faint);
+    font-size: var(--text-caption);
   }
 
   .failed {

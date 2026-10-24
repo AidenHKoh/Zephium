@@ -12,6 +12,7 @@ use zephium_core::ids::ProfileId;
 use zephium_core::work::{agent::*, search::*, synthesis::*};
 
 const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
+    draft: None,
     lead: None,
     provider: WorkSearchProvider::OpenAi,
     model: String::new(),
@@ -22,6 +23,7 @@ const GRANT: WorkAgentGrantV1 = WorkAgentGrantV1 {
     accounts: Vec::new(),
     private: false,
     skill: None,
+    search_fallback: None,
 };
 
 fn begin(work: WorkId, expected: WorkRevision, timeout_seconds: u32) -> WorkCommandV1 {
@@ -196,6 +198,7 @@ impl WorkPublicSearchProvider for Sources {
                             title: format!("Source {index}"),
                             start_index: 10 + index * 200,
                             end_index: 40 + index * 200,
+                            snippet: None,
                         })
                         .collect(),
                     answer,
@@ -233,7 +236,10 @@ async fn page(
                 measurements: None,
                 helped: false,
                 held_back: false,
+                committed: Vec::new(),
                 rerun: false,
+                search: None,
+                redirect: None,
             });
         }
         if !hang {
@@ -266,8 +272,50 @@ async fn page(
         measurements: None,
         helped: false,
         held_back: false,
+        committed: Vec::new(),
         rerun: false,
+        search: None,
+        redirect: None,
     })
+}
+
+#[tokio::test]
+async fn lifecycle_projection_waits_for_a_bounded_admission_slot() {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let work = new_work(&mut shell, &queue, &handle, "Read a public page").await;
+    let mut pending = Vec::new();
+    loop {
+        match handle.work_projection(profile, work) {
+            Ok(read) => {
+                pending.push(read);
+                assert!(pending.len() <= 8);
+            }
+            Err(WorkError::Capacity) => break,
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    assert!(!pending.is_empty());
+    let read = projection(&handle, profile, work);
+    tokio::pin!(read);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(read.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let state = drive(&mut shell, &queue, read).await;
+    assert_eq!(state.work.id, work);
+    drop(pending);
+}
+
+async fn admit<T>(submit: impl FnMut() -> Result<T, WorkError>) -> T {
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::work_runtime::admitted(submit),
+    )
+    .await
+    .expect("lifecycle admission remained full for a second")
+    .expect("lifecycle submission was refused")
 }
 
 async fn projection(
@@ -275,9 +323,8 @@ async fn projection(
     profile: ProfileId,
     work: WorkId,
 ) -> WorkRuntimeProjection {
-    let WorkReply::Runtime(state) = handle
-        .work_projection(profile, work)
-        .unwrap()
+    let WorkReply::Runtime(state) = admit(|| handle.work_projection(profile, work))
+        .await
         .await
         .unwrap()
         .reply
@@ -297,8 +344,8 @@ async fn command(
 ) {
     for _ in 0..40 {
         let state = projection(handle, profile, work).await;
-        let submitted = handle
-            .work_command(
+        let submitted = admit(|| {
+            handle.work_command(
                 profile,
                 WorkCommandV1 {
                     version: 1,
@@ -308,8 +355,9 @@ async fn command(
                     intent: intent.clone(),
                 },
             )
-            .unwrap()
-            .await;
+        })
+        .await
+        .await;
         match submitted {
             Ok(_) => return,
             Err(WorkError::Conflict) => tokio::time::sleep(Duration::from_millis(20)).await,
@@ -578,7 +626,8 @@ async fn work_stop_anywhere_settles_every_step_and_the_next_request_runs() {
             .steps
             .iter()
             .filter(|step| step.status != WorkStepStatus::Succeeded)
-            .all(|step| step.note.as_deref() == Some("Stopped by you")));
+            .all(|step| step.note.as_deref()
+                == Some("Stopped by you; any in-flight outcome remains unconfirmed")));
         if matches!(at, StopAt::Takeover) {
             assert_eq!(
                 execution.intervention.as_ref().map(|i| i.kind),
@@ -971,7 +1020,10 @@ async fn work_a_human_check_is_read_again_only_after_a_person_continued_it() {
                             measurements: None,
                             helped,
                             held_back: false,
+                            committed: Vec::new(),
                             rerun: false,
+                            search: None,
+                            redirect: None,
                         })
                     }
                 },

@@ -255,8 +255,6 @@ export function defaultSize(item: CanvasItem): CanvasSize {
     case "objective":
     case "request":
       return requestSize(item.title, !!item.actionLabel);
-    case "responsibility":
-      return { width: 280, height: 150 };
     case "page":
       return { width: 248, height: 168 };
     case "agent":

@@ -8,11 +8,16 @@
 
 #[cfg(any(test, feature = "provider-transport"))]
 mod anthropic;
+mod call_schema;
 mod continuation;
 mod extraction;
+mod form;
+#[cfg(feature = "provider-transport")]
+mod model_client;
 #[cfg(any(test, feature = "provider-transport"))]
 mod openai;
 mod pricing;
+mod progress;
 mod request;
 mod settlement;
 #[cfg(any(test, feature = "provider-transport"))]
@@ -48,6 +53,11 @@ pub use extraction::{
     AgentProviderExtractionOutputBinding, AgentProviderExtractionOutputCollector,
     AgentProviderExtractionOutputError,
 };
+pub use form::{
+    FormBinding as AgentBrowserFormBinding, FormError as AgentBrowserFormError,
+    FormFault as AgentBrowserFormFault, FormField as AgentBrowserFormField,
+    FormProposal as AgentBrowserFormProposal, MAX_FORM_FIELDS as MAX_AGENT_BROWSER_FORM_FIELDS,
+};
 use pricing::AgentProviderCatalogBinding;
 pub(crate) use pricing::AgentProviderPricedUsage;
 pub use pricing::{
@@ -58,7 +68,7 @@ pub use pricing::{
 };
 pub use settlement::{
     AgentProviderPricingSettlement, AgentProviderPricingSettlementError,
-    AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
+    AgentProviderRejectedAction, AgentProviderSettledTerminal, AgentProviderSettledToolTurn,
 };
 
 use crate::{
@@ -67,6 +77,10 @@ use crate::{
     SemanticTokenizerRevision, MAX_AGENT_RUN_MODEL_TOKENS,
 };
 
+#[cfg(feature = "provider-transport")]
+pub(crate) use model_client::translate as translate_model_client_call;
+#[cfg(feature = "provider-transport")]
+pub use model_client::AgentProviderModelReplyFacts;
 #[cfg(feature = "provider-transport")]
 pub(crate) use request::AgentCommittedProviderRequest;
 pub use request::{
@@ -85,6 +99,7 @@ pub use request::{
     MAX_AGENT_PROVIDER_INPUT_METRIC_RECEIPT_BYTES, MAX_AGENT_PROVIDER_OBJECTIVE_BYTES,
     MAX_AGENT_PROVIDER_OBJECTIVE_TOKENS, MAX_AGENT_PROVIDER_REQUEST_BYTES,
     MAX_AGENT_PROVIDER_SCREENSHOT_PNG_BYTES, MAX_AGENT_PROVIDER_SCREENSHOT_TRANSCRIPT_BYTES,
+    MAX_AGENT_PROVIDER_VIEWPORT_IMAGE_PNG_BYTES,
 };
 pub use tool::{
     AgentBrowserActProposal, AgentBrowserHumanReason, AgentBrowserScopeProposal,
@@ -135,6 +150,7 @@ pub(crate) const OPENAI_STANDARD_SERVICE_TIER: &str = "default";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST: &str = "standard_only";
 pub(crate) const ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE: &str = "standard";
 pub(crate) const ANTHROPIC_GLOBAL_INFERENCE_GEO: &str = "global";
+pub(crate) const MODEL_REPORTED_SERVICE_TIER: &str = "model-reported";
 
 /// Explicit immutable reasoning effort selected for one model call.
 ///
@@ -198,6 +214,18 @@ pub enum AgentProviderBillingClass {
     OpenAiDefault,
     /// Anthropic standard capacity and global inference.
     AnthropicStandardGlobal,
+    /// Usage the person's chosen model reported, priced from their catalog.
+    ModelReported,
+}
+
+impl AgentProviderBillingClass {
+    /// Request protocol this billing class can price.
+    pub const fn provider(self) -> AgentProviderKind {
+        match self {
+            Self::OpenAiDefault | Self::ModelReported => AgentProviderKind::OpenAiResponses,
+            Self::AnthropicStandardGlobal => AgentProviderKind::AnthropicMessages,
+        }
+    }
 }
 
 /// Closed provider execution route selected by the trusted catalog.
@@ -211,13 +239,17 @@ pub enum AgentProviderResponseRoute {
     OpenAiDefault,
     /// Anthropic standard capacity constrained to global inference.
     AnthropicStandardGlobal,
+    /// The person's chosen model, called through its own client. Requests
+    /// keep the OpenAI Responses shape internally and are translated per call;
+    /// the response identity is the requested model, never a provider claim.
+    ModelReported,
 }
 
 impl AgentProviderResponseRoute {
     /// Provider protocol compatible with this exact route.
     pub const fn provider(self) -> AgentProviderKind {
         match self {
-            Self::OpenAiDefault => AgentProviderKind::OpenAiResponses,
+            Self::OpenAiDefault | Self::ModelReported => AgentProviderKind::OpenAiResponses,
             Self::AnthropicStandardGlobal => AgentProviderKind::AnthropicMessages,
         }
     }
@@ -227,12 +259,13 @@ impl AgentProviderResponseRoute {
         match self {
             Self::OpenAiDefault => AgentProviderBillingClass::OpenAiDefault,
             Self::AnthropicStandardGlobal => AgentProviderBillingClass::AnthropicStandardGlobal,
+            Self::ModelReported => AgentProviderBillingClass::ModelReported,
         }
     }
 
     pub(crate) const fn request_service_tier(self) -> &'static str {
         match self {
-            Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
+            Self::OpenAiDefault | Self::ModelReported => OPENAI_STANDARD_SERVICE_TIER,
             Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_REQUEST,
         }
     }
@@ -241,12 +274,13 @@ impl AgentProviderResponseRoute {
         match self {
             Self::OpenAiDefault => OPENAI_STANDARD_SERVICE_TIER,
             Self::AnthropicStandardGlobal => ANTHROPIC_STANDARD_SERVICE_TIER_RESPONSE,
+            Self::ModelReported => MODEL_REPORTED_SERVICE_TIER,
         }
     }
 
     pub(crate) const fn response_inference_geo(self) -> Option<&'static str> {
         match self {
-            Self::OpenAiDefault => None,
+            Self::OpenAiDefault | Self::ModelReported => None,
             Self::AnthropicStandardGlobal => Some(ANTHROPIC_GLOBAL_INFERENCE_GEO),
         }
     }
@@ -503,6 +537,7 @@ fn response_identity_guard(
     hasher.update([match route {
         AgentProviderResponseRoute::OpenAiDefault => 1,
         AgentProviderResponseRoute::AnthropicStandardGlobal => 2,
+        AgentProviderResponseRoute::ModelReported => 3,
     }]);
     hasher.update([match reasoning_effort {
         AgentProviderReasoningEffort::None => 1,
@@ -558,6 +593,18 @@ pub struct AgentProviderCallIdentity {
 }
 
 impl AgentProviderCallIdentity {
+    /// A correlation joined to no run, for probe replays outside any policy.
+    #[cfg(feature = "probe-harness")]
+    pub(crate) fn probe_fixture() -> Self {
+        Self {
+            manifest: crate::AgentRunManifestId::generate(),
+            manifest_guard: [0; 32],
+            call: AgentModelCallId::new(1).expect("nonzero call"),
+            lease: crate::AgentPlanLeaseId::generate(),
+            node: crate::AgentPlanNodeId::generate(),
+        }
+    }
+
     /// Projects non-authorizing correlation from a prepared policy admission.
     pub(crate) fn from_admission(admission: &AgentModelCallAdmission) -> Self {
         Self {
@@ -723,14 +770,32 @@ pub enum AgentProviderInputAccountingMode {
     /// then replaced by an authenticated `/responses/input_tokens` count before
     /// model generation.
     ProviderExactAfterConservativeReservation,
+    /// The person's chosen model. The complete request is reserved before
+    /// dispatch as a strict upper bound: its UTF-8 bytes without image data,
+    /// plus a fixed envelope allowance and a fixed allowance per image. The
+    /// call then settles on the usage its provider reports. This is never
+    /// exact admission: reported usage above the reservation is charged the
+    /// reservation and fails the call.
+    ProviderReportedAfterConservativeReservation,
 }
 
 impl AgentProviderInputAccountingMode {
     const fn fixed_input_tokens(self) -> Option<u32> {
         match self {
             Self::ExactLocal { fixed_input_tokens } => Some(fixed_input_tokens),
-            Self::ProviderExactAfterConservativeReservation => None,
+            Self::ProviderExactAfterConservativeReservation
+            | Self::ProviderReportedAfterConservativeReservation => None,
         }
+    }
+
+    /// Whether admission reserves the whole serialized request rather than a
+    /// locally counted payload and fixed envelope.
+    pub const fn reserves_whole_request(self) -> bool {
+        matches!(
+            self,
+            Self::ProviderExactAfterConservativeReservation
+                | Self::ProviderReportedAfterConservativeReservation
+        )
     }
 }
 
@@ -744,6 +809,7 @@ pub struct AgentProviderCallConfig {
     store_response: bool,
     tools: BrowserToolProfile,
     baseline_read: bool,
+    compound_form: bool,
     progressive_observation: bool,
     viewport_screenshot: bool,
     standalone_wait: bool,
@@ -751,8 +817,22 @@ pub struct AgentProviderCallConfig {
     navigation_available: bool,
     history_back: bool,
     history_back_available: bool,
+    snapshot_withheld: WithheldSnapshot,
     decision_budget: Option<(AgentModelCallId, u8)>,
 }
+
+/// Per-turn narrowing of the vocabulary. It only removes `snapshot`, so it
+/// never changes whether two configs bind the same lineage.
+#[derive(Clone, Copy, Debug, Default)]
+struct WithheldSnapshot(bool);
+
+impl PartialEq for WithheldSnapshot {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for WithheldSnapshot {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrowserToolProfile {
@@ -783,13 +863,27 @@ impl AgentProviderCallConfig {
             }
             AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
                 if catalog.provider() != AgentProviderKind::OpenAiResponses
+                    || catalog.response_route() != AgentProviderResponseRoute::OpenAiDefault
+                    || catalog.pricing_profile().max_input_tokens()
+                        > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
+            {
+                return Err(AgentProviderContractError::InputAccountingMode);
+            }
+            AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+                if catalog.response_route() != AgentProviderResponseRoute::ModelReported
                     || catalog.pricing_profile().max_input_tokens()
                         > pricing::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS =>
             {
                 return Err(AgentProviderContractError::InputAccountingMode);
             }
             AgentProviderInputAccountingMode::ExactLocal { .. }
-            | AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation => {}
+                if catalog.response_route() == AgentProviderResponseRoute::ModelReported =>
+            {
+                return Err(AgentProviderContractError::InputAccountingMode);
+            }
+            AgentProviderInputAccountingMode::ExactLocal { .. }
+            | AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+            | AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation => {}
         }
         if max_output_tokens == 0 || u64::from(max_output_tokens) > MAX_AGENT_RUN_MODEL_TOKENS {
             return Err(AgentProviderContractError::OutputTokens);
@@ -802,6 +896,7 @@ impl AgentProviderCallConfig {
             store_response: false,
             tools: BrowserToolProfile::Full,
             baseline_read: false,
+            compound_form: false,
             progressive_observation: false,
             viewport_screenshot: false,
             standalone_wait: false,
@@ -809,6 +904,7 @@ impl AgentProviderCallConfig {
             navigation_available: true,
             history_back: false,
             history_back_available: false,
+            snapshot_withheld: WithheldSnapshot(false),
             decision_budget: None,
         })
     }
@@ -820,6 +916,12 @@ impl AgentProviderCallConfig {
     /// applies equally to every provider protocol and request turn.
     pub fn restrict_to_locate_and_act(mut self) -> Self {
         self.tools = BrowserToolProfile::LocateAct;
+        self
+    }
+
+    /// Enables the bounded host form executor, without granting any native effect.
+    pub fn with_compound_form(mut self) -> Self {
+        self.compound_form = true;
         self
     }
 
@@ -854,7 +956,17 @@ impl AgentProviderCallConfig {
     }
 
     pub(super) fn adds_progressive_observation(&self) -> bool {
-        self.progressive_observation && self.tools != BrowserToolProfile::Full
+        self.progressive_observation
+            && !self.snapshot_withheld.0
+            && self.tools != BrowserToolProfile::Full
+    }
+
+    /// Stops offering `snapshot` on the next turns, or offers it again. A
+    /// planner that only looked turn after turn is left with tools that move
+    /// the task on.
+    pub fn with_snapshot_withheld(mut self, withheld: bool) -> Self {
+        self.snapshot_withheld = WithheldSnapshot(withheld);
+        self
     }
 
     /// Enables one bounded viewport capture of the exact acknowledged semantic
@@ -951,8 +1063,7 @@ impl AgentProviderCallConfig {
         max_calls: u8,
     ) -> Result<Self, AgentProviderContractError> {
         if self.provider() != AgentProviderKind::OpenAiResponses
-            || self.input_accounting
-                != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+            || !self.input_accounting.reserves_whole_request()
         {
             return Err(AgentProviderContractError::InputAccountingMode);
         }
@@ -1021,6 +1132,9 @@ impl AgentProviderCallConfig {
 
     /// Reports whether this immutable request profile advertises a tool kind.
     pub fn permits_tool(&self, kind: AgentBrowserToolKind) -> bool {
+        if kind == AgentBrowserToolKind::FillForm {
+            return self.compound_form && self.permits_tool(AgentBrowserToolKind::Act);
+        }
         if matches!(
             kind,
             AgentBrowserToolKind::Navigate | AgentBrowserToolKind::Back
@@ -1032,7 +1146,7 @@ impl AgentProviderCallConfig {
             return true;
         }
         if self.progressive_observation && kind == AgentBrowserToolKind::Snapshot {
-            return true;
+            return !self.snapshot_withheld.0;
         }
         if self.viewport_screenshot && kind == AgentBrowserToolKind::Screenshot {
             return true;
@@ -1153,13 +1267,20 @@ impl AgentProviderCallConfig {
 
     #[cfg(feature = "provider-transport")]
     pub(crate) fn planning_cost_ceiling(&self, input: u32, output: u32) -> Option<u64> {
+        self.cost_ceiling(u64::from(input), output)
+    }
+
+    /// Strict ceiling for `input` and `output` tokens: every input token at
+    /// the highest input rate, rounded up once.
+    pub(crate) fn cost_ceiling(&self, input: u64, output: u32) -> Option<u64> {
         let rates = self.catalog.rates();
         let input_rate = rates
             .uncached_input()
             .max(rates.cached_input())
             .max(rates.cache_write_input());
-        let numerator = u128::from(input) * u128::from(input_rate)
-            + u128::from(output) * u128::from(rates.output());
+        let numerator = u128::from(input)
+            .checked_mul(u128::from(input_rate))?
+            .checked_add(u128::from(output) * u128::from(rates.output()))?;
         u64::try_from(numerator.div_ceil(1_000_000)).ok()
     }
     #[cfg(feature = "provider-transport")]
@@ -1334,8 +1455,7 @@ impl AgentProviderCallConfig {
         semantic_inputs: [Option<&SemanticTokenMeasurement>; 2],
         structured_input: &SemanticTokenMeasurement,
     ) -> Result<(), AgentProviderContractError> {
-        if self.input_accounting
-            != AgentProviderInputAccountingMode::ProviderExactAfterConservativeReservation
+        if !self.input_accounting.reserves_whole_request()
             || self.provider() != AgentProviderKind::OpenAiResponses
         {
             return Err(AgentProviderContractError::InputAccountingMode);

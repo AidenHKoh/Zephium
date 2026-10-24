@@ -182,6 +182,29 @@ impl AgentCookieFields {
     }
 }
 
+/// Expiry differences below this are storage rounding, not a newer cookie:
+/// WebView2 reports seconds as a double over microsecond storage, so a cookie
+/// written back can read a microsecond earlier.
+const SYNC_EXPIRY_TOLERANCE_SECONDS: f64 = 1.0;
+
+impl AgentCookieFields {
+    /// Whether a retained Work sync writes this cookie over `existing`, the
+    /// destination's cookie of the same identity. Only a cookie that is
+    /// provably newer replaces one: a site that rotates a token sets it again
+    /// with a later expiry, so an older copy from the other side must never
+    /// roll it back. Without expiries to compare (session cookies) or with
+    /// equal ones, the destination keeps what its own pages use.
+    pub(crate) fn supersedes(&self, existing: &Self) -> bool {
+        if !self.same_identity(existing) {
+            return true;
+        }
+        if self.session || existing.session {
+            return false;
+        }
+        self.expires > existing.expires + SYNC_EXPIRY_TOLERANCE_SECONDS
+    }
+}
+
 struct ValidatedCookie<NativeCookie> {
     fields: AgentCookieFields,
     native: NativeCookie,
@@ -509,6 +532,44 @@ mod tests {
 
     fn text(value: &str) -> AgentCookieText {
         AgentCookieText::try_from_utf16(&value.encode_utf16().collect::<Vec<_>>()).expect("text")
+    }
+
+    fn expiring(value: &str, expires: f64, session: bool) -> AgentCookieFields {
+        AgentCookieFields::try_new(
+            text("SIDCC"),
+            text(value),
+            text(".example.test"),
+            text("/"),
+            expires,
+            true,
+            true,
+            AgentCookieSameSite::Lax,
+            session,
+        )
+        .expect("fields")
+    }
+
+    #[test]
+    fn a_sync_writes_only_a_provably_newer_cookie_and_settles() {
+        let held = expiring("rotated-in-work", 1_900_000_100.0, false);
+        // The other side's older copy never rolls a rotated token back.
+        assert!(!expiring("older", 1_900_000_000.0, false).supersedes(&held));
+        // Equal values written back read a microsecond off: still settled.
+        assert!(!expiring("rotated-in-work", 1_900_000_099.999_999, false).supersedes(&held));
+        assert!(!expiring("rotated-in-work", 1_900_000_100.0, false).supersedes(&held));
+        // A sign-in or rotation on the other side sets a later expiry.
+        assert!(expiring("signed-in", 1_900_086_400.0, false).supersedes(&held));
+        // And what it writes is then settled in both directions.
+        let written = expiring("signed-in", 1_900_086_400.0, false);
+        assert!(!expiring("signed-in", 1_900_086_400.0, false).supersedes(&written));
+        assert!(!held.supersedes(&written));
+        // Session cookies carry no recency: the destination keeps its own.
+        let session = expiring("session", -1.0, true);
+        assert!(!expiring("other", -1.0, true).supersedes(&session));
+        assert!(!expiring("other", 1_999_999_999.0, false).supersedes(&session));
+        assert!(!session.supersedes(&held));
+        // A different identity is a different cookie.
+        assert!(fields("other", "v", true).supersedes(&held));
     }
 
     fn fields(name: &str, value: &str, http_only: bool) -> AgentCookieFields {

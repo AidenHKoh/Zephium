@@ -3,7 +3,9 @@
 //! missing / set / valid / invalid, never a key.
 use super::*;
 use zephium_core::ids::ProfileId;
-use zephium_core::work::model::{WorkModelEntry, WorkModelProvider, WorkModelRole};
+use zephium_core::work::model::{
+    WorkModelEntry, WorkModelProvider, WorkModelReasoning, WorkModelRole,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +30,8 @@ pub(crate) enum WorkModelsFaultV1 {
     Request,
     /// The Keychain refused.
     Keychain,
+    /// The Keychain is waiting for the person to answer its prompt.
+    KeychainWaiting,
     /// The request was malformed (an unknown model, a bad address).
     Invalid,
     /// Models are unavailable in this build or profile.
@@ -55,6 +59,24 @@ pub(crate) struct WorkModelRolesV1 {
 pub(crate) struct WorkCloudStatusV1 {
     pub(crate) signed_in: bool,
     pub(crate) plan: Option<String>,
+    /// Hosted entries listed for this account but locked by its plan: shown
+    /// to explain the plan, never choosable.
+    pub(crate) locked: Vec<String>,
+    /// The cheapest plan each locked entry needs, when the server states it.
+    pub(crate) required: Vec<WorkLockedPlanV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkLockedPlanV1 {
+    pub(crate) id: String,
+    pub(crate) plan: Option<String>,
+}
+
+/// The efforts one entry takes as the lead, weakest first.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkModelEffortsV1 {
+    pub(crate) id: String,
+    pub(crate) levels: Vec<WorkModelReasoning>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
@@ -69,6 +91,10 @@ pub(crate) struct WorkModelsV1 {
     pub(crate) providers: Vec<WorkProviderStatusV1>,
     pub(crate) cloud: WorkCloudStatusV1,
     pub(crate) fault: Option<WorkModelsFaultV1>,
+    /// Entries that take an effort; the rest take none.
+    pub(crate) efforts: Vec<WorkModelEffortsV1>,
+    /// The effort the lead runs at now; null when its model takes none.
+    pub(crate) effort: Option<WorkModelReasoning>,
 }
 
 impl WorkModelsV1 {
@@ -82,6 +108,8 @@ impl WorkModelsV1 {
             providers: Vec::new(),
             cloud: WorkCloudStatusV1::default(),
             fault: Some(fault),
+            efforts: Vec::new(),
+            effort: None,
         }
     }
 }
@@ -151,6 +179,7 @@ mod product {
             models::WorkKeyFault::ProviderDown => WorkModelsFaultV1::ProviderDown,
             models::WorkKeyFault::Offline => WorkModelsFaultV1::Unreachable,
             models::WorkKeyFault::Keychain => WorkModelsFaultV1::Keychain,
+            models::WorkKeyFault::KeychainWaiting => WorkModelsFaultV1::KeychainWaiting,
             models::WorkKeyFault::Request => WorkModelsFaultV1::Request,
         }
     }
@@ -205,15 +234,32 @@ mod product {
             cloud: WorkCloudStatusV1 {
                 signed_in: view.cloud_signed_in,
                 plan: view.cloud_plan,
+                locked: view.cloud_locked,
+                required: view
+                    .cloud_locked_plans
+                    .into_iter()
+                    .map(|(id, plan)| WorkLockedPlanV1 { id, plan })
+                    .collect(),
             },
             fault,
+            efforts: view
+                .efforts
+                .into_iter()
+                .map(|(id, levels)| WorkModelEffortsV1 { id, levels })
+                .collect(),
+            effort: view.effort,
         }
     }
 
     pub(super) async fn act(profile: ProfileId, action: Action) -> Option<WorkModelsFaultV1> {
         let result = match action {
-            Action::Read => Ok(()),
+            Action::Read => {
+                // Refreshes only a stale hosted catalog, at most hourly.
+                tauri::async_runtime::spawn(models::refresh_cloud_catalog());
+                Ok(())
+            }
             Action::Choose(role, id) => models::choose(profile, role, id.as_deref()),
+            Action::Effort(effort) => models::set_effort(profile, effort),
             Action::SetKey(provider, secret) => match models::set_key(provider, secret).await {
                 Ok(status) => return checked(profile, provider, status),
                 Err(WorkModelError::BadRequest) => return Some(WorkModelsFaultV1::Invalid),
@@ -245,6 +291,7 @@ mod product {
 pub(crate) enum Action {
     Read,
     Choose(WorkModelRole, Option<String>),
+    Effort(Option<WorkModelReasoning>),
     SetKey(WorkModelProvider, String),
     TestKey(WorkModelProvider),
     ClearKey(WorkModelProvider),
@@ -262,6 +309,7 @@ fn action_name(action: &Action) -> &'static str {
     match action {
         Action::Read => "read",
         Action::Choose(..) => "choose",
+        Action::Effort(..) => "effort",
         Action::SetKey(..) => "set_key",
         Action::TestKey(..) => "test_key",
         Action::ClearKey(..) => "clear_key",
@@ -319,6 +367,21 @@ pub(crate) async fn work_models(caller: WebviewWindow, expected_profile: String)
     respond(caller, expected_profile, Action::Read, "work_models").await
 }
 
+/// How a run would search the web with the models chosen now.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkSearchReadyV1 {
+    /// The person's search engine's results page, read in the agent browser
+    /// with no model; a model's search answers only when the page cannot be used.
+    Browser,
+    /// A chosen model's own provider search.
+    Native,
+    /// The fixed public search with the person's OpenAI key.
+    OpenAi,
+    #[default]
+    Unavailable,
+}
+
 /// A narrow readiness contract for the Work composer. Only a missing lead blocks.
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
 pub(crate) struct WorkModelsReadyV1 {
@@ -326,6 +389,8 @@ pub(crate) struct WorkModelsReadyV1 {
     pub(crate) profile: String,
     pub(crate) ready: bool,
     pub(crate) missing_roles: Vec<WorkModelRole>,
+    #[serde(default)]
+    pub(crate) search: WorkSearchReadyV1,
     pub(crate) fault: Option<WorkModelsFaultV1>,
 }
 
@@ -337,12 +402,26 @@ pub(crate) async fn work_models_ready(
 ) -> WorkModelsReadyV1 {
     let profile = profile_of(&caller, &expected_profile, "work_models_ready");
     #[cfg(feature = "work-product")]
-    let ready = match profile {
-        Some(profile) => zephium_app::work_models::ready(profile).await,
-        None => false,
+    let (ready, search) = match profile {
+        Some(profile) => {
+            use zephium_app::work_models::{self as models, WorkSearchReadiness};
+            // Runs search results pages in the agent browser wherever Work
+            // runs; a model's search is only their fallback.
+            let search = if cfg!(any(target_os = "macos", target_os = "windows")) {
+                WorkSearchReadyV1::Browser
+            } else {
+                match models::search_readiness(profile).await {
+                    WorkSearchReadiness::Native(_) => WorkSearchReadyV1::Native,
+                    WorkSearchReadiness::OpenAi => WorkSearchReadyV1::OpenAi,
+                    WorkSearchReadiness::Unavailable => WorkSearchReadyV1::Unavailable,
+                }
+            };
+            (models::ready(profile).await, search)
+        }
+        None => (false, WorkSearchReadyV1::Unavailable),
     };
     #[cfg(not(feature = "work-product"))]
-    let ready = false;
+    let (ready, search) = (false, WorkSearchReadyV1::Unavailable);
     WorkModelsReadyV1 {
         version: 1,
         profile: expected_profile,
@@ -352,6 +431,7 @@ pub(crate) async fn work_models_ready(
         } else {
             vec![WorkModelRole::Lead]
         },
+        search,
         fault: (profile.is_none() || !cfg!(feature = "work-product"))
             .then_some(WorkModelsFaultV1::Unavailable),
     }
@@ -370,6 +450,23 @@ pub(crate) async fn work_choose_model(
         expected_profile,
         Action::Choose(role, id),
         "work_choose_model",
+    )
+    .await
+}
+
+/// The lead's reasoning effort for this profile; null returns it to each model's default.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_set_model_effort(
+    caller: WebviewWindow,
+    expected_profile: String,
+    effort: Option<WorkModelReasoning>,
+) -> WorkModelsV1 {
+    respond(
+        caller,
+        expected_profile,
+        Action::Effort(effort),
+        "work_set_model_effort",
     )
     .await
 }
@@ -480,6 +577,48 @@ pub(crate) async fn work_more_models(
     refused(WorkModelsFaultV1::Unavailable)
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, specta::Type, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkLocalServerKindV1 {
+    Ollama,
+    LmStudio,
+}
+
+/// A model server found running on this Mac.
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type)]
+pub(crate) struct WorkLocalServerV1 {
+    pub(crate) kind: WorkLocalServerKindV1,
+    pub(crate) base: String,
+    pub(crate) models: u32,
+}
+
+/// Ollama and LM Studio on their default ports, for one-click setup.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn work_local_servers(caller: WebviewWindow) -> Vec<WorkLocalServerV1> {
+    if !authorize(&caller, CallerPolicy::Main, "work_local_servers") {
+        return Vec::new();
+    }
+    #[cfg(feature = "work-product")]
+    {
+        use zephium_agentic::lead::{detect_local_servers, LocalServerKind};
+        detect_local_servers()
+            .await
+            .into_iter()
+            .map(|server| WorkLocalServerV1 {
+                kind: match server.kind {
+                    LocalServerKind::Ollama => WorkLocalServerKindV1::Ollama,
+                    LocalServerKind::LmStudio => WorkLocalServerKindV1::LmStudio,
+                },
+                base: server.base.to_owned(),
+                models: u32::try_from(server.models).unwrap_or(u32::MAX),
+            })
+            .collect()
+    }
+    #[cfg(not(feature = "work-product"))]
+    Vec::new()
+}
+
 #[cfg(test)]
 mod release_tests {
     use super::*;
@@ -491,13 +630,14 @@ mod release_tests {
             profile: "profile".into(),
             ready: false,
             missing_roles: vec![WorkModelRole::Lead],
+            search: WorkSearchReadyV1::Unavailable,
             fault: None,
         };
         assert_eq!(
             serde_json::to_value(ready).unwrap(),
             serde_json::json!({
                 "version": 1, "profile": "profile", "ready": false,
-                "missing_roles": ["lead"], "fault": null
+                "missing_roles": ["lead"], "search": "unavailable", "fault": null
             })
         );
         let mut provider = WorkProviderStatusV1 {

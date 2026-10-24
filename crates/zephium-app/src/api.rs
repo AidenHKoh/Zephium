@@ -177,6 +177,17 @@ impl BrowserPage {
             Self::Time => "browser.time",
         }
     }
+
+    /// The feature switch the page belongs to, if any.
+    pub fn feature(self) -> Option<&'static str> {
+        match self {
+            Self::Work => Some("work"),
+            Self::Tasks => Some("tasks"),
+            Self::Notes => Some("notes"),
+            Self::Time => Some("time"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,6 +214,35 @@ pub enum TabAction {
     CloseOthers,
     /// Closes the open tabs listed after this one.
     CloseBelow,
+}
+
+/// Space mutations from chrome, menus and keys. The shell checks each
+/// against the focused profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpaceCommand {
+    Create {
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+    },
+    Update {
+        id: zephium_core::ids::SpaceId,
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+    },
+    Delete(zephium_core::ids::SpaceId),
+    Reorder {
+        id: zephium_core::ids::SpaceId,
+        before: Option<zephium_core::ids::SpaceId>,
+    },
+    Switch(zephium_core::ids::SpaceId),
+    /// The next (1) or previous (-1) space, wrapping.
+    Step(i8),
+    MoveTab {
+        tab: ItemId,
+        space: zephium_core::ids::SpaceId,
+    },
+    /// Moves the tab in front, for the menu bar.
+    MoveActive(zephium_core::ids::SpaceId),
 }
 
 /// What the person chose for a page's request to open another application
@@ -310,6 +350,33 @@ pub enum Command {
     /// Keeps one of onboarding's catalog sites, named by its catalog id.
     KeepSite(String),
     RenameFocusedProfile(String),
+    /// A named profile with its own space, engine store and content policy.
+    CreateProfile {
+        name: String,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        /// Shows the new profile in the window once it exists.
+        switch: bool,
+    },
+    /// Shows a persistent profile in the window.
+    SwitchProfile(ProfileId),
+    RenameProfile {
+        profile: ProfileId,
+        name: String,
+    },
+    /// A photo style carries its already downscaled bytes.
+    SetProfileAvatar {
+        profile: ProfileId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+    },
+    ProfileAvatarPhoto {
+        profile: ProfileId,
+        reply: SyncSender<Option<Vec<u8>>>,
+    },
+    Profiles {
+        reply: SyncSender<Option<zephium_ipc::ProfilesView>>,
+    },
     Navigate {
         id: ItemId,
         input: String,
@@ -334,6 +401,8 @@ pub enum Command {
         id: ItemId,
         action: TabAction,
     },
+    /// Something done to the focused profile's spaces.
+    Space(Box<SpaceCommand>),
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory
@@ -487,6 +556,9 @@ pub enum Command {
         /// Open an address in a new tab behind the current one and keep the
         /// search alive. Ignored by every other action.
         background: bool,
+        /// The tab whose address the launcher was opened to edit: an address
+        /// chosen there replaces that tab's page while it is still in front.
+        replace: Option<String>,
     },
     OpenUrl {
         input: String,
@@ -502,6 +574,9 @@ pub enum Command {
         key: String,
         value: String,
     },
+    /// Already-revoked global image preference waiting for exact persistence.
+    #[cfg(feature = "work-planning")]
+    SetWorkScreenshots(crate::work_screenshots::PreferenceChange),
     /// Permanently removes one inactive named profile through the durable
     /// cross-store deletion coordinator. The profile id comes only from
     /// privileged chrome and is revalidated against authoritative state.
@@ -569,6 +644,18 @@ pub enum Command {
     WindowTabs {
         profile: ProfileId,
         reply: SyncSender<Vec<TabMetadata>>,
+    },
+    /// A page opened behind the person's work in `space`: right after
+    /// `after` when that tab is in Today, never focused. Answers the new tab,
+    /// or `None` when the profile, space, address or tab limit refuses.
+    OpenBackgroundTab {
+        profile: ProfileId,
+        space: zephium_core::ids::SpaceId,
+        after: Option<ItemId>,
+        url: String,
+        /// Show it at once instead of behind the person's work.
+        focus: bool,
+        done: TabCompletion,
     },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
@@ -731,6 +818,29 @@ impl NoteCompletion {
 impl fmt::Debug for NoteCompletion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("NoteCompletion")
+    }
+}
+
+#[derive(Clone)]
+pub struct TabCompletion(Completion<Option<ItemId>>);
+impl TabCompletion {
+    pub fn new(done: impl FnOnce(Option<ItemId>) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(done)))))
+    }
+    pub fn finish(self, tab: Option<ItemId>) {
+        let done = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(done) = done {
+            done(tab);
+        }
+    }
+}
+impl fmt::Debug for TabCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TabCompletion")
     }
 }
 

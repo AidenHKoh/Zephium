@@ -1,6 +1,6 @@
-//! Approval policy, not a sandbox: commands can reach anything the account can.
-//! Shell startup files, project configuration and the person's CLI authentication
-//! are trusted. Inspection through `gh` is an explicit authenticated-network exception.
+//! Approval classification retained for a future confined runner. This parser
+//! cannot enforce filesystem or network boundaries and does not authorize
+//! execution; the runtime capability gate applies independently.
 use std::path::{Component, Path, PathBuf};
 use zephium_core::work::runtime::{WorkCommandClassV1 as Class, WorkCommandReasonV1 as Reason};
 
@@ -750,7 +750,12 @@ mod tests {
             "du -L .",
             "wc --files0-from=list",
         ] {
-            assert_ne!(classify(line, &root, roots).0, Class::Read, "{line}");
+            assert_ne!(classify_posix(line, &root, roots).0, Class::Read, "{line}");
+            assert_ne!(
+                classify_windows(line, &root, roots).0,
+                Class::Read,
+                "{line}"
+            );
         }
         for line in [
             "gh pr view 1 -R owner/repo",
@@ -758,7 +763,7 @@ mod tests {
             "grep -r KEY .",
             "rg KEY",
         ] {
-            assert_eq!(classify(line, &root, roots).0, Class::Read, "{line}");
+            assert_eq!(classify_posix(line, &root, roots).0, Class::Read, "{line}");
         }
     }
 
@@ -792,6 +797,8 @@ mod tests {
             "echo 'a''b'",
             "cmd /c dir",
             "powershell -Command ls",
+            "jq .name package.json",
+            "grep -r KEY .",
         ] {
             assert_eq!(classify_windows(line, &root, roots).0, Class::Ask, "{line}");
         }

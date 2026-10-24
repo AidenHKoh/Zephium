@@ -134,7 +134,14 @@ test("a comparison reads as a product compare, a cell is corrected in place, and
     onopen,
   });
   // Price leads each column; it is not one of the rows.
-  await expect.element(screen.getByText("$239.99", { exact: true })).toBeVisible();
+  await expect
+    .element(
+      screen.getByText(
+        new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(239.99),
+        { exact: true },
+      ),
+    )
+    .toBeVisible();
   await expect.element(screen.getByRole("rowheader", { name: "Minifigures" })).toBeVisible();
   expect(screen.container.querySelector("th.criterion")?.textContent).not.toContain("Price");
   // Yes/no reads as glyphs, and the cell's source opens in the pane.
@@ -194,7 +201,14 @@ test("a subject opens as a product view with its facts, their sources, and its p
     onopen,
   });
   await expect.element(screen.getByRole("heading", { name: "Tower Bridge" })).toBeVisible();
-  await expect.element(screen.getByText("$239.99", { exact: true })).toBeVisible();
+  await expect
+    .element(
+      screen.getByText(
+        new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(239.99),
+        { exact: true },
+      ),
+    )
+    .toBeVisible();
   await expect.element(screen.getByText("Minifigures", { exact: true })).toBeVisible();
   await screen.getByRole("button", { name: "Open page", exact: true }).click();
   expect(onopen).toHaveBeenCalledWith("https://lego.com/tower-bridge");

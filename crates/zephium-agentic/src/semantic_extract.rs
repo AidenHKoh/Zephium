@@ -336,15 +336,18 @@ impl SemanticExtractionFieldSchema {
     /// price, cost, total or amount, the one currency amount the text shows;
     /// otherwise, or when it shows none or several, the whole text.
     pub fn verbatim_value<'a>(&self, exact: &'a str) -> &'a str {
-        let name = self.name.to_ascii_lowercase();
-        let money_like = matches!(self.spec, SemanticExtractionFieldSpec::Text { .. })
-            && ["price", "cost", "total", "amount"]
-                .iter()
-                .any(|word| name.contains(word));
-        money_like
+        self.money_like()
             .then(|| crate::semantic_money::single_currency_amount(exact))
             .flatten()
             .unwrap_or(exact)
+    }
+
+    fn money_like(&self) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        matches!(self.spec, SemanticExtractionFieldSpec::Text { .. })
+            && ["price", "cost", "total", "amount"]
+                .iter()
+                .any(|word| name.contains(word))
     }
 
     /// Marks a URL column whose value is the subject's own page address. It
@@ -481,7 +484,8 @@ impl SemanticExtractionSchema {
         self.source_roles
     }
 
-    /// URL evidence is disclosed only when a field requests it.
+    /// URL evidence is disclosed for URL fields and whole-page findings,
+    /// which may cite the next page to read. Both use the same URL privacy screen.
     pub fn includes_link_destinations(&self) -> bool {
         self.url_sources() & 1 != 0
     }
@@ -495,7 +499,7 @@ impl SemanticExtractionSchema {
         self.fields
             .iter()
             .flat_map(|field| std::iter::once(field).chain(field.row_fields().unwrap_or_default()))
-            .fold(0, |bits, field| {
+            .fold(u8::from(self.is_whole_page_findings()), |bits, field| {
                 bits | match field.kind() {
                     SemanticExtractionValueKind::Url => 1,
                     SemanticExtractionValueKind::ImageUrl => 2,
@@ -529,10 +533,37 @@ impl SemanticExtractionSchema {
                 && field.max_list_items().is_some_and(|items| items > 1))
     }
 
-    /// A read that decides over one whole-document capture: whole-page
-    /// findings, or a catalog whose rows lie below the first viewport.
+    /// One record on an already identified page; not a listing-loading request.
+    pub fn is_single_record(&self) -> bool {
+        matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::Rows && field.max_list_items() == Some(1))
+    }
+
+    /// The read ceilings of a terminal mapping: a multi-record listing gets
+    /// the room its many cards need, anything else the single-record budget.
+    pub fn extraction_read_budget(&self) -> crate::SemanticReadBudget {
+        if self.is_row_collection() {
+            crate::SemanticReadBudget::LISTING
+        } else {
+            crate::SemanticReadBudget::EXTRACTION
+        }
+    }
+
+    /// The request encoding ceiling matching `extraction_read_budget`.
+    pub fn extraction_encoding_budget(&self) -> crate::SemanticModelEncodingBudget {
+        if self.is_row_collection() {
+            crate::SemanticModelEncodingBudget::LISTING_PROVIDER_EXACT_CONSERVATIVE
+        } else {
+            crate::SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE
+        }
+    }
+
+    /// Facts and records use the larger document budget, including single
+    /// products whose identity metadata lies beyond the first viewport.
     pub fn reads_whole_page(&self) -> bool {
-        self.is_whole_page_findings() || self.is_row_collection()
+        self.is_whole_page_findings()
+            || matches!(self.fields.as_slice(), [field]
+            if field.kind() == SemanticExtractionValueKind::Rows)
     }
 }
 
@@ -995,6 +1026,8 @@ impl SemanticExtractionStats {
 
 /// Validated structured mapping over one exact committed semantic read.
 pub struct SemanticExtractionResult<'a> {
+    media_diagnostics: crate::SemanticRecordMediaDiagnostics,
+    media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
@@ -1025,6 +1058,13 @@ impl<'a> SemanticExtractionResult<'a> {
     /// Exact source-read omissions, never a whole-document completeness claim.
     pub const fn read_omissions(&self) -> crate::SemanticReadOmissions {
         self.read_omissions
+    }
+    /// The mapping admitted nothing: no scalar value and no record.
+    pub fn is_empty(&self) -> bool {
+        self.fields.iter().all(|field| match field.value() {
+            SemanticExtractedValue::Rows(rows) => rows.items().is_empty(),
+            _ => false,
+        })
     }
     /// Original delivered-read counts, including uncited admitted fragments.
     pub const fn read_stats(&self) -> crate::SemanticReadStats {
@@ -1087,6 +1127,8 @@ impl<'a> SemanticExtractionResult<'a> {
             edges.push(u16::try_from(index).map_err(|_| SemanticExtractionError::Invariant)?);
         }
         Ok(SemanticOwnedExtractionResult {
+            media_diagnostics: self.media_diagnostics,
+            media: self.media,
             page_title: self.page_title,
             schema: self.schema,
             observation: self.observation,
@@ -1205,6 +1247,8 @@ pub struct SemanticOwnedExtractionSource {
 /// Its only constructor consumes the validated result. It is not policy,
 /// task-completion, persistence or independent factual-verification proof.
 pub struct SemanticOwnedExtractionResult {
+    media_diagnostics: crate::SemanticRecordMediaDiagnostics,
+    media: Vec<crate::SemanticRecordMediaPlan>,
     page_title: Option<String>,
     schema: SemanticExtractionSchemaId,
     observation: SemanticObservationId,
@@ -1220,6 +1264,78 @@ pub struct SemanticOwnedExtractionResult {
 }
 
 impl SemanticOwnedExtractionResult {
+    /// Carries the live original controller's existing screenshot permission
+    /// into local-only record plans before actor closure. No model/image data
+    /// or native request can call this through a serialized interface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn carry_record_crop_permission(
+        &mut self,
+        config: &crate::AgentProviderCallConfig,
+        policy: &crate::AgentRunPolicy,
+        lease: crate::AgentPlanLeaseBinding,
+        remaining_native_actions: u64,
+        original_account: crate::AgentContextAccountBinding,
+        current_account: crate::AgentContextAccountBinding,
+        observation: &crate::SemanticObservation,
+        acknowledgement: &crate::SemanticObservationAcknowledgement,
+        now: std::time::Instant,
+        expires: std::time::Instant,
+    ) -> bool {
+        for plan in &mut self.media {
+            plan.crop = None;
+        }
+        let context = observation.request().context();
+        let remaining = policy
+            .remaining_operations(lease.lease())
+            .ok()
+            .unwrap_or(0)
+            .min(12)
+            .min(remaining_native_actions.min(12) as u32) as u8;
+        let admitted_source = policy.taints().iter().any(|cohort| {
+            cohort.context() == context
+                && cohort.account() == original_account.account()
+                && cohort.observation() == observation.request().id()
+                && cohort.observation_generation() == observation.request().generation()
+        });
+        let screenshot_scope = policy.permits_screenshot_sensitivity(lease.lease());
+        if !screenshot_scope
+            || !acknowledgement.matches(observation)
+            || policy.is_sealed()
+            || policy.pending_model_calls() != 0
+            || policy.pending_effects() != 0
+            || remaining == 0
+            || !admitted_source
+        {
+            return false;
+        }
+
+        let Some(mut permit) = crate::semantic_media::SemanticRecordCropPermit::admit(
+            observation.request().context(),
+            original_account,
+            current_account,
+            config.permits_viewport_screenshot(),
+            now,
+            expires,
+        ) else {
+            return false;
+        };
+        permit.remaining = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(remaining));
+        for plan in &mut self.media {
+            if plan.frame.context() == permit.context {
+                plan.crop = Some(permit.for_record());
+            }
+        }
+        self.media.iter().any(|plan| plan.crop.is_some())
+    }
+    /// Closed source-stage counters; never model input or archived result data.
+    pub fn media_diagnostics(&self) -> crate::SemanticRecordMediaDiagnostics {
+        self.media_diagnostics
+    }
+    /// Exact original native plans; no inferred image locations.
+    pub fn media(&self) -> &[crate::SemanticRecordMediaPlan] {
+        &self.media
+    }
+
     /// Public document title observed by the terminal read, never model output.
     pub fn page_title(&self) -> Option<&str> {
         self.page_title.as_deref()
@@ -1378,6 +1494,9 @@ pub enum SemanticExtractionError {
     /// A provenance token was not the exact canonical `@rN` form.
     #[error("semantic extraction source token is invalid")]
     SourceInvalid,
+    /// One record combined sources from different observed cards in the same capture.
+    #[error("semantic extraction crossed record boundaries")]
+    RecordBoundary,
     /// Provenance tokens were duplicated or not strictly increasing.
     #[error("semantic extraction source order is invalid")]
     SourceOrder,
@@ -1390,6 +1509,74 @@ pub enum SemanticExtractionError {
     /// An internal bounded representation could not be formed.
     #[error("semantic extraction internal invariant failed")]
     Invariant,
+}
+
+/// Whether a second mapping told why the first was refused can succeed: the
+/// output itself was unusable, not the read, the delivery or a secret.
+pub const fn semantic_extraction_refusal_is_retryable(error: SemanticExtractionError) -> bool {
+    !matches!(
+        error,
+        SemanticExtractionError::ReadNotDelivered
+            | SemanticExtractionError::Invariant
+            | SemanticExtractionError::SecretValue
+            | SemanticExtractionError::Sensitivity
+    )
+}
+
+/// Told to a mapper whose first mapping admitted no record at all.
+pub const SEMANTIC_EXTRACTION_EMPTY_NOTE: &str = "Your previous mapping returned no records and no values, but the browsing model extracted because this evidence answers the request. Map what the evidence supports: for a request about one thing (a function, a product, a page), one record naming it with the details the evidence states; for a list, each record the evidence shows. Cite each value's own fragments. Return no records only if nothing in the evidence relates to the request.";
+
+/// Trusted, content-free text telling the mapper why Rust refused its last
+/// output, for the one corrective mapping call.
+pub fn semantic_extraction_refusal_note(error: SemanticExtractionError) -> String {
+    let reason = match error {
+        SemanticExtractionError::Malformed
+        | SemanticExtractionError::VersionMismatch
+        | SemanticExtractionError::SchemaMismatch
+        | SemanticExtractionError::FieldName
+        | SemanticExtractionError::FieldOrder
+        | SemanticExtractionError::UnexpectedField
+        | SemanticExtractionError::TypeMismatch => {
+            "the output did not follow the envelope. Return exactly {\"v\":1,\"schema\":<schema id>,\"fields\":[{\"name\":<S-line name>,\"value\":{\"k\":<S-line kind>,...}}]}; for rows, value is {\"k\":\"rows\",\"items\":[{\"fields\":[...]}]}; every text value has a value string and a sources array"
+        }
+        SemanticExtractionError::RecordBoundary => {
+            "one record mixed values from different cards. Keep every record's name, price, link and image inside the same observed record boundary; page-wide search settings may be shared. Correct the row rather than guessing a link"
+        }
+        SemanticExtractionError::DuplicateField => {
+            "a record repeated a column, so record boundaries are ambiguous. Put every record in its own items entry, with each declared column appearing at most once in that entry's fields. Do not flatten several records into one fields array; keep each value with its own sources"
+        }
+        SemanticExtractionError::MissingRequiredField => {
+            "a required field, or every record's required field, was missing or had no admissible evidence. Give each required field a value cited from a fragment that shows it"
+        }
+        SemanticExtractionError::SourceInvalid | SemanticExtractionError::VerbatimMismatch => {
+            "a cited fragment did not show its value. A url cites the link's own link_destination fragment, an image_url its image_source fragment, money the fragment showing that amount with its currency, and copied text exactly one fragment"
+        }
+        SemanticExtractionError::SourceMissing
+        | SemanticExtractionError::SourceLimit
+        | SemanticExtractionError::SourceOrder => {
+            "a value cited no delivered @rN fragment. Cite one to four exact @rN tokens from the EVIDENCE for each value, and leave out values the evidence does not show"
+        }
+        SemanticExtractionError::TextLimit
+        | SemanticExtractionError::InputLimit
+        | SemanticExtractionError::ListLimit
+        | SemanticExtractionError::ValueLimit
+        | SemanticExtractionError::FieldLimit
+        | SemanticExtractionError::UnsignedLimit => {
+            "the output exceeded a limit. Keep each value within its S-line bounds and return fewer, shorter records"
+        }
+        SemanticExtractionError::InvalidText => {
+            "a text value held control or invisible characters. Use single-line printable text"
+        }
+        SemanticExtractionError::ReadNotDelivered
+        | SemanticExtractionError::Invariant
+        | SemanticExtractionError::SecretValue
+        | SemanticExtractionError::Sensitivity => {
+            "a value was not admissible. Leave out values that are secrets or private"
+        }
+    };
+    format!(
+        "PREVIOUS_MAPPING_REFUSED code={error:?}: {reason}. Map the same ZEXTRACT input again; this is the last attempt."
+    )
 }
 
 /// Validates hostile structured model output against one exact delivered read.
@@ -1433,8 +1620,14 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         return Err(SemanticExtractionError::InputLimit);
     }
     let result_guard = extraction_result_guard(schema.id(), read, sensitivity_limit, model_output);
+    let normalized =
+        crate::semantic_extract_repair::normalize_extraction_output(schema, model_output)
+            .ok_or(SemanticExtractionError::Malformed)?;
+    if normalized.ambiguous_records {
+        return Err(SemanticExtractionError::DuplicateField);
+    }
     let raw: RawExtraction =
-        serde_json::from_slice(model_output).map_err(|_| SemanticExtractionError::Malformed)?;
+        serde_json::from_value(normalized.value).map_err(|_| SemanticExtractionError::Malformed)?;
     if raw.version != SEMANTIC_EXTRACTION_SCHEMA_VERSION {
         return Err(SemanticExtractionError::VersionMismatch);
     }
@@ -1447,6 +1640,7 @@ pub(crate) fn extract_semantic_read_inner<'a>(
 
     let mut sources = Vec::new();
     let mut counters = ExtractionCounters::new(result_guard);
+    counters.dropped = normalized.dropped;
     let fields = admit_fields(
         schema.fields(),
         raw.fields,
@@ -1457,6 +1651,57 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         false,
     )?;
 
+    #[cfg(feature = "probe-harness")]
+    let media_probe = crate::semantic_media_probe::observer();
+    #[cfg(feature = "probe-harness")]
+    let mut media_probe_sources = Vec::new();
+    #[cfg(feature = "probe-harness")]
+    let mut media_probe_incomplete = false;
+    let mut media = Vec::new();
+    let mut media_diagnostics = read.media_diagnostics();
+    let mut record = 0u16;
+    for field in &fields {
+        if let SemanticExtractedValue::Rows(rows) = field.value() {
+            for row in rows.items() {
+                #[cfg(feature = "probe-harness")]
+                if media_probe.is_some() && media.len() >= 12 {
+                    media_probe_incomplete = true;
+                }
+                if media.len() < 12 {
+                    if let Some(SemanticExtractedValue::Text(name)) =
+                        row.fields().first().map(SemanticExtractedField::value)
+                    {
+                        let span = name.source_span();
+                        let identity = sources[usize::from(span.start)
+                            ..usize::from(span.start) + usize::from(span.len)]
+                            .iter()
+                            .map(|source| source.fragment().id())
+                            .collect::<Vec<_>>();
+                        let identity = read.record_identity_sources(&identity);
+                        #[cfg(feature = "probe-harness")]
+                        if media_probe.is_some() {
+                            for id in &identity {
+                                if media_probe_sources.len() >= 128 {
+                                    media_probe_incomplete = true;
+                                    break;
+                                }
+                                if let Some(source) = read.media_probe_source(record, *id) {
+                                    media_probe_sources.push(source);
+                                } else {
+                                    media_probe_incomplete = true;
+                                }
+                            }
+                        }
+                        read.count_media_relations(&identity, &mut media_diagnostics);
+                        if let Some(plan) = read.media_for_record(record, &identity, result_guard) {
+                            media.push(plan);
+                        }
+                    }
+                }
+                record = record.saturating_add(1);
+            }
+        }
+    }
     let stats = SemanticExtractionStats {
         fields: u8::try_from(fields.len()).map_err(|_| SemanticExtractionError::Invariant)?,
         values: u16::try_from(counters.values).map_err(|_| SemanticExtractionError::Invariant)?,
@@ -1468,7 +1713,13 @@ pub(crate) fn extract_semantic_read_inner<'a>(
             .map_err(|_| SemanticExtractionError::Invariant)?,
         dropped: u16::try_from(counters.dropped).unwrap_or(u16::MAX),
     };
+    #[cfg(feature = "probe-harness")]
+    if let Some(observer) = media_probe {
+        observer(&media_probe_sources, media_probe_incomplete);
+    }
     Ok(SemanticExtractionResult {
+        media_diagnostics,
+        media,
         page_title: read.page_title().map(str::to_owned),
         schema: schema.id(),
         observation: read.observation(),
@@ -1485,6 +1736,11 @@ pub(crate) fn extract_semantic_read_inner<'a>(
         #[cfg(feature = "provider-transport")]
         schema_guard: crate::semantic_extract_model::extraction_schema_guard(schema),
     })
+}
+
+struct RecordIdentity {
+    name: String,
+    sources: Vec<SemanticReadFragmentId>,
 }
 
 /// `record`: the fields of one row, where an optional field whose own
@@ -1511,6 +1767,9 @@ fn admit_fields<'a>(
 
     let mut present = vec![false; schemas.len()];
     let mut previous_schema_index = None;
+    // Keep exact name provenance for native card-to-image association. A
+    // model's copied name or picture label never creates that relationship.
+    let mut subject: Option<RecordIdentity> = None;
     let mut fields = Vec::with_capacity(raw_fields.len());
     for raw_field in raw_fields {
         let Some(schema_index) = schemas
@@ -1532,9 +1791,12 @@ fn admit_fields<'a>(
             sensitivity_limit,
             sources,
             counters,
+            subject.as_ref(),
         ) {
             Ok(value) => value,
-            Err(error) if record && !field_schema.required() && droppable(error) => {
+            // An optional value whose own evidence fails is left out, at the
+            // top level as in a record; what is kept holds every limit.
+            Err(error) if !field_schema.required() && droppable(error) => {
                 sources.truncate(kept.0);
                 *counters = kept.1;
                 counters.dropped += 1;
@@ -1543,9 +1805,76 @@ fn admit_fields<'a>(
             Err(error) => return Err(error),
         };
         present[schema_index] = true;
+        if record && subject.is_none() {
+            if let SemanticExtractedValue::Text(text) = &value {
+                let span = text.source_span();
+                subject = Some(RecordIdentity {
+                    name: text.as_str().to_owned(),
+                    sources: read.record_identity_sources(
+                        &sources[usize::from(span.start)
+                            ..(usize::from(span.start) + usize::from(span.len))]
+                            .iter()
+                            .map(|source| source.fragment().id())
+                            .collect::<Vec<_>>(),
+                    ),
+                });
+            }
+        }
         fields.push(SemanticExtractedField {
             name: field_schema.name().to_owned(),
             value,
+        });
+    }
+    // Missing pictures use exact native ancestry; ordinary link repair keeps
+    // its existing evidence rules. Both copy only real cited source values.
+    if let Some(subject) = subject.as_ref().filter(|_| record) {
+        for (index, field_schema) in schemas.iter().enumerate() {
+            let (field, max_bytes) = match (&field_schema.spec, present[index]) {
+                (SemanticExtractionFieldSpec::Url { max_bytes }, false)
+                    if !field_schema.document_address() =>
+                {
+                    (crate::SemanticReadField::LinkDestination, *max_bytes)
+                }
+                (SemanticExtractionFieldSpec::ImageUrl { max_bytes }, false) => {
+                    (crate::SemanticReadField::ImageSource, *max_bytes)
+                }
+                _ => continue,
+            };
+            let Ok((value, token)) = resolve_source_url(None, &[], read, field, Some(subject))
+            else {
+                continue;
+            };
+            let kept = (sources.len(), counters.clone());
+            match admit_text(
+                value,
+                max_bytes,
+                vec![token],
+                read,
+                sensitivity_limit,
+                sources,
+                counters,
+            ) {
+                Ok(text) => {
+                    present[index] = true;
+                    fields.push(SemanticExtractedField {
+                        name: field_schema.name().to_owned(),
+                        value: if field == crate::SemanticReadField::LinkDestination {
+                            SemanticExtractedValue::Url(text)
+                        } else {
+                            SemanticExtractedValue::ImageUrl(text)
+                        },
+                    });
+                }
+                Err(_) => {
+                    sources.truncate(kept.0);
+                    *counters = kept.1;
+                }
+            }
+        }
+        fields.sort_by_key(|field| {
+            schemas
+                .iter()
+                .position(|schema| schema.name() == field.name)
         });
     }
     if schemas
@@ -1557,6 +1886,31 @@ fn admit_fields<'a>(
     }
 
     Ok(fields)
+}
+
+fn validate_record_sources(
+    sources: &[SemanticExtractionSource<'_>],
+) -> Result<(), SemanticExtractionError> {
+    for (index, source) in sources.iter().enumerate() {
+        let fragment = source.fragment();
+        let Some(root) = fragment.record_root() else {
+            continue;
+        };
+        let provenance = fragment.provenance();
+        for other in &sources[..index] {
+            let other = other.fragment();
+            if other
+                .record_root()
+                .is_some_and(|other_root| other_root != root)
+                && other.provenance().frame() == provenance.frame()
+                && other.provenance().observation() == provenance.observation()
+                && other.provenance().snapshot() == provenance.snapshot()
+            {
+                return Err(SemanticExtractionError::RecordBoundary);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1589,6 +1943,7 @@ const fn droppable(error: SemanticExtractionError) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_value<'a>(
     field: &SemanticExtractionFieldSchema,
     raw: RawValue,
@@ -1596,14 +1951,18 @@ fn admit_value<'a>(
     sensitivity_limit: SemanticReadSensitivityLimit,
     sources: &mut Vec<SemanticExtractionSource<'a>>,
     counters: &mut ExtractionCounters,
+    subject: Option<&RecordIdentity>,
 ) -> Result<SemanticExtractedValue, SemanticExtractionError> {
     match (&field.spec, raw) {
-        (SemanticExtractionFieldSpec::Rows { fields, max_items }, RawValue::Rows { items }) => {
+        (SemanticExtractionFieldSpec::Rows { fields, max_items }, RawValue::Rows { mut items }) => {
             if items.len() > *max_items {
-                return Err(SemanticExtractionError::ListLimit);
+                counters.dropped += items.len() - *max_items;
+                items.truncate(*max_items);
             }
             let mut rows = Vec::with_capacity(items.len());
             let mut refused = None;
+            #[cfg(feature = "probe-harness")]
+            let proposed = items.len();
             for row in items {
                 let kept = (sources.len(), counters.clone());
                 let admitted = if row.fields.is_empty() {
@@ -1620,7 +1979,10 @@ fn admit_value<'a>(
                     )
                 };
                 match admitted {
-                    Ok(fields) if !fields.is_empty() => rows.push(SemanticExtractedRow { fields }),
+                    Ok(fields) if !fields.is_empty() => {
+                        validate_record_sources(&sources[kept.0..])?;
+                        rows.push(SemanticExtractedRow { fields });
+                    }
                     Ok(_) => {
                         sources.truncate(kept.0);
                         *counters = kept.1;
@@ -1635,6 +1997,11 @@ fn admit_value<'a>(
                     Err(error) => return Err(error),
                 }
             }
+            #[cfg(feature = "probe-harness")]
+            crate::probe_evidence_path::trace(format_args!(
+                "extract-rows: proposed={proposed} kept={} first_refusal={refused:?}",
+                rows.len()
+            ));
             // Records were given and none held: the extraction fails with
             // the first record's own reason.
             if let (true, Some(error)) = (rows.is_empty(), refused) {
@@ -1651,25 +2018,98 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            let value = if field.verbatim_text() {
-                let [source] = raw_sources.as_slice() else {
-                    return Err(SemanticExtractionError::VerbatimMismatch);
+            let raw_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
+            if field.verbatim_text() {
+                // A copy is one cited fragment's whole text, or for a price
+                // column one currency amount it shows; with several cited,
+                // the one the copy matches.
+                let cited: Vec<(&String, &str)> = raw_sources
+                    .iter()
+                    .filter_map(|token| {
+                        SemanticReadFragmentId::parse_model_token(token)
+                            .and_then(|id| read.fragment(id))
+                            .and_then(|fragment| fragment.verbatim_text())
+                            .map(|exact| (token, exact))
+                    })
+                    .collect();
+                // A value read from the attached viewport image has no text
+                // to copy: the model's reading stands, cited to the image.
+                let pixels = raw_sources.iter().find(|token| {
+                    SemanticReadFragmentId::parse_model_token(token)
+                        .and_then(|id| read.fragment(id))
+                        .is_some_and(|fragment| {
+                            fragment.field() == crate::SemanticReadField::ViewportImage
+                        })
+                });
+                let (token, value) = match (value, pixels) {
+                    (Some(value), Some(token)) if cited.is_empty() => (token, value),
+                    (value, _) => match value {
+                        None => match cited.as_slice() {
+                            [] => return Err(SemanticExtractionError::VerbatimMismatch),
+                            [(token, exact)] => (*token, field.verbatim_value(exact).to_owned()),
+                            // A value the page splits across lines reads as one;
+                            // a fragment another one already holds ("$2,658" beside
+                            // "$2,658 monthly") is said once.
+                            [(token, _), ..] => (*token, joined(&cited)),
+                        },
+                        Some(value) => {
+                            let found = cited.iter().find(|(_, exact)| {
+                                *exact == value
+                                    || field.verbatim_value(exact) == value
+                                    || (field.money_like()
+                                        && crate::semantic_money::currency_amounts(exact)
+                                            .contains(&value.as_str()))
+                            });
+                            let found = match found {
+                                Some((token, _)) => Some((*token, value.clone())),
+                                None => loose_copy(&cited, &value, !field.money_like()),
+                            };
+                            match found {
+                                Some(found) => found,
+                                // A price written with its label ("Price 806 zł")
+                                // publishes the one amount it names, when the
+                                // cited text shows that amount.
+                                None => field
+                                    .money_like()
+                                    .then(|| crate::semantic_money::single_currency_amount(&value))
+                                    .flatten()
+                                    .and_then(|amount| {
+                                        cited.iter().find_map(|(token, exact)| {
+                                            crate::semantic_money::currency_amounts(exact)
+                                                .contains(&amount)
+                                                .then(|| (*token, amount.to_owned()))
+                                        })
+                                    })
+                                    .ok_or(SemanticExtractionError::VerbatimMismatch)?,
+                            }
+                        }
+                    },
                 };
-                let exact = SemanticReadFragmentId::parse_model_token(source)
-                    .and_then(|id| read.fragment(id))
-                    .and_then(|fragment| fragment.verbatim_text())
-                    .ok_or(SemanticExtractionError::VerbatimMismatch)?;
-                let published = field.verbatim_value(exact);
-                if value
-                    .as_ref()
-                    .is_some_and(|value| value != exact && value != published)
-                {
-                    return Err(SemanticExtractionError::VerbatimMismatch);
-                }
-                value.unwrap_or_else(|| published.to_owned())
-            } else {
-                value.ok_or(SemanticExtractionError::Malformed)?
+                return Ok(SemanticExtractedValue::Text(admit_text(
+                    value,
+                    *max_bytes,
+                    vec![token.clone()],
+                    read,
+                    sensitivity_limit,
+                    sources,
+                    counters,
+                )?));
+            }
+            // A value left out is the cited fragment's own text, copied by Rust.
+            let value = match value {
+                Some(value) => value,
+                None => raw_sources
+                    .iter()
+                    .find_map(|token| {
+                        SemanticReadFragmentId::parse_model_token(token)
+                            .and_then(|id| read.fragment(id))
+                            .and_then(|fragment| fragment.verbatim_text())
+                    })
+                    .map(|text| field.verbatim_value(text).to_owned())
+                    .ok_or(SemanticExtractionError::Malformed)?,
             };
+            let value = clip_text(&single_line_text(&value), *max_bytes);
+            let raw_sources = cite_text(&value, raw_sources, read, sensitivity_limit);
             Ok(SemanticExtractedValue::Text(admit_text(
                 value,
                 *max_bytes,
@@ -1687,19 +2127,21 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            let value = resolve_source_url(
-                value,
+            let (value, token) = resolve_source_url(
+                value.as_deref(),
                 &raw_sources,
                 read,
                 crate::SemanticReadField::LinkDestination,
+                subject,
             )
             .or_else(|error| {
                 if field.document_address() {
                     resolve_source_url(
                         None,
-                        &raw_sources,
+                        &[],
                         read,
                         crate::SemanticReadField::DocumentAddress,
+                        None,
                     )
                 } else {
                     Err(error)
@@ -1708,7 +2150,7 @@ fn admit_value<'a>(
             Ok(SemanticExtractedValue::Url(admit_text(
                 value,
                 *max_bytes,
-                raw_sources,
+                vec![token],
                 read,
                 sensitivity_limit,
                 sources,
@@ -1722,16 +2164,17 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            let value = resolve_source_url(
-                value,
+            let (value, token) = resolve_source_url(
+                value.as_deref(),
                 &raw_sources,
                 read,
                 crate::SemanticReadField::ImageSource,
+                subject,
             )?;
             Ok(SemanticExtractedValue::ImageUrl(admit_text(
                 value,
                 *max_bytes,
-                raw_sources,
+                vec![token],
                 read,
                 sensitivity_limit,
                 sources,
@@ -1746,40 +2189,16 @@ fn admit_value<'a>(
                 sources: raw_sources,
             },
         ) => {
-            if !currencies.contains(&currency)
-                || !raw_sources.iter().any(|token| {
-                    SemanticReadFragmentId::parse_model_token(token)
-                        .and_then(|id| read.fragment(id))
-                        .is_some_and(|source| {
-                            if !source.provenance().fields_complete()
-                                || !matches!(
-                                    source.field(),
-                                    crate::SemanticReadField::AccessibleName
-                                        | crate::SemanticReadField::VisibleText
-                                        | crate::SemanticReadField::TextValue
-                                )
-                            {
-                                return false;
-                            }
-                            let content = source.content();
-                            let text = content.text().map(|text| text.as_str()).or_else(|| {
-                                content
-                                    .value_preview()
-                                    .filter(|preview| !preview.truncated())
-                                    .map(|preview| preview.text())
-                            });
-                            text.is_some_and(|text| {
-                                crate::semantic_money::supports_money(text, &amount, &currency)
-                            })
-                        })
-                })
-            {
+            if !currencies.contains(&currency) {
                 return Err(SemanticExtractionError::SourceInvalid);
             }
+            let raw_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
+            let token = money_source(&raw_sources, read, sensitivity_limit, &amount, &currency)
+                .ok_or(SemanticExtractionError::SourceInvalid)?;
             let amount = admit_text(
                 amount,
                 24,
-                raw_sources,
+                vec![token],
                 read,
                 sensitivity_limit,
                 sources,
@@ -1802,6 +2221,7 @@ fn admit_value<'a>(
             },
         ) => {
             add_value(counters)?;
+            let raw_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
             let source_span =
                 admit_sources(raw_sources, read, sensitivity_limit, sources, counters)?;
             Ok(SemanticExtractedValue::Boolean(SemanticExtractedBoolean {
@@ -1820,6 +2240,7 @@ fn admit_value<'a>(
                 return Err(SemanticExtractionError::UnsignedLimit);
             }
             add_value(counters)?;
+            let raw_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
             let source_span =
                 admit_sources(raw_sources, read, sensitivity_limit, sources, counters)?;
             Ok(SemanticExtractedValue::Unsigned(
@@ -1835,27 +2256,53 @@ fn admit_value<'a>(
                 max_item_bytes,
             },
             RawValue::TextList {
-                items,
+                mut items,
                 sources: raw_sources,
             },
         ) => {
-            if items.len() > *max_items || items.len() > MAX_SEMANTIC_EXTRACTION_LIST_ITEMS {
-                return Err(SemanticExtractionError::ListLimit);
+            let limit = (*max_items).min(MAX_SEMANTIC_EXTRACTION_LIST_ITEMS);
+            if items.len() > limit {
+                counters.dropped += items.len() - limit;
+                items.truncate(limit);
             }
-            let source_span =
-                admit_sources(raw_sources, read, sensitivity_limit, sources, counters)?;
             let mut admitted_items = Vec::with_capacity(items.len());
+            let mut cited = Vec::new();
             for item in items {
-                admitted_items.push(admit_text(
-                    item.value,
+                let value = clip_text(&single_line_text(&item.value), *max_item_bytes);
+                let item_sources = cite_text(
+                    &value,
+                    resolvable_sources(item.sources, read, sensitivity_limit),
+                    read,
+                    sensitivity_limit,
+                );
+                let kept = (sources.len(), counters.clone());
+                match admit_text(
+                    value,
                     *max_item_bytes,
-                    item.sources,
+                    item_sources.clone(),
                     read,
                     sensitivity_limit,
                     sources,
                     counters,
-                )?);
+                ) {
+                    Ok(text) => {
+                        cited.extend(item_sources);
+                        admitted_items.push(text);
+                    }
+                    Err(error) if droppable(error) => {
+                        sources.truncate(kept.0);
+                        *counters = kept.1;
+                        counters.dropped += 1;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+            let mut list_sources = resolvable_sources(raw_sources, read, sensitivity_limit);
+            if list_sources.is_empty() {
+                list_sources = cited;
+            }
+            let source_span =
+                admit_sources(list_sources, read, sensitivity_limit, sources, counters)?;
             Ok(SemanticExtractedValue::TextList(
                 SemanticExtractedTextList {
                     items: admitted_items,
@@ -1865,6 +2312,240 @@ fn admit_value<'a>(
         }
         _ => Err(SemanticExtractionError::TypeMismatch),
     }
+}
+
+/// Citations that name a delivered fragment the result may cite, in
+/// canonical order, at most four. Citing a missing or withheld fragment
+/// costs that citation, not the value.
+fn resolvable_sources(
+    raw_sources: Vec<String>,
+    read: &SemanticReadResult<'_>,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+) -> Vec<String> {
+    let mut ids: Vec<_> = raw_sources
+        .iter()
+        .filter_map(|token| SemanticReadFragmentId::parse_model_token(token))
+        .filter(|id| {
+            read.fragment(*id)
+                .is_some_and(|fragment| citable(fragment, sensitivity_limit))
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(MAX_SEMANTIC_EXTRACTION_SOURCES_PER_VALUE);
+    if ids.is_empty() {
+        // Nothing resolves: the original citations keep their own refusal.
+        return raw_sources;
+    }
+    ids.into_iter()
+        .map(SemanticReadFragmentId::model_token)
+        .collect()
+}
+
+fn citable(fragment: SemanticReadFragment<'_>, limit: SemanticReadSensitivityLimit) -> bool {
+    match fragment.provenance().sensitivity() {
+        SemanticSensitivity::Secret => false,
+        SemanticSensitivity::Sensitive => limit == SemanticReadSensitivityLimit::Sensitive,
+        SemanticSensitivity::Public => true,
+    }
+}
+
+fn joined(cited: &[(&String, &str)]) -> String {
+    let texts: Vec<&str> = cited.iter().map(|(_, exact)| exact.trim()).collect();
+    texts
+        .iter()
+        .enumerate()
+        .filter(|(index, text)| {
+            let held = comparable(text);
+            !held.is_empty()
+                && !texts.iter().enumerate().any(|(other, longer)| {
+                    let longer = comparable(longer);
+                    other != *index
+                        && ((longer.len() > held.len() && longer.contains(&held))
+                            || (longer == held && other < *index))
+                })
+        })
+        .map(|(_, text)| *text)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fragment_text<'a>(fragment: SemanticReadFragment<'a>) -> Option<&'a str> {
+    let content = fragment.content();
+    content.text().map(SemanticText::as_str).or_else(|| {
+        content
+            .value_preview()
+            .filter(|preview| !preview.truncated())
+            .map(|preview| preview.text())
+    })
+}
+
+fn comparable(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Keeps resolvable citations; when none resolve, cites the one fragment
+/// that shows `value` itself, equal before containing, shortest first.
+fn cite_text(
+    value: &str,
+    raw_sources: Vec<String>,
+    read: &SemanticReadResult<'_>,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+) -> Vec<String> {
+    let resolves = raw_sources.iter().any(|token| {
+        SemanticReadFragmentId::parse_model_token(token)
+            .and_then(|id| read.fragment(id))
+            .is_some_and(|fragment| citable(fragment, sensitivity_limit))
+    });
+    let wanted = comparable(value);
+    if resolves || wanted.chars().count() < 2 {
+        return raw_sources;
+    }
+    read.fragments()
+        .iter()
+        .filter(|fragment| citable(**fragment, sensitivity_limit))
+        .filter_map(|fragment| {
+            let text = comparable(fragment_text(*fragment)?);
+            text.contains(&wanted)
+                .then_some((text != wanted, text.len(), fragment.id()))
+        })
+        .min()
+        .map_or(raw_sources, |(_, _, id)| vec![id.model_token()])
+}
+
+/// Model text on one line: control and invisible formatting characters
+/// become spaces, runs of spaces collapse.
+fn single_line_text(value: &str) -> String {
+    let spaced: String = value
+        .chars()
+        .map(|ch| {
+            if crate::semantic::invalid_semantic_char(ch) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim_end().to_owned()
+}
+
+/// The fragment that shows `amount` in `currency`: a cited one, another
+/// field of a cited node, or the only fragment in the read that shows it.
+/// A copy that differs from what the page shows only in quotes, dashes,
+/// spaces or case, or that is a part of one fragment's text, still copies
+/// that fragment. Returns the text to keep: the page's own when the two
+/// are the same words, the copy when it is a part of the fragment.
+fn loose_copy<'a>(
+    cited: &[(&'a String, &str)],
+    value: &str,
+    part: bool,
+) -> Option<(&'a String, String)> {
+    fn fold(text: &str) -> String {
+        let mapped: String = text
+            .chars()
+            .map(|c| match c {
+                '\u{2018}' | '\u{2019}' | '\u{201B}' | '\u{2032}' => '\'',
+                '\u{201C}' | '\u{201D}' | '\u{201F}' | '\u{2033}' => '"',
+                '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+                c if c.is_whitespace() => ' ',
+                c => c,
+            })
+            .collect::<String>()
+            .replace('\u{2026}', "...");
+        mapped
+            .split(' ')
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    }
+    let copy = fold(value);
+    if copy.chars().count() < 3 {
+        return None;
+    }
+    cited
+        .iter()
+        .find(|(_, exact)| fold(exact) == copy)
+        .map(|(token, exact)| (*token, (*exact).to_owned()))
+        .or_else(|| {
+            // A part, whole words only, and never of an amount: "299" is not
+            // a copy of "1 299,00 zł".
+            let whole_words = |exact: &str| {
+                let exact = fold(exact);
+                exact.match_indices(&copy).any(|(at, _)| {
+                    let before = exact[..at].chars().next_back();
+                    let after = exact[at + copy.len()..].chars().next();
+                    !before.is_some_and(char::is_alphanumeric)
+                        && !after.is_some_and(char::is_alphanumeric)
+                })
+            };
+            cited
+                .iter()
+                .find(|(_, exact)| part && whole_words(exact))
+                .map(|(token, _)| (*token, value.to_owned()))
+        })
+}
+
+fn money_source(
+    raw_sources: &[String],
+    read: &SemanticReadResult<'_>,
+    sensitivity_limit: SemanticReadSensitivityLimit,
+    amount: &str,
+    currency: &str,
+) -> Option<String> {
+    let supports = |fragment: SemanticReadFragment<'_>| {
+        citable(fragment, sensitivity_limit)
+            && fragment.provenance().fields_complete()
+            && matches!(
+                fragment.field(),
+                crate::SemanticReadField::AccessibleName
+                    | crate::SemanticReadField::VisibleText
+                    | crate::SemanticReadField::TextValue
+            )
+            && fragment_text(fragment)
+                .is_some_and(|text| crate::semantic_money::supports_money(text, amount, currency))
+    };
+    let cited: Vec<_> = raw_sources
+        .iter()
+        .filter_map(|token| SemanticReadFragmentId::parse_model_token(token))
+        .filter_map(|id| read.fragment(id))
+        .collect();
+    if let Some(fragment) = cited.iter().copied().find(|fragment| supports(*fragment)) {
+        return Some(fragment.id().model_token());
+    }
+    if let Some(fragment) = read.fragments().iter().copied().find(|fragment| {
+        cited.iter().any(|cited| same_node(*cited, *fragment)) && supports(*fragment)
+    }) {
+        return Some(fragment.id().model_token());
+    }
+    let mut matches = read
+        .fragments()
+        .iter()
+        .copied()
+        .filter(|fragment| supports(*fragment));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => Some(only.id().model_token()),
+        _ => None,
+    }
+}
+
+fn same_node(left: SemanticReadFragment<'_>, right: SemanticReadFragment<'_>) -> bool {
+    left.provenance().reference() == right.provenance().reference()
+        && left.provenance().frame() == right.provenance().frame()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1995,31 +2676,219 @@ fn extraction_result_guard(
     hasher.finalize().into()
 }
 
+/// The observed address a URL value cites, as `(url, citation)`. The value
+/// is always the page's own exact address, never model text: a cited link or
+/// picture fragment; else that field of a cited node; else the one observed
+/// address the model's copy names; else, in a record, the link or picture
+/// structurally bound to the record's exact native name provenance.
 fn resolve_source_url(
-    proposed: Option<String>,
+    proposed: Option<&str>,
     raw_sources: &[String],
     read: &SemanticReadResult<'_>,
     field: crate::SemanticReadField,
-) -> Result<String, SemanticExtractionError> {
-    // Source selection avoids model reserialization; legacy copied values stay exact.
-    if proposed.is_none() && raw_sources.len() != 1 {
-        return Err(SemanticExtractionError::SourceLimit);
-    }
-    let observed = raw_sources.iter().find_map(|token| {
-        let source =
-            SemanticReadFragmentId::parse_model_token(token).and_then(|id| read.fragment(id))?;
-        if source.field() != field {
+    subject: Option<&RecordIdentity>,
+) -> Result<(String, String), SemanticExtractionError> {
+    let observed = |fragment: SemanticReadFragment<'_>| {
+        if fragment.field() != field {
             return None;
         }
-        let preview = source.content().value_preview()?;
-        (!preview.truncated()
-            && exact_public_url(preview.text())
-            && proposed
-                .as_ref()
-                .is_none_or(|value| value == preview.text()))
-        .then(|| preview.text().to_owned())
-    });
-    observed.ok_or(SemanticExtractionError::SourceInvalid)
+        let preview = fragment.content().value_preview()?;
+        (!preview.truncated() && exact_public_url(preview.text()))
+            .then(|| (preview.text().to_owned(), fragment.id().model_token()))
+    };
+    if field == crate::SemanticReadField::ImageSource {
+        if let Some(subject) = subject {
+            let candidates = read.images_for_record(&subject.sources);
+            if let Some(found) = candidates
+                .iter()
+                .copied()
+                .filter_map(observed)
+                .find(|(url, _)| proposed == Some(url.as_str()))
+                .or_else(|| candidates.iter().copied().find_map(observed))
+            {
+                return Ok(found);
+            }
+            // Native matching is optional enrichment. The existing observed,
+            // cited/labelled URL path below supplies candidates, never pixels.
+        }
+    }
+    let subject = subject.map(|subject| subject.name.as_str());
+    if field == crate::SemanticReadField::DocumentAddress {
+        return read
+            .fragments()
+            .iter()
+            .find_map(|fragment| observed(*fragment))
+            .ok_or(SemanticExtractionError::SourceInvalid);
+    }
+    let cited: Vec<_> = raw_sources
+        .iter()
+        .filter_map(|token| crate::semantic_extract_repair::parse_source_token(token))
+        .filter_map(|id| read.fragment(id))
+        .collect();
+    let direct: Vec<_> = cited
+        .iter()
+        .filter_map(|fragment| observed(*fragment))
+        .collect();
+    if let Some(found) = direct
+        .iter()
+        .find(|(url, _)| proposed == Some(url.as_str()))
+        .or_else(|| direct.first())
+    {
+        return Ok(found.clone());
+    }
+    if let Some(found) = read.fragments().iter().find_map(|fragment| {
+        cited
+            .iter()
+            .any(|cited| same_node(*cited, *fragment))
+            .then(|| observed(*fragment))
+            .flatten()
+    }) {
+        return Ok(found);
+    }
+    if let Some(proposed) = proposed.filter(|value| value.len() > 1) {
+        let mut named = read.fragments().iter().filter_map(|fragment| {
+            observed(*fragment).filter(|(url, _)| {
+                url == proposed
+                    || (proposed.starts_with('/')
+                        && url
+                            .split_once("://")
+                            .and_then(|(_, rest)| rest.find('/').map(|at| &rest[at..]))
+                            == Some(proposed))
+            })
+        });
+        if let (Some(only), None) = (named.next(), named.next()) {
+            return Ok(only);
+        }
+    }
+    let named_subject = subject
+        .map(comparable)
+        .filter(|name| name.chars().count() >= 4);
+    if let Some(subject) = named_subject {
+        let mut best: Option<(bool, usize, (String, String))> = None;
+        for named in read.fragments() {
+            if !matches!(
+                named.field(),
+                crate::SemanticReadField::AccessibleName | crate::SemanticReadField::VisibleText
+            ) {
+                continue;
+            }
+            let Some(text) = fragment_text(*named).map(comparable) else {
+                continue;
+            };
+            // A clipped name ("Model Car Kit for ...") names the subject it starts.
+            let clipped = text
+                .strip_suffix("...")
+                .or_else(|| text.strip_suffix('…'))
+                .map(str::trim_end);
+            let shorter = text.chars().count().min(subject.chars().count());
+            let equal = text == subject;
+            if !(equal
+                || (shorter >= 10 && (text.contains(&subject) || subject.contains(&text)))
+                || clipped.is_some_and(|clipped| {
+                    clipped.chars().count() >= 10 && subject.starts_with(clipped)
+                }))
+            {
+                continue;
+            }
+            let Some(found) = read.fragments().iter().find_map(|fragment| {
+                same_node(*named, *fragment)
+                    .then(|| observed(*fragment))
+                    .flatten()
+            }) else {
+                continue;
+            };
+            let rank = (!equal, text.len().abs_diff(subject.len()));
+            if best.as_ref().is_none_or(|(e, d, _)| rank < (*e, *d)) {
+                best = Some((rank.0, rank.1, found));
+            }
+        }
+        if let Some((_, _, found)) = best {
+            return Ok(found);
+        }
+    }
+    if field == crate::SemanticReadField::LinkDestination {
+        if let Some(found) = cited
+            .iter()
+            .find_map(|fragment| address_in_text(*fragment, proposed, subject))
+        {
+            return Ok(found);
+        }
+    }
+    Err(SemanticExtractionError::SourceInvalid)
+}
+
+/// A link a cited text itself prints, such as a page-facts summary's
+/// `url: /p/123-laptop.html`: the one the model copied, else the first after
+/// the record's subject, resolved against the page's own origin. The cited
+/// text stays the citation.
+fn address_in_text(
+    fragment: SemanticReadFragment<'_>,
+    proposed: Option<&str>,
+    subject: Option<&str>,
+) -> Option<(String, String)> {
+    if !matches!(
+        fragment.field(),
+        crate::SemanticReadField::VisibleText | crate::SemanticReadField::AccessibleName
+    ) {
+        return None;
+    }
+    let text = fragment_text(fragment)?;
+    let addresses = printed_addresses(text, fragment.provenance().origin().as_url());
+    let chosen = match (proposed, subject) {
+        (Some(proposed), _) => addresses.into_iter().find(|(_, printed, resolved)| {
+            proposed == printed || proposed == resolved || proposed.ends_with(printed.as_str())
+        })?,
+        (None, Some(subject)) => {
+            let lower = text.to_ascii_lowercase();
+            let at = lower.find(&subject.trim().to_ascii_lowercase())?;
+            addresses.into_iter().find(|(start, _, _)| *start > at)?
+        }
+        (None, None) => {
+            let mut addresses = addresses.into_iter();
+            match (addresses.next(), addresses.next()) {
+                (Some(only), None) => only,
+                _ => return None,
+            }
+        }
+    };
+    Some((chosen.2, fragment.id().model_token()))
+}
+
+/// The page addresses a text prints, absolute or site-relative, each with
+/// where it starts, as printed, and resolved against the page's origin into
+/// an exact public address. Other tokens are not addresses.
+pub(crate) fn printed_addresses(text: &str, origin: &url::Url) -> Vec<(usize, String, String)> {
+    let separator = |ch: char| ch.is_whitespace() || matches!(ch, '|' | '"' | '\'' | '<' | '>');
+    let mut found = Vec::new();
+    let mut start = None;
+    for (index, ch) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        if !separator(ch) {
+            start.get_or_insert(index);
+            continue;
+        }
+        let Some(from) = start.take() else {
+            continue;
+        };
+        let printed = text[from..index].trim_end_matches([',', ';', '.', ')']);
+        if !((printed.starts_with('/') && !printed.starts_with("//"))
+            || printed.starts_with("https://"))
+        {
+            continue;
+        }
+        let resolved = origin
+            .join(printed)
+            .ok()
+            .and_then(|url| crate::ContextNavigationTarget::parse(url.as_str()).ok())
+            .map(|target| target.as_url().as_str().to_owned())
+            .filter(|value| exact_public_url(value));
+        if let Some(resolved) = resolved {
+            found.push((from, printed.to_owned(), resolved));
+        }
+    }
+    found
 }
 
 pub(crate) fn exact_public_url(value: &str) -> bool {
@@ -2099,6 +2968,50 @@ struct RawTextItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_fragments_join_once_without_repeating_what_one_already_holds() {
+        let (short, long, rating) = (
+            "$2,658".to_owned(),
+            "$2,658 monthly, originally $3,410".to_owned(),
+            "4.9".to_owned(),
+        );
+        let cited = [
+            (&short, short.as_str()),
+            (&long, long.as_str()),
+            (&rating, rating.as_str()),
+            (&rating, rating.as_str()),
+        ];
+        assert_eq!(joined(&cited), "$2,658 monthly, originally $3,410 4.9");
+    }
+
+    #[test]
+    fn a_copy_differing_only_in_quotes_spaces_or_case_still_copies_its_fragment() {
+        let (a, b) = ("@r1".to_owned(), "@r2".to_owned());
+        let cited = [
+            (&a, "Price list"),
+            (
+                &b,
+                "Posted \u{201C}testing agentic browsing v2\u{201D}  just now",
+            ),
+        ];
+        // The same words: the page's own text is kept.
+        assert_eq!(
+            loose_copy(&cited, "price  LIST", true),
+            Some((&a, "Price list".to_owned()))
+        );
+        // A part of a fragment, with straight quotes: the copy stands.
+        assert_eq!(
+            loose_copy(&cited, "\"testing agentic browsing v2\"", true),
+            Some((&b, "\"testing agentic browsing v2\"".to_owned()))
+        );
+        assert_eq!(loose_copy(&cited, "something else", true), None);
+        assert_eq!(loose_copy(&cited, "v2", true), None);
+        assert_eq!(loose_copy(&cited, "agentic brow", true), None);
+        // Never a part of an amount.
+        let price = [(&a, "1 299,00 zł")];
+        assert_eq!(loose_copy(&price, "299,00 zł", false), None);
+    }
     use crate::{
         decode_semantic_snapshot, encode_semantic_read, read_semantic_observation,
         ContextCapabilities, ContextCapability, ContextId, ContextIdentity, ContextKind,
@@ -2113,6 +3026,112 @@ mod tests {
     };
     use serde_json::{json, Value};
     use zephium_core::ids::ProfileId;
+
+    #[test]
+    fn a_single_record_keeps_whole_page_evidence_without_enabling_listing_loading() {
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "record".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 128).unwrap()],
+                1,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        assert!(schema.reads_whole_page());
+        assert!(schema.is_single_record());
+        assert!(!schema.is_row_collection());
+    }
+
+    #[cfg(feature = "probe-harness")]
+    #[test]
+    fn native_name_probe_uses_only_exact_validated_public_name_sources() {
+        use std::sync::{Arc, Mutex};
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        for fragment in read.fragments() {
+            let probe = read.media_probe_source(9, fragment.id());
+            if fragment.provenance().sensitivity() != SemanticSensitivity::Public {
+                assert!(probe.is_none());
+            } else {
+                let probe = probe.unwrap();
+                assert_eq!(probe.frame(), fragment.provenance().frame());
+                assert_eq!(probe.invocation(), 17);
+                assert_eq!(probe.snapshot(), 19);
+                assert!((1..=4).contains(&probe.node()));
+                assert_eq!(format!("{probe:?}"), "SemanticMediaNameProbe([redacted])");
+            }
+        }
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![SemanticExtractionFieldSchema::try_text("name".into(), true, 64).unwrap()],
+                2,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let output=serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"records","value":{"k":"rows","items":[
+            {"fields":[{"name":"name","value":{"k":"text","value":"Quarterly summary","sources":["@r1"]}}]},
+            {"fields":[{"name":"name","value":{"k":"text","value":"Another record","sources":["@r1"]}}]}
+        ]}}]})).unwrap();
+        let run = || {
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output,
+            )
+            .unwrap()
+            .into_owned()
+            .unwrap()
+        };
+        let before = run();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let captured = received.clone();
+        let thread = std::thread::current().id();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::set_semantic_media_name_probe(None);
+            }
+        }
+        let reset = Reset;
+        crate::set_semantic_media_name_probe(Some(Arc::new(move |sources, incomplete| {
+            if std::thread::current().id() != thread {
+                return;
+            }
+            assert!(!incomplete);
+            *captured.lock().unwrap() = sources
+                .iter()
+                .map(|source| {
+                    (
+                        source.record(),
+                        source.invocation(),
+                        source.snapshot(),
+                        source.node(),
+                    )
+                })
+                .collect();
+        })));
+        let after = run();
+        drop(reset);
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![(0, 17, 19, 2), (1, 17, 19, 2)]
+        );
+        assert_eq!(before.guard, after.guard);
+        assert_eq!(before.fields, after.fields);
+        assert_eq!(before.edges, after.edges);
+        assert_eq!(before.sources.len(), after.sources.len());
+        assert_eq!(before.media_diagnostics, after.media_diagnostics);
+    }
 
     fn observation() -> SemanticObservation {
         observation_with_nodes(json!([
@@ -2133,6 +3152,13 @@ mod tests {
     }
 
     fn observation_with_completeness(nodes: Value, completeness: &str) -> SemanticObservation {
+        observation_with_media(nodes, completeness, json!([]))
+    }
+    fn observation_with_media(
+        nodes: Value,
+        completeness: &str,
+        media: Value,
+    ) -> SemanticObservation {
         let identity = ContextIdentity::new(
             ContextId::from_raw(731),
             ContextRunId::from_raw(732),
@@ -2169,6 +3195,7 @@ mod tests {
             "i": 17,
             "g": 19,
             "c": completeness,
+            "m": media,
             "n": nodes
         }))
         .expect("wire");
@@ -2379,10 +3406,19 @@ mod tests {
         assert!(
             matches!(accepted.fields()[0].value(), SemanticExtractedValue::Money(value) if value.amount() == "1299.50" && value.currency() == "EUR")
         );
+        // A wrong citation is answered by the one fragment showing the amount.
+        assert!(extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &output("1299.50", "EUR", "@r999")
+        )
+        .is_ok());
         for (amount, currency, source) in [
             ("1299.50", "USD", token.as_str()),
             ("1299.51", "EUR", token.as_str()),
-            ("1299.50", "EUR", "@r999"),
+            ("1300", "EUR", "@r999"),
         ] {
             assert!(extract_semantic_read(
                 &schema,
@@ -2403,6 +3439,57 @@ mod tests {
                 SemanticExtractionFieldSchema::try_money("price".into(), true, currencies).is_err()
             );
         }
+    }
+
+    #[test]
+    fn page_findings_keep_query_bearing_native_link_sources_without_admitting_prose_urls() {
+        let destination = "https://example.test/station?id=8443970&date=2026-11-14";
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"link","n":"Station predictions","u":destination},
+            {"k":3,"p":0,"r":"paragraph","t":"https://unobserved.example.test/?account=42"}
+        ]));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(29).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text_list("output_0".into(), true, 16, 1024)
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let links: Vec<_> = read
+            .fragments()
+            .iter()
+            .filter(|f| f.field() == crate::SemanticReadField::LinkDestination)
+            .collect();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].content().value_preview().unwrap().text(),
+            destination
+        );
+        let token = links[0].id().model_token();
+        let result = extract_semantic_read(&schema, &read, &delivered(&read), SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&json!({"v":1,"schema":29,"fields":[{"name":"output_0","value":{
+                "k":"text_list","sources":[token],"items":[{"value":"Station predictions are on the linked station page.","sources":[token]}]
+            }}]})).unwrap()).unwrap();
+        let SemanticExtractedValue::TextList(items) = result.fields()[0].value() else {
+            panic!()
+        };
+        let sources = result.sources(items.items()[0].source_span()).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].fragment().field(),
+            crate::SemanticReadField::LinkDestination
+        );
     }
 
     #[test]
@@ -2438,7 +3525,12 @@ mod tests {
             .iter()
             .filter(|source| source.field() == crate::SemanticReadField::LinkDestination)
             .collect();
-        assert_eq!(urls.len(), 1);
+        // The private link is kept only without its token.
+        let previews: Vec<_> = urls
+            .iter()
+            .map(|source| source.content().value_preview().unwrap().text().to_owned())
+            .collect();
+        assert_eq!(previews, [url, "https://shop.example.test/"]);
         let token = urls[0].id().model_token();
         let delivery = delivered(&read);
         let output = |value: &str, sources: Vec<&str>| {
@@ -2474,13 +3566,26 @@ mod tests {
         assert!(
             matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
         );
+        // A paragraph that prints the address is evidence for it too.
         for sources in [
-            vec![],
             vec![token.as_str(), token.as_str()],
+            vec![&token[1..]],
             vec!["@r1"],
-            vec!["@r999"],
             vec!["@r01"],
         ] {
+            let resolved = extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &source_only(sources),
+            )
+            .unwrap();
+            assert!(
+                matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(value) if value.as_str() == url)
+            );
+        }
+        for sources in [vec![], vec!["@r999"]] {
             assert!(extract_semantic_read(
                 &schema,
                 &read,
@@ -2490,6 +3595,9 @@ mod tests {
             )
             .is_err());
         }
+        // The value is always the observed address, never the model's copy:
+        // a cited link wins over a miscopied value, and an exact copy finds
+        // its link when the citation names other text.
         for (value, source) in [
             (
                 "https://shop.example.test/item/42?variant=blue",
@@ -2498,6 +3606,22 @@ mod tests {
             ("https://shop.example.test/item/43", token.as_str()),
             (url, "@r1"),
             ("https://shop.example.test/?token=secret", token.as_str()),
+        ] {
+            let resolved = extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output(value, vec![source]),
+            )
+            .unwrap();
+            assert!(
+                matches!(resolved.fields()[0].value(), SemanticExtractedValue::Url(found) if found.as_str() == url)
+            );
+        }
+        for (value, source) in [
+            ("https://shop.example.test/item/43", "@r1"),
+            ("https://shop.example.test/?token=private-token", "@r1"),
         ] {
             assert!(extract_semantic_read(
                 &schema,
@@ -2554,7 +3678,11 @@ mod tests {
             .iter()
             .filter(|source| source.field() == crate::SemanticReadField::ImageSource)
             .collect();
-        assert_eq!(images.len(), 1);
+        let previews: Vec<_> = images
+            .iter()
+            .map(|source| source.content().value_preview().unwrap().text().to_owned())
+            .collect();
+        assert_eq!(previews, [url, "https://images.example.test/p.webp"]);
         let token = images[0].id().model_token();
         let delivery = delivered(&read);
         let output = |kind: &str, value: &str, source: &str| {
@@ -2589,13 +3717,29 @@ mod tests {
         assert!(
             matches!(resolved.fields()[0].value(), SemanticExtractedValue::ImageUrl(value) if value.as_str() == url)
         );
+        for (value, source) in [
+            (url, "@r1"),
+            ("https://images.example.test/other.webp", token.as_str()),
+        ] {
+            let resolved = extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &output("image_url", value, source),
+            )
+            .unwrap();
+            assert!(
+                matches!(resolved.fields()[0].value(), SemanticExtractedValue::ImageUrl(found) if found.as_str() == url)
+            );
+        }
         for (kind, value, source) in [
             ("url", url, token.as_str()),
-            ("image_url", url, "@r1"),
+            ("image_url", "https://images.example.test/other.webp", "@r1"),
             (
                 "image_url",
-                "https://images.example.test/other.webp",
-                token.as_str(),
+                "https://images.example.test/p.webp?token=secret",
+                "@r1",
             ),
         ] {
             assert!(extract_semantic_read(
@@ -2607,6 +3751,217 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn rows_refuse_mixed_cards_but_allow_shared_search_state() {
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","fc":true},
+            {"k":2,"p":0,"r":"button","n":"Nov 18 – 21; two guests","fc":true},
+            {"k":3,"p":0,"r":"group","fc":true},
+            {"k":4,"p":2,"r":"heading","l":2,"n":"Amber stay","fc":true},
+            {"k":5,"p":2,"r":"link","n":"Open Amber","u":"https://stays.example/amber?guests=2","fc":true},
+            {"k":6,"p":2,"r":"button","n":"$218 total","fc":true},
+            {"k":7,"p":0,"r":"group","fc":true},
+            {"k":8,"p":6,"r":"heading","l":2,"n":"Blue stay","fc":true},
+            {"k":9,"p":6,"r":"link","n":"Open Blue","u":"https://stays.example/blue?guests=2","fc":true},
+            {"k":10,"p":6,"r":"button","n":"$264 total","fc":true},
+            {"k":11,"p":0,"r":"landmark","lm":"navigation","fc":true},
+            {"k":12,"p":10,"r":"group","fc":true},
+            {"k":13,"p":11,"r":"heading","l":2,"n":"Help","fc":true},
+            {"k":14,"p":11,"r":"link","n":"Help link","u":"https://stays.example/help","fc":true},
+            {"k":15,"p":10,"r":"group","fc":true},
+            {"k":16,"p":14,"r":"heading","l":2,"n":"About","fc":true},
+            {"k":17,"p":14,"r":"link","n":"About link","u":"https://stays.example/about","fc":true}
+        ]));
+        let text = |name: &str| {
+            SemanticExtractionFieldSchema::try_text(name.into(), true, 128)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap()
+        };
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "stays".into(),
+                true,
+                vec![
+                    text("name"),
+                    SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+                    text("price"),
+                    text("settings"),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        for fragment in read.fragments().iter().filter(|fragment| {
+            fragment_text(**fragment)
+                .is_some_and(|text| matches!(text, "Help" | "Help link" | "About" | "About link"))
+        }) {
+            assert!(
+                fragment.record_root().is_none(),
+                "navigation is not a product card"
+            );
+        }
+        let delivery = delivered(&read);
+        let token = |text: &str| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment_text(**fragment) == Some(text))
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let admit = |url: &str, price: &str| {
+            let output = json!({"fields":[{"name":"stays","value":{"k":"rows","items":[{"fields":[
+                {"name":"name","value":{"k":"text","sources":[token("Amber stay")]}},
+                {"name":"url","value":{"k":"url","sources":[token(url)]}},
+                {"name":"price","value":{"k":"text","sources":[token(price)]}},
+                {"name":"settings","value":{"k":"text","sources":[token("Nov 18 – 21; two guests")]}}
+            ]}]}}]});
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(&output).unwrap(),
+            )
+        };
+        assert!(admit("https://stays.example/amber?guests=2", "$218 total").is_ok());
+        for (url, price) in [
+            ("https://stays.example/blue?guests=2", "$218 total"),
+            ("https://stays.example/amber?guests=2", "$264 total"),
+        ] {
+            assert!(matches!(
+                admit(url, price),
+                Err(SemanticExtractionError::RecordBoundary)
+            ));
+        }
+        assert!(semantic_extraction_refusal_is_retryable(
+            SemanticExtractionError::RecordBoundary
+        ));
+    }
+
+    #[test]
+    fn flattened_record_repair_preserves_each_value_and_its_delivered_source() {
+        let mut nodes = vec![json!({"k":1,"r":"document","fc":true})];
+        for index in 0..3 {
+            nodes.extend([
+                json!({"k":index*3+2,"p":0,"r":"heading","l":2,"n":format!("Stay {index}"),"fc":true}),
+                json!({"k":index*3+3,"p":0,"r":"link","n":format!("Stay {index}"),"u":format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"),"fc":true}),
+                json!({"k":index*3+4,"p":0,"r":"paragraph","t":format!("{} EUR",100+index),"fc":true}),
+            ]);
+        }
+        let observation = observation_with_nodes(Value::Array(nodes));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "listings".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 200)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                    SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+                    SemanticExtractionFieldSchema::try_text("price".into(), false, 64)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                ],
+                3,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let token = |text: &str| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment_text(**fragment) == Some(text))
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let fields: Vec<Value> = (0..3).flat_map(|index| [
+            json!({"name":"name","value":{"k":"text","value":format!("Stay {index}"),"sources":[token(&format!("Stay {index}"))]}}),
+            json!({"name":"url","value":{"k":"url","sources":[token(&format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"))]}}),
+            json!({"name":"price","value":{"k":"text","value":format!("{} EUR",100+index),"sources":[token(&format!("{} EUR",100+index))]}}),
+        ]).collect();
+        let output = json!({"fields":[{"name":"listings","value":{"k":"rows","items":[{"fields":fields}]}}]});
+        let admit = |output: &Value| {
+            extract_semantic_read(
+                &schema,
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::PublicOnly,
+                &serde_json::to_vec(output).unwrap(),
+            )
+        };
+        let result = admit(&output).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 3);
+        assert_eq!(result.stats().dropped(), 0);
+        for (index, row) in rows.items().iter().enumerate() {
+            let values: Vec<_> = row
+                .fields()
+                .iter()
+                .map(|field| match field.value() {
+                    SemanticExtractedValue::Text(text) | SemanticExtractedValue::Url(text) => {
+                        text.as_str()
+                    }
+                    _ => panic!("scalar"),
+                })
+                .collect();
+            assert_eq!(
+                values,
+                vec![
+                    format!("Stay {index}"),
+                    format!("https://example.test/stay/{index}?adults=2&date=2026-11-18"),
+                    format!("{} EUR", 100 + index)
+                ]
+            );
+        }
+        let mut ambiguous = output.clone();
+        ambiguous["fields"][0]["value"]["items"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .remove(4);
+        assert_eq!(
+            admit(&ambiguous).unwrap_err(),
+            SemanticExtractionError::DuplicateField
+        );
+        let mut forged = output.clone();
+        forged["fields"][0]["value"]["items"][0]["fields"][3]["value"] =
+            json!({"k":"text","value":"Not on this page","sources":["@r999"]});
+        let result = admit(&forged).unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 2);
+        assert!(result.stats().dropped() > 0);
     }
 
     #[test]
@@ -2690,10 +4045,17 @@ mod tests {
             json!(["@r5"]);
         assert_eq!(rows_of(&sensitive), (vec![1, 1], 1));
         let mut nameless = output.clone();
-        nameless["fields"][0]["value"]["items"][1]["fields"][0]["value"]["sources"] = json!(["r1"]);
+        nameless["fields"][0]["value"]["items"][1]["fields"][0]["value"]["sources"] =
+            json!(["@r999"]);
         assert_eq!(rows_of(&nameless), (vec![2], 1));
+        // A miscited name the page shows verbatim is cited where it appears.
+        let mut miscited = output.clone();
+        miscited["fields"][0]["value"]["items"][0]["fields"][0]["value"]["sources"] =
+            json!(["@r999"]);
+        assert_eq!(rows_of(&miscited), (vec![2, 1], 0));
         let mut none = nameless.clone();
-        none["fields"][0]["value"]["items"][0]["fields"][0]["value"]["sources"] = json!(["@r999"]);
+        none["fields"][0]["value"]["items"][0]["fields"][0]["value"] =
+            json!({"k":"text","value":"Not on the page","sources":["@r999"]});
         assert_eq!(
             extract(&none).unwrap_err(),
             SemanticExtractionError::SourceMissing
@@ -2703,9 +4065,698 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(output["fields"][0]["value"]["items"][0].clone());
+        assert_eq!(rows_of(&excess), (vec![2, 1], 1));
+    }
+
+    #[test]
+    fn descriptive_record_names_keep_their_own_card_image() {
+        let observation = observation_with_media(
+            json!([
+                {"k":1,"r":"document","fc":true},
+                {"k":2,"p":0,"r":"group","fc":true},
+                {"k":3,"p":1,"r":"link","n":"Amber record","u":"https://example.test/amber","fc":true},
+                {"k":4,"p":1,"r":"image","b":{"x":10,"y":30,"w":128,"h":96},"m":"https://example.test/amber.png","fc":true},
+                {"k":5,"p":1,"r":"paragraph","t":"Quiet flat with a balcony","fc":true},
+                {"k":6,"p":0,"r":"group","fc":true},
+                {"k":7,"p":5,"r":"link","n":"Blue record","u":"https://example.test/blue","fc":true},
+                {"k":8,"p":5,"r":"image","b":{"x":240,"y":30,"w":128,"h":96},"m":"https://example.test/blue.png","fc":true},
+                {"k":9,"p":5,"r":"paragraph","t":"Bright studio by the park","fc":true}
+            ]),
+            "complete",
+            json!([
+                {"k":4,"t":"image","r":[3],"l":true},
+                {"k":8,"t":"image","r":[7],"l":true}
+            ]),
+        );
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "stays".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 128)
+                        .unwrap()
+                        .with_verbatim_text()
+                        .unwrap(),
+                    SemanticExtractionFieldSchema::try_image_url("image".into(), false, 2048)
+                        .unwrap(),
+                ],
+                2,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(1),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let token = |text: &str| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment_text(**fragment) == Some(text))
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let items: Vec<_> = ["Quiet flat with a balcony", "Bright studio by the park"].into_iter().map(|name|
+            json!({"fields":[{"name":"name","value":{"k":"text","sources":[token(name)]}}]})
+        ).collect();
+        let output = json!({"fields":[{"name":"stays","value":{"k":"rows","items":items}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        for (row, expected) in rows.items().iter().zip([
+            "https://example.test/amber.png",
+            "https://example.test/blue.png",
+        ]) {
+            assert!(
+                matches!(row.fields()[1].value(), SemanticExtractedValue::ImageUrl(url) if url.as_str() == expected)
+            );
+        }
+        assert_eq!(result.media.len(), 2);
+        assert!(result
+            .media
+            .iter()
+            .all(|media| !media.local_crop_permitted(std::time::Instant::now())));
+    }
+
+    #[test]
+    fn record_container_plan_is_exact_name_bound_and_lower_priority_than_a_loaded_picture() {
+        for loaded in [false, true] {
+            let observation = observation_with_media(
+                json!([
+                    {"k":1,"r":"document","fc":true},
+                    {"k":2,"p":0,"r":"document","b":{"x":0,"y":0,"w":220,"h":140},"fc":true},
+                    {"k":3,"p":1,"r":"heading","l":2,"n":"Amber record","fc":true},
+                    {"k":4,"p":1,"r":"image","b":{"x":10,"y":30,"w":128,"h":96},"m":"https://example.test/amber.png","fc":true},
+                    {"k":5,"p":0,"r":"document","b":{"x":230,"y":0,"w":220,"h":140},"fc":true},
+                    {"k":6,"p":4,"r":"heading","l":2,"n":"Blue record","fc":true}
+                ]),
+                "complete",
+                json!([
+                    {"k":2,"t":"record","r":[3],"l":true},
+                    {"k":4,"t":"image","r":[3],"l":loaded},
+                    {"k":5,"t":"record","r":[6],"l":true}
+                ]),
+            );
+            let read = read(&observation, 31);
+            let source = |name: &str| {
+                read.fragments()
+                    .iter()
+                    .find(|fragment| {
+                        fragment
+                            .content()
+                            .text()
+                            .is_some_and(|value| value.as_str() == name)
+                    })
+                    .unwrap()
+                    .id()
+            };
+            let mut counts = read.media_diagnostics();
+            read.count_media_relations(&[source("Amber record")], &mut counts);
+            read.count_media_relations(&[source("Blue record")], &mut counts);
+            assert_eq!(
+                counts,
+                crate::SemanticRecordMediaDiagnostics {
+                    observed_images: 1,
+                    eligible_image_geometry: 1,
+                    structural_candidates: 3,
+                    saturated_candidates: 0,
+                    identity_roles: [2, 0, 0, 0, 0, 0, 0],
+                    identity_fields: [2, 0, 0, 0],
+                    self_image_pairs: 0,
+                    records: 2,
+                    identity_sources: 2,
+                    same_capture_pairs: 6,
+                    related_pairs: 3,
+                }
+            );
+            let amber = read
+                .media_for_record(0, &[source("Amber record")], [7; 32])
+                .unwrap();
+            let blue = read
+                .media_for_record(1, &[source("Blue record")], [7; 32])
+                .unwrap();
+            assert_eq!(amber.key, if loaded { 4 } else { 2 });
+            assert_eq!(blue.key, 5);
+            assert!(
+                !amber.local_crop_permitted(std::time::Instant::now()),
+                "DOM metadata cannot mint screenshot permission"
+            );
+            assert_ne!(amber.source(), blue.source());
+        }
+    }
+
+    #[test]
+    fn local_crop_permission_cannot_change_account_context_deadline_or_permission() {
+        use crate::{
+            AgentAccountAttestationId, AgentAccountId, AgentAccountScope,
+            AgentContextAccountBinding as Binding,
+        };
+        let context = observation().request().context();
+        let other = crate::ContextJoin::work_execution(
+            ContextIdentity::new(
+                ContextId::from_raw(999),
+                context.identity().owner(),
+                context.identity().profile(),
+                ContextKind::Owned,
+            ),
+            context.context_generation(),
+            context.navigation_epoch(),
+            context.frame_generation(),
+        );
+        let account = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let changed = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Authenticated(AgentAccountId::generate()),
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let refreshed = Binding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            account.account(),
+            crate::AgentPolicyInstant::from_millis(2),
+        );
+        let now = std::time::Instant::now();
+        let expires = now + std::time::Duration::from_secs(2);
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, true, now, expires
+        )
+        .is_some());
+        assert!(
+            crate::semantic_media::SemanticRecordCropPermit::admit(
+                context, account, refreshed, true, now, expires
+            )
+            .is_none(),
+            "a stale sample is never silently treated as the refreshed attestation"
+        );
+        assert!(
+            crate::semantic_media::SemanticRecordCropPermit::admit(
+                context, refreshed, refreshed, true, now, expires
+            )
+            .is_some(),
+            "only the verified sample frozen before mapping can remain exact"
+        );
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, false, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, changed, true, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            other, account, account, true, now, expires
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context, account, account, true, now, now
+        )
+        .is_none());
+        assert!(crate::semantic_media::SemanticRecordCropPermit::admit(
+            context,
+            account,
+            account,
+            true,
+            now,
+            now + std::time::Duration::from_secs(9)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn local_crop_budget_is_shared_one_shot_and_cannot_be_replayed_after_expiry() {
+        use crate::semantic_media::{SemanticRecordCropPermit, SemanticRecordMediaPlan};
+        use crate::{AgentAccountAttestationId, AgentAccountScope, AgentContextAccountBinding};
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let observation = observation();
+        let context = observation.request().context();
+        let account = AgentContextAccountBinding::new(
+            AgentAccountAttestationId::generate(),
+            context,
+            AgentAccountScope::Anonymous,
+            crate::AgentPolicyInstant::from_millis(1),
+        );
+        let now = std::time::Instant::now();
+        let expires = now + std::time::Duration::from_secs(2);
+        let mut permission =
+            SemanticRecordCropPermit::admit(context, account, account, true, now, expires).unwrap();
+        permission.remaining = std::sync::Arc::new(AtomicU8::new(1));
+        let mut plan = SemanticRecordMediaPlan {
+            outcome: Default::default(),
+            fetch_stage: Default::default(),
+            crop: None,
+            record: 0,
+            source: [1; 32],
+            frame: observation.frames()[0].frame().clone(),
+            invocation: crate::SemanticInvocationId::new(1).unwrap(),
+            snapshot: crate::SemanticSnapshotGeneration::new(1).unwrap(),
+            key: 2,
+            name_key: 3,
+        };
+        let native = plan.clone();
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::MissingSource);
+        assert!(plan.native_outcome().permits_public_candidate());
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::PrivacyRefused);
+        native.record_native_outcome(crate::SemanticRecordMediaOutcome::Fetched);
         assert_eq!(
-            extract(&excess).unwrap_err(),
-            SemanticExtractionError::ListLimit
+            plan.native_outcome(),
+            crate::SemanticRecordMediaOutcome::PrivacyRefused
+        );
+        assert!(!plan.native_outcome().permits_public_candidate());
+        assert!(
+            !plan.begin_local_crop(now),
+            "an archive alone has no crop permission"
+        );
+        plan.crop = Some(permission.for_record());
+        let same_record = plan.clone();
+        let mut sibling = plan.clone();
+        sibling.record = 1;
+        sibling.crop = Some(permission.for_record());
+        assert!(plan.begin_local_crop(now));
+        assert!(
+            !same_record.begin_local_crop(now),
+            "clones cannot replay the reservation"
+        );
+        assert!(
+            !sibling.begin_local_crop(now),
+            "records share the original remaining budget"
+        );
+        assert_eq!(permission.remaining.load(Ordering::Acquire), 0);
+        assert!(plan.local_crop_reserved(now));
+        assert!(
+            !plan.local_crop_reserved(expires),
+            "a spent reservation cannot extend its original deadline"
+        );
+    }
+
+    #[test]
+    fn cited_public_picture_is_a_candidate_without_native_pixel_authority() {
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"heading","l":1,"n":"Cabin Alpha"},
+            {"k":3,"p":0,"r":"image","n":"Cabin Alpha","m":"https://images.example.test/sibling.jpg"}
+        ]));
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows(
+                "records".into(),
+                true,
+                vec![
+                    SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+                    SemanticExtractionFieldSchema::try_image_url("photo".into(), false, 2048)
+                        .unwrap(),
+                ],
+                8,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let token = |field| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment.field() == field)
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let output = json!({"v":1,"schema":1,"fields":[{"name":"records","value":{"k":"rows","items":[{"fields":[
+            {"name":"name","value":{"k":"text","value":"Cabin Alpha","sources":[token(crate::SemanticReadField::AccessibleName)]}},
+            {"name":"photo","value":{"k":"image_url","value":"https://images.example.test/sibling.jpg","sources":[token(crate::SemanticReadField::ImageSource)]}}
+        ]}]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.items().len(), 1);
+        assert_eq!(rows.items()[0].fields().len(), 2);
+        assert_eq!(rows.items()[0].fields()[0].name(), "name");
+        assert_eq!(result.stats().dropped(), 0);
+        assert!(
+            result.media.is_empty(),
+            "a cited URL never mints a native pixel/crop plan"
+        );
+        let mut missing = output.clone();
+        missing["fields"][0]["value"]["items"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let repaired = extract_semantic_read(
+            &schema,
+            &read,
+            &delivered(&read),
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&missing).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = repaired.fields()[0].value() else {
+            panic!("rows")
+        };
+        assert_eq!(
+            rows.items()[0].fields().len(),
+            2,
+            "the observed named-image candidate also fills an omitted optional image field"
+        );
+        assert!(repaired.media.is_empty());
+    }
+
+    #[test]
+    fn listing_records_bind_pictures_to_native_card_provenance_not_image_names() {
+        // Shaped like the recorded amazon.com and x-kom.pl listings: the model
+        // cites the card text for everything, or leaves the link out.
+        let corvette = "https://www.amazon.com/LEGO-Technic-Chevrolet-Corvette-Stingray/dp/B0DFTPRHFK/ref=sr_1_1";
+        let mclaren =
+            "https://www.amazon.com/LEGO-Technic-McLaren-Hypercar/dp/B0CWH4RKRP/ref=sr_1_3";
+        let observation = observation_with_media(
+            json!([
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"list_item","t":"LEGO 2K+ bought in past month Price, product page PLN 230.57"},
+                {"k":3,"p":0,"r":"image","n":"Wrong unrelated label","b":{"x":0,"y":0,"w":160,"h":110},"m":"https://m.media-amazon.com/images/I/810qnPKsqBL.jpg"},
+                {"k":4,"p":0,"r":"link","n":"Technic Chevrolet Corvette Stingray Toy Car - Model Car Kit for Display - 42205","u":corvette},
+                {"k":5,"p":0,"r":"link","n":"PLN 230.57","u":corvette},
+                {"k":6,"p":0,"r":"list_item","t":"LEGO Price, product page PLN 1 299,00 zł"},
+                {"k":7,"p":0,"r":"image","b":{"x":200,"y":0,"w":160,"h":110},"m":"https://m.media-amazon.com/images/I/71mclaren.jpg"},
+                {"k":8,"p":0,"r":"link","n":"LEGO Technic McLaren P1 Hypercar","u":mclaren},
+                {"k":9,"p":0,"r":"paragraph","t":"1 299,00 zł"}
+            ]),
+            "complete",
+            json!([
+                {"k":3,"t":"image","r":[2,4,5],"l":true},
+                {"k":7,"t":"image","r":[6,8,9],"l":true}
+            ]),
+        );
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+            SemanticExtractionFieldSchema::try_image_url("photo".into(), false, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 8).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::STANDARD,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let token = |text: &str| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment_text(**fragment) == Some(text))
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let card = token("LEGO Price, product page PLN 1 299,00 zł");
+        // No envelope header, a url cited from card text, no picture, and a
+        // record given as a plain object map.
+        let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"LEGO Technic Chevrolet Corvette Stingray Toy Car - Model Car Kit for Display - 42205","sources":[token("LEGO 2K+ bought in past month Price, product page PLN 230.57")]}},
+                {"name":"price","value":{"k":"text","sources":[token("PLN 230.57")]}},
+                {"name":"url","value":{"k":"url","sources":[token("PLN 230.57")]}}
+            ]},
+            {"name":{"value":"LEGO Technic McLaren P1 Hypercar","sources":[card.clone()]},
+             "price":{"k":"text","sources":[token("1 299,00 zł")]},
+             "url":{"k":"url","sources":[card]}}
+        ]}}]});
+        // A mapping that admits no record is told so once; one that admits
+        // any is not.
+        let empty = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[]}}]});
+        assert!(extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&empty).unwrap(),
+        )
+        .unwrap()
+        .is_empty());
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        assert!(!result.is_empty());
+        let result = result.into_owned().unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        let cells: Vec<Vec<(String, String)>> = rows
+            .items()
+            .iter()
+            .map(|row| {
+                row.fields()
+                    .iter()
+                    .map(|field| {
+                        let text = match field.value() {
+                            SemanticExtractedValue::Text(text)
+                            | SemanticExtractedValue::Url(text)
+                            | SemanticExtractedValue::ImageUrl(text) => text.as_str().to_owned(),
+                            _ => panic!("kind"),
+                        };
+                        (field.name().to_owned(), text)
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0][1], ("price".into(), "PLN 230.57".into()));
+        assert_eq!(cells[0][2], ("url".into(), corvette.into()));
+        assert_eq!(
+            cells[0][3],
+            (
+                "photo".into(),
+                "https://m.media-amazon.com/images/I/810qnPKsqBL.jpg".into()
+            )
+        );
+        assert_eq!(cells[1][1], ("price".into(), "1 299,00 zł".into()));
+        assert_eq!(cells[1][2], ("url".into(), mclaren.into()));
+        assert_eq!(
+            cells[1][3],
+            (
+                "photo".into(),
+                "https://m.media-amazon.com/images/I/71mclaren.jpg".into()
+            )
+        );
+    }
+
+    #[test]
+    fn only_a_text_value_may_cite_the_viewport_image_and_it_is_read_from_pixels() {
+        // A gallery whose prices are drawn as images: little text, pictures.
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"heading","l":1,"n":"Sets"},
+            {"k":3,"p":0,"r":"image","n":"Technic 42205"}
+        ]));
+        assert!(crate::semantic_observation_reads_sparse(&observation));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), false, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 8).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let token = |field: crate::SemanticReadField| {
+            read.fragments()
+                .iter()
+                .find(|fragment| fragment.field() == field)
+                .unwrap()
+                .id()
+                .model_token()
+        };
+        let pixels = token(crate::SemanticReadField::ViewportImage);
+        let name = token(crate::SemanticReadField::AccessibleName);
+        let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Technic 42205","sources":[name]}},
+                {"name":"price","value":{"k":"text","value":"899 zł","sources":[pixels.clone()]}},
+                {"name":"url","value":{"k":"url","sources":[pixels.clone()]}}
+            ]}
+        ]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        let fields = rows.items()[0].fields();
+        // The price stands as read from the image; a link cannot come from it.
+        assert!(fields.iter().any(|field| field.name() == "price"
+            && matches!(field.value(), SemanticExtractedValue::Text(price) if price.as_str() == "899 zł")));
+        assert!(!fields.iter().any(|field| field.name() == "url"));
+        // A look holding anything private gets no viewport image.
+        let private = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"textbox","n":"Email","q":"sensitive"}
+        ]));
+        let read = crate::read_semantic_observation_for_schema_with_viewport_image(
+            &private,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        assert!(!read
+            .fragments()
+            .iter()
+            .any(|fragment| fragment.field() == crate::SemanticReadField::ViewportImage));
+    }
+
+    #[test]
+    fn record_links_printed_in_cited_page_facts_resolve_against_the_page() {
+        // Shaped like the recorded x-kom.pl page facts: one summary paragraph
+        // lists every product with a site-relative address.
+        let observation = observation_with_nodes(json!([
+            {"k":1,"r":"document","o":16},
+            {"k":2,"p":0,"r":"paragraph","n":"Page facts","t":"product: Acer Aspire 14 AI/32GB | price: 3249 PLN | url: /p/1322289-acer.html ;; product: Dell 15 Ryzen 7/32GB | price: 4399 PLN | url: /p/1520309-dell.html"}
+        ]));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_text("price".into(), false, 1024)
+                .unwrap()
+                .with_verbatim_text()
+                .unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 8).unwrap()],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let delivery = delivered(&read);
+        let facts = read
+            .fragments()
+            .iter()
+            .find(|fragment| fragment.field() == crate::SemanticReadField::VisibleText)
+            .unwrap()
+            .id()
+            .model_token();
+        let output = json!({"fields":[{"name":"output_0","value":{"k":"rows","items":[
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Acer Aspire 14 AI/32GB","sources":[facts]}},
+                {"name":"price","value":{"k":"text","value":"3249 PLN","sources":[facts]}},
+                {"name":"url","value":{"k":"url","sources":[facts]}}
+            ]},
+            {"fields":[
+                {"name":"name","value":{"k":"text","value":"Dell 15 Ryzen 7/32GB","sources":[facts]}},
+                {"name":"price","value":{"k":"text","value":"4399 PLN or less","sources":[facts]}},
+                {"name":"url","value":{"k":"url","value":"/p/1520309-dell.html","sources":[facts]}}
+            ]}
+        ]}}]});
+        let result = extract_semantic_read(
+            &schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&output).unwrap(),
+        )
+        .unwrap();
+        let SemanticExtractedValue::Rows(rows) = result.fields()[0].value() else {
+            panic!("rows");
+        };
+        // A price column copies one amount the cited text shows; a price
+        // written with words around it publishes the amount it names.
+        assert!(
+            matches!(rows.items()[0].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "3249 PLN")
+        );
+        assert!(
+            matches!(rows.items()[1].fields()[1].value(), SemanticExtractedValue::Text(price) if price.as_str() == "4399 PLN")
+        );
+        let urls: Vec<_> = rows
+            .items()
+            .iter()
+            .map(|row| match row.fields().last().unwrap().value() {
+                SemanticExtractedValue::Url(url) => url.as_str().to_owned(),
+                _ => panic!("url"),
+            })
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "https://extract.example.test/p/1322289-acer.html",
+                "https://extract.example.test/p/1520309-dell.html"
+            ]
         );
     }
 
@@ -2768,7 +4819,8 @@ mod tests {
             &encode(&output)
         )
         .is_ok());
-        output["fields"][0]["value"]["sources"] = json!(["@r3"]);
+        output["fields"][0]["value"] =
+            json!({"k":"text","value":"Not on the page","sources":["@r3"]});
         assert_eq!(
             extract_semantic_read(
                 &schema,
@@ -2795,7 +4847,7 @@ mod tests {
     }
 
     #[test]
-    fn verbatim_text_requires_one_exact_source_and_preserves_privacy() {
+    fn verbatim_text_copies_its_cited_source_and_preserves_privacy() {
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
@@ -2807,13 +4859,12 @@ mod tests {
         .unwrap();
         for (value, sources, expected) in [
             ("Quarterly summary", json!(["@r1"]), None),
+            // Whole words of the cited text, or the same words spaced
+            // differently, still copy it.
+            ("Quarterly", json!(["@r1"]), None),
+            ("Quarterly summary ", json!(["@r1"]), None),
             (
-                "Quarterly",
-                json!(["@r1"]),
-                Some(SemanticExtractionError::VerbatimMismatch),
-            ),
-            (
-                "Quarterly summary ",
+                "Quarterly summ",
                 json!(["@r1"]),
                 Some(SemanticExtractionError::VerbatimMismatch),
             ),
@@ -2822,11 +4873,7 @@ mod tests {
                 json!(["@r2"]),
                 Some(SemanticExtractionError::VerbatimMismatch),
             ),
-            (
-                "Quarterly summary",
-                json!(["@r1", "@r2"]),
-                Some(SemanticExtractionError::VerbatimMismatch),
-            ),
+            ("Quarterly summary", json!(["@r1", "@r2"]), None),
             (
                 "Private customer note",
                 json!(["@r5"]),
@@ -2864,16 +4911,17 @@ mod tests {
             vec![SemanticExtractionFieldSchema::try_text("title".into(), true, 64).unwrap()],
         )
         .unwrap();
-        assert_eq!(
-            extract_semantic_read(
-                &generated,
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::PublicOnly,
-                &serde_json::to_vec(&source_only).unwrap()
-            )
-            .unwrap_err(),
-            SemanticExtractionError::Malformed
+        // A generated text left without a value is its one cited fragment's text.
+        let copied = extract_semantic_read(
+            &generated,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&source_only).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(copied.fields()[0].value(), SemanticExtractedValue::Text(text) if text.as_str() == "Quarterly summary")
         );
         assert_eq!(
             SemanticExtractionFieldSchema::try_unsigned("count".into(), true, 100)
@@ -3238,26 +5286,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_unknown_duplicate_and_mismatched_envelopes() {
+    fn tolerates_harmless_envelope_forms_and_refuses_unusable_ones() {
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
+        let admit = |raw: &[u8]| {
+            extract_semantic_read(
+                &schema(),
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::Sensitive,
+                raw,
+            )
+        };
+        let valid = serde_json::to_string(&valid_output()).unwrap();
+        let mut bare = valid_output();
+        bare.as_object_mut().unwrap().remove("v");
+        bare.as_object_mut().unwrap().remove("schema");
+        bare["extra"] = json!(true);
+        let mut mapped = valid_output();
+        mapped["fields"] = json!({
+            "count": {"k": "unsigned", "value": "42", "sources": "@r2"},
+            "Title": {"value": "Quarterly summary", "source": ["r1"]},
+            "active": {"value": "yes", "sources": [4]},
+        });
         for raw in [
-            br#"{"v":1,"schema":29,"fields":[],"extra":true}"#.as_slice(),
-            br#"{"v":1,"v":1,"schema":29,"fields":[]}"#.as_slice(),
-            br#"{"v":1,"schema":29,"fields":[{"name":"title","name":"title","value":{"k":"text","value":"x","sources":["@r1"]}}]}"#.as_slice(),
+            format!("```json\n{valid}\n```"),
+            format!("Here is the mapping: {valid} done"),
+            serde_json::to_string(&bare).unwrap(),
+            serde_json::to_string(&mapped).unwrap(),
+            r#"{"v":1,"v":1,"schema":29,"fields":[{"name":"title","value":{"k":"text","value":"Quarterly summary","sources":["@r1"]}},{"name":"active","value":{"k":"boolean","value":true,"sources":["@r4"]}},{"name":"count","value":{"k":"unsigned","value":42,"sources":["@r2"]}}]}"#.to_owned(),
         ] {
-            assert_eq!(
-                extract_semantic_read(
-                    &schema(),
-                    &read,
-                    &delivery,
-                    SemanticReadSensitivityLimit::Sensitive,
-                    raw,
-                )
-                .expect_err("malformed"),
-                SemanticExtractionError::Malformed
-            );
+            let result = admit(raw.as_bytes()).unwrap_or_else(|error| panic!("{raw}: {error}"));
+            assert!(result.fields().len() >= 3, "{raw}");
+            let SemanticExtractedValue::Unsigned(count) = result.fields()[2].value() else {
+                panic!("count");
+            };
+            assert_eq!(count.value(), 42);
+        }
+        for raw in [b"not json".as_slice(), b"[]", b"{\"fields\": 7}"] {
+            assert!(admit(raw).is_err());
         }
 
         let mut version = valid_output();
@@ -3274,62 +5342,46 @@ mod tests {
         );
         let oversized = vec![b' '; MAX_SEMANTIC_EXTRACTION_INPUT_BYTES + 1];
         assert_eq!(
-            extract_semantic_read(
-                &schema(),
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::Sensitive,
-                &oversized,
-            )
-            .expect_err("input ceiling"),
+            admit(&oversized).expect_err("input ceiling"),
             SemanticExtractionError::InputLimit
         );
 
-        let output_fields: Vec<Value> = (0..=MAX_SEMANTIC_EXTRACTION_FIELDS)
-            .map(|index| {
-                json!({"name": format!("field{index}"), "value": {
-                    "k": "boolean", "value": true, "sources": ["@r1"]
-                }})
-            })
-            .collect();
-        let output = serde_json::to_vec(&json!({
-            "v": SEMANTIC_EXTRACTION_SCHEMA_VERSION,
-            "schema": 29,
-            "fields": output_fields
-        }))
-        .expect("output");
+        // Fields the trusted schema lacks are left out and counted.
+        let mut extra: Vec<Value> = valid_output()["fields"].as_array().unwrap().clone();
+        extra.extend((0..=MAX_SEMANTIC_EXTRACTION_FIELDS).map(|index| {
+            json!({"name": format!("field{index}"), "value": {
+                "k": "boolean", "value": true, "sources": ["@r1"]
+            }})
+        }));
+        let output = serde_json::to_vec(&json!({"v": 1, "schema": 29, "fields": extra})).unwrap();
+        let result = admit(&output).expect("unknown fields dropped");
+        assert_eq!(result.fields().len(), 4);
         assert_eq!(
-            extract_semantic_read(
-                &schema(),
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::Sensitive,
-                &output,
-            )
-            .expect_err("field ceiling"),
-            SemanticExtractionError::FieldLimit
+            usize::from(result.stats().dropped()),
+            MAX_SEMANTIC_EXTRACTION_FIELDS + 1
         );
     }
 
     #[test]
-    fn rejects_missing_duplicate_reordered_extra_and_wrong_type_fields() {
+    fn field_order_duplicates_and_extras_normalize_while_missing_and_wrong_kinds_fail() {
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
+        let admit = |output: &Value| {
+            extract_semantic_read(
+                &schema(),
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::Sensitive,
+                &serde_json::to_vec(output).expect("output"),
+            )
+        };
         let mut optional_omitted = valid_output();
         optional_omitted["fields"]
             .as_array_mut()
             .expect("fields")
             .pop();
-        let optional_result = extract_semantic_read(
-            &schema(),
-            &read,
-            &delivery,
-            SemanticReadSensitivityLimit::Sensitive,
-            &serde_json::to_vec(&optional_omitted).expect("output"),
-        )
-        .expect("optional omission");
-        assert_eq!(optional_result.fields().len(), 3);
+        assert_eq!(admit(&optional_omitted).unwrap().fields().len(), 3);
 
         let mut missing = valid_output();
         missing["fields"].as_array_mut().expect("fields").remove(1);
@@ -3339,25 +5391,30 @@ mod tests {
         );
 
         let mut duplicate = valid_output();
-        let duplicate_field = duplicate["fields"][0].clone();
+        let mut duplicate_field = duplicate["fields"][0].clone();
+        duplicate_field["value"]["value"] = json!("Second copy");
         duplicate["fields"]
             .as_array_mut()
             .expect("fields")
             .insert(1, duplicate_field);
-        assert_eq!(
-            extract_value_error(&duplicate),
-            SemanticExtractionError::DuplicateField
-        );
+        let result = admit(&duplicate).unwrap();
+        let SemanticExtractedValue::Text(title) = result.fields()[0].value() else {
+            panic!("title");
+        };
+        assert_eq!(title.as_str(), "Quarterly summary");
 
         let mut reordered = valid_output();
         reordered["fields"]
             .as_array_mut()
             .expect("fields")
-            .swap(0, 1);
-        assert_eq!(
-            extract_value_error(&reordered),
-            SemanticExtractionError::FieldOrder
-        );
+            .reverse();
+        let names: Vec<_> = admit(&reordered)
+            .unwrap()
+            .fields()
+            .iter()
+            .map(|field| field.name().to_owned())
+            .collect();
+        assert_eq!(names, ["title", "active", "count", "tags"]);
 
         let mut extra = valid_output();
         extra["fields"]
@@ -3366,35 +5423,45 @@ mod tests {
             .push(json!({"name": "other", "value": {
                 "k": "boolean", "value": true, "sources": ["@r1"]
             }}));
-        assert_eq!(
-            extract_value_error(&extra),
-            SemanticExtractionError::UnexpectedField
-        );
+        assert_eq!(admit(&extra).unwrap().stats().dropped(), 1);
 
         let mut wrong_type = valid_output();
         wrong_type["fields"][0]["value"] =
             json!({"k": "boolean", "value": true, "sources": ["@r1"]});
         assert_eq!(
             extract_value_error(&wrong_type),
-            SemanticExtractionError::TypeMismatch
+            SemanticExtractionError::MissingRequiredField
         );
     }
 
     #[test]
     fn enforces_text_secret_numeric_list_and_primitive_value_bounds() {
+        let observation = observation();
+        let read = read(&observation, 31);
+        let delivery = delivered(&read);
+        let admit = |output: &Value| {
+            extract_semantic_read(
+                &schema(),
+                &read,
+                &delivery,
+                SemanticReadSensitivityLimit::Sensitive,
+                &serde_json::to_vec(output).expect("output"),
+            )
+        };
+        let title = |output: &Value| {
+            let result = admit(output).unwrap();
+            let SemanticExtractedValue::Text(title) = result.fields()[0].value() else {
+                panic!("title");
+            };
+            title.as_str().to_owned()
+        };
         let mut text_limit = valid_output();
         text_limit["fields"][0]["value"]["value"] = json!("x".repeat(65));
-        assert_eq!(
-            extract_value_error(&text_limit),
-            SemanticExtractionError::TextLimit
-        );
+        assert_eq!(title(&text_limit), "x".repeat(64));
 
-        let mut invalid_text = valid_output();
-        invalid_text["fields"][0]["value"]["value"] = json!("line\nbreak");
-        assert_eq!(
-            extract_value_error(&invalid_text),
-            SemanticExtractionError::InvalidText
-        );
+        let mut multiline = valid_output();
+        multiline["fields"][0]["value"]["value"] = json!("line\n\tbreak\u{200b} here");
+        assert_eq!(title(&multiline), "line break here");
 
         let mut secret = valid_output();
         secret["fields"][0]["value"]["value"] = json!("sk_live_12345678901234567890");
@@ -3418,10 +5485,12 @@ mod tests {
             {"value": "d", "sources": ["@r1"]},
             {"value": "e", "sources": ["@r1"]}
         ]);
-        assert_eq!(
-            extract_value_error(&list),
-            SemanticExtractionError::ListLimit
-        );
+        let result = admit(&list).unwrap();
+        let SemanticExtractedValue::TextList(tags) = result.fields()[3].value() else {
+            panic!("tags");
+        };
+        assert_eq!(tags.items().len(), 4);
+        assert_eq!(result.stats().dropped(), 1);
 
         let many_fields = (0..5)
             .map(|index| {
@@ -3436,7 +5505,7 @@ mod tests {
         .expect("many schema");
         let fields: Vec<Value> = (0..5)
             .map(|index| {
-                let item_count = if index < 4 { 64 } else { 1 };
+                let item_count = if index < 4 { 64 } else { 2 };
                 json!({
                     "name": format!("list{index}"),
                     "value": {
@@ -3455,27 +5524,24 @@ mod tests {
             "fields": fields
         }))
         .expect("many output");
-        let observation = observation();
-        let read = read(&observation, 31);
-        let delivery = delivered(&read);
+        // Values past the process-wide ceiling are left out, never admitted.
+        let result = extract_semantic_read(
+            &many_schema,
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::Sensitive,
+            &many_output,
+        )
+        .expect("bounded");
         assert_eq!(
-            extract_semantic_read(
-                &many_schema,
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::Sensitive,
-                &many_output,
-            )
-            .expect_err("value ceiling"),
-            SemanticExtractionError::ValueLimit
+            usize::from(result.stats().values()),
+            MAX_SEMANTIC_EXTRACTION_VALUES
         );
+        assert_eq!(result.stats().dropped(), 2);
     }
 
     #[test]
-    fn public_brief_multiline_refuses_before_sources_and_structured_lines_keep_provenance() {
-        // Equivalent to the retained public failure, not retained provider content.
-        // The original decoded scalar had 2,495 bytes, paragraph breaks, and four
-        // valid ordered sources. Inline @r strings are not source-array authority.
+    fn multiline_text_becomes_one_line_and_keeps_only_its_own_provenance() {
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
@@ -3486,10 +5552,10 @@ mod tests {
         .unwrap();
         let prefix = "Summary @r30.\n\nImportant claim @r38.\n\nCaveat @r52. ";
         let multiline = format!("{prefix}{}", "x".repeat(2495 - prefix.len()));
-        assert_eq!(multiline.len(), 2495);
         let mut output = json!({"v":1,"schema":1,"fields":[{"name":"answer","value":{
             "k":"text","value":multiline,"sources":["@r30","@r35","@r36","@r37"]
         }}]});
+        // Inline @r strings are not citations, and no cited fragment exists.
         assert_eq!(
             extract_semantic_read(
                 &legacy,
@@ -3499,19 +5565,23 @@ mod tests {
                 &serde_json::to_vec(&output).unwrap()
             )
             .unwrap_err(),
-            SemanticExtractionError::InvalidText
+            SemanticExtractionError::SourceMissing
         );
-        // A distinct well-formed model output, not automatic normalization/retry.
-        output["fields"][0]["value"]["value"] = json!("A concise single-line summary.");
         output["fields"][0]["value"]["sources"] = json!(["@r1", "@r2", "@r3", "@r4"]);
-        assert!(extract_semantic_read(
+        let result = extract_semantic_read(
             &legacy,
             &read,
             &delivery,
             SemanticReadSensitivityLimit::PublicOnly,
-            &serde_json::to_vec(&output).unwrap()
+            &serde_json::to_vec(&output).unwrap(),
         )
-        .is_ok());
+        .unwrap();
+        let SemanticExtractedValue::Text(answer) = result.fields()[0].value() else {
+            panic!("answer");
+        };
+        assert!(answer
+            .as_str()
+            .starts_with("Summary @r30. Important claim @r38. Caveat"));
 
         let schema = SemanticExtractionSchema::try_new(
             legacy.id(),
@@ -3524,30 +5594,30 @@ mod tests {
                     320,
                 )
                 .unwrap(),
-                SemanticExtractionFieldSchema::try_text_list("caveats".into(), true, 4, 224)
-                    .unwrap(),
             ],
         )
         .unwrap();
-        let mut structured = json!({"v":1,"schema":1,"fields":[
+        let structured = json!({"v":1,"schema":1,"fields":[
             {"name":"summary","value":{"k":"text","value":"A concise brief.","sources":["@r1"]}},
-            {"name":"important_claims","value":{"k":"text_list","sources":["@r1","@r2"],"items":[{"value":"One claim.","sources":["@r1"]},{"value":"Another claim.","sources":["@r2"]}]}},
-            {"name":"caveats","value":{"k":"text_list","sources":["@r3"],"items":[{"value":"A limitation.","sources":["@r3"]}]}}
+            {"name":"important_claims","value":{"k":"text_list","sources":["@r1","@r2"],"items":[
+                {"value":"One claim.\n\nAnother paragraph.","sources":["@r1"]},
+                {"value":"Uncited claim.","sources":["@r99"]}
+            ]}}
         ]});
-        let bytes = serde_json::to_vec(&structured).unwrap();
         let result = extract_semantic_read(
             &schema,
             &read,
             &delivery,
             SemanticReadSensitivityLimit::PublicOnly,
-            &bytes,
+            &serde_json::to_vec(&structured).unwrap(),
         )
         .unwrap();
         assert_eq!(result.trust(), SemanticExtractionTrust::ModelMapped);
         let SemanticExtractedValue::TextList(claims) = result.fields()[1].value() else {
             panic!("claims");
         };
-        assert_eq!(claims.items().len(), 2);
+        assert_eq!(claims.items().len(), 1);
+        assert_eq!(claims.items()[0].as_str(), "One claim. Another paragraph.");
         assert_eq!(
             result
                 .sources(claims.items()[0].source_span())
@@ -3555,32 +5625,7 @@ mod tests {
                 .len(),
             1
         );
-        structured["fields"][1]["value"]["items"][0]["value"] =
-            json!("One claim.\n\nAnother paragraph.");
-        assert_eq!(
-            extract_semantic_read(
-                &schema,
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::PublicOnly,
-                &serde_json::to_vec(&structured).unwrap()
-            )
-            .unwrap_err(),
-            SemanticExtractionError::InvalidText
-        );
-        structured["fields"][1]["value"]["items"][0]["value"] = json!("One claim.");
-        structured["fields"][1]["value"]["items"][0]["sources"] = json!(["@r99"]);
-        assert_eq!(
-            extract_semantic_read(
-                &schema,
-                &read,
-                &delivery,
-                SemanticReadSensitivityLimit::PublicOnly,
-                &serde_json::to_vec(&structured).unwrap()
-            )
-            .unwrap_err(),
-            SemanticExtractionError::SourceMissing
-        );
+        assert_eq!(result.stats().dropped(), 1);
     }
 
     #[test]
@@ -3589,7 +5634,7 @@ mod tests {
         let read = read(&observation, 31);
         let delivery = delivered(&read);
         let schema = schema();
-        for raw in [json!(["@r2", "@r1"]), json!(["@r2", "@r1", "@r2"])] {
+        let title_sources = |raw: Value| {
             let mut output = valid_output();
             output["fields"][0]["value"]["sources"] = raw;
             let bytes = serde_json::to_vec(&output).unwrap();
@@ -3605,59 +5650,86 @@ mod tests {
                 panic!("text");
             };
             assert_eq!(title.as_str(), "Quarterly summary");
-            let ids: Vec<_> = result
+            result
                 .sources(title.source_span())
                 .unwrap()
                 .iter()
                 .map(|source| source.fragment().id().get())
-                .collect();
-            assert_eq!(ids, [1, 2]);
-            assert_eq!(result.stats().source_edges(), 8);
+                .collect::<Vec<_>>()
+        };
+        for raw in [
+            json!(["@r2", "@r1"]),
+            json!(["@r2", "@r1", "@r2"]),
+            json!(["r2", "@R1"]),
+            json!("@r1, @r2"),
+            json!([2, "@r01"]),
+        ] {
+            assert_eq!(title_sources(raw), [1, 2]);
         }
-        let mut output = valid_output();
-        output["fields"][0]["value"]["sources"] = json!(["@r99", "@r1", "@r99"]);
+        // Citations of fragments the read never delivered are left out.
+        assert_eq!(title_sources(json!(["@r99", "@r1", "@r99"])), [1]);
         assert_eq!(
-            extract_value_error(&output),
-            SemanticExtractionError::SourceMissing
+            title_sources(json!(["@r1", "@r1", "@r1", "@r1", "@r1"])),
+            [1]
         );
-        output["fields"][0]["value"]["sources"] = json!(["@r1", "@r1", "@r1", "@r1", "@r1"]);
         assert_eq!(
-            extract_value_error(&output),
-            SemanticExtractionError::SourceLimit
+            title_sources(json!(["@r1", "@r2", "@r3", "@r4", "@r5"])),
+            [1, 2, 3, 4]
         );
+        // With no usable citation, the fragment that shows the text is cited.
+        for raw in [json!([]), json!(["@r99"]), json!(["nonsense"])] {
+            assert_eq!(title_sources(raw), [1]);
+        }
     }
 
     #[test]
-    fn enforces_canonical_bounded_resolved_ordered_and_sensitive_sources() {
-        for (sources, expected) in [
-            (json!([]), SemanticExtractionError::SourceLimit),
-            (
-                json!(["@r1", "@r2", "@r3", "@r4", "@r5"]),
-                SemanticExtractionError::SourceLimit,
-            ),
-            (json!(["@r01"]), SemanticExtractionError::SourceInvalid),
-            (json!(["r1"]), SemanticExtractionError::SourceInvalid),
-            (json!(["@r99"]), SemanticExtractionError::SourceMissing),
-        ] {
-            let mut output = valid_output();
-            output["fields"][0]["value"]["sources"] = sources;
-            assert_eq!(extract_value_error(&output), expected);
+    fn values_without_evidence_or_beyond_sensitivity_are_refused() {
+        let mut output = valid_output();
+        output["fields"][0]["value"]["value"] = json!("Not shown on this page");
+        for sources in [json!([]), json!(["@r99"])] {
+            output["fields"][0]["value"]["sources"] = sources.clone();
+            assert!(
+                matches!(
+                    extract_value_error(&output),
+                    SemanticExtractionError::SourceLimit | SemanticExtractionError::SourceMissing
+                ),
+                "{sources}"
+            );
         }
 
         let observation = observation();
         let read = read(&observation, 31);
         let delivery = delivered(&read);
+        let mut output = valid_output();
+        output["fields"][0]["value"] = json!({
+            "k": "text", "value": "Private customer note", "sources": ["@r5"]
+        });
         assert_eq!(
             extract_semantic_read(
                 &schema(),
                 &read,
                 &delivery,
                 SemanticReadSensitivityLimit::PublicOnly,
-                &serde_json::to_vec(&valid_output()).expect("output"),
+                &serde_json::to_vec(&output).expect("output"),
             )
             .expect_err("sensitive citation"),
             SemanticExtractionError::Sensitivity
         );
+        // An optional list keeps its public items and leaves the sensitive one out.
+        let result = extract_semantic_read(
+            &schema(),
+            &read,
+            &delivery,
+            SemanticReadSensitivityLimit::PublicOnly,
+            &serde_json::to_vec(&valid_output()).expect("output"),
+        )
+        .expect("public items");
+        let SemanticExtractedValue::TextList(tags) = result.fields()[3].value() else {
+            panic!("tags");
+        };
+        assert_eq!(tags.items().len(), 1);
+        assert_eq!(tags.items()[0].as_str(), "Quarterly");
+        assert_eq!(result.stats().sensitive_source_edges(), 0);
     }
 
     #[test]
@@ -3710,5 +5782,71 @@ mod tests {
             .expect_err("source ceiling"),
             SemanticExtractionError::SourceLimit
         );
+    }
+
+    #[test]
+    fn a_read_over_budget_keeps_each_kept_record_s_link_for_a_link_column() {
+        // Airbnb's listing: cards in the main region, then a map repeating
+        // every price, all over the read's item budget.
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"landmark","lm":"main"}),
+        ];
+        for card in 0..20 {
+            let url = format!("https://www.airbnb.com/rooms/{card}?adults=1&check_in=2027-01-01");
+            nodes.push(
+                json!({"k":3 + card * 4,"p":1,"r":"link","n":format!("Condo {card}"),"u":url}),
+            );
+            nodes.push(
+                json!({"k":4 + card * 4,"p":1,"r":"paragraph","t":format!("Stylish home {card}")}),
+            );
+            nodes.push(json!({"k":5 + card * 4,"p":1,"r":"paragraph","t":"1 bath"}));
+            nodes.push(
+                json!({"k":6 + card * 4,"p":1,"r":"paragraph","t":format!("${},000", card + 3)}),
+            );
+        }
+        for marker in 0..40 {
+            nodes.push(
+                json!({"k":100 + marker,"p":1,"r":"paragraph","t":format!("Condo, ${marker},500")}),
+            );
+        }
+        let observation = observation_with_nodes(json!(nodes));
+        let row = vec![
+            SemanticExtractionFieldSchema::try_text("name".into(), true, 512).unwrap(),
+            SemanticExtractionFieldSchema::try_url("url".into(), true, 2048).unwrap(),
+        ];
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_rows("output_0".into(), true, row, 12).unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = crate::read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Initial,
+            SemanticCaptureInstant::from_millis(31),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::try_new(80, 48 * 1024).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let fields = |field| {
+            read.fragments()
+                .iter()
+                .filter(|fragment| fragment.field() == field)
+                .count()
+        };
+        let links = fields(crate::SemanticReadField::LinkDestination);
+        assert!(links >= 10, "{links}");
+        let named = read
+            .fragments()
+            .iter()
+            .filter(|fragment| {
+                fragment.field() == crate::SemanticReadField::AccessibleName
+                    && fragment_text(**fragment).is_some_and(|text| text.starts_with("Condo "))
+            })
+            .count();
+        assert_eq!(named, links);
     }
 }

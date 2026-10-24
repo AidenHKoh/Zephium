@@ -316,6 +316,21 @@ impl EngineHost {
         let Some(action) = resource.action.as_ref() else {
             return;
         };
+        if expired {
+            let loading = resource
+                .view
+                .as_ref()
+                .and_then(|view| view.work_navigation())
+                .is_some_and(|gate| gate.loading());
+            crate::agent_context_port::note_action_timeout_stage(
+                match (action.dispatched, action.terminal.is_some()) {
+                    (false, _) => "dispatch",
+                    (true, true) => "settle",
+                    (true, false) if loading => "navigation",
+                    (true, false) => "page",
+                },
+            );
+        }
         if expired && action.dispatched && action.terminal.is_none() {
             if let Some(semantic) = resource.view.as_ref().and_then(|view| view.semantic()) {
                 semantic.timeout_action(action.attempt);
@@ -416,6 +431,14 @@ impl EngineHost {
                         return;
                     };
                     action.dispatched = true;
+                    #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+                    if crate::platform::form_qualification::selection().is_some() {
+                        resource.form_actions.dispatch(
+                            native.attempt(),
+                            native.kind(),
+                            native.commits(),
+                        );
+                    }
                     // The runtime rechecks this fence on its next page pull.
                     // After that handoff, cancellation owns an uncertain effect.
                     let queued = guard.clone();
@@ -615,6 +638,21 @@ impl EngineHost {
         if !action.dispatched || action.terminal.is_some() {
             guard.fail();
             return;
+        }
+        #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+        if crate::platform::form_qualification::selection().is_some() {
+            let witness = resource
+                .view
+                .as_ref()
+                .and_then(|view| view.semantic())
+                .and_then(|semantic| semantic.take_form_receipt(action.attempt));
+            resource.form_actions.settle(
+                action.attempt,
+                !action.cancelled
+                    && !action.authority_revoked
+                    && terminal.qualification_failure().is_none(),
+                witness,
+            );
         }
         let completed_at = Instant::now();
         let settlement_eligible = resource

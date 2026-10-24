@@ -37,7 +37,40 @@ vi.mock("$domain/resources", async (original) => ({
 const profile = "00000000000000000000000001";
 const video = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42";
 
-test("a video link admits its thumbnail as its poster and opens its page", async () => {
+/** The admitted thumbnail's record, as the resource store answers for it. */
+const thumbnailRecord = {
+  kind: "record",
+  record: {
+    id: "thumbnail",
+    revision: "1",
+    created_at: "0",
+    updated_at: "0",
+    trashed: false,
+    draft: {
+      title: "hqdefault.jpg",
+      pinned: false,
+      related: [],
+      content: {
+        kind: "media",
+        asset: {
+          version: 1,
+          kind: "image",
+          mime: "image/jpeg",
+          bytes: 4096,
+          digest: "e".repeat(64),
+          name: "hqdefault.jpg",
+          origin: {
+            kind: "fetched",
+            url: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+            observed_at: "2026-09-24",
+          },
+        },
+      },
+    },
+  },
+};
+
+async function workspace(pictured: boolean) {
   await page.viewport(1200, 800);
   const snapshot: WorkEnvironmentSnapshot = {
     version: 1,
@@ -57,7 +90,29 @@ test("a video link admits its thumbnail as its poster and opens its page", async
     },
     elements: [
       { id: "link", area: null, reference: { kind: "link", url: video, title: "youtube.com" } },
+      ...(pictured
+        ? [
+            {
+              id: "picture",
+              area: null,
+              reference: { kind: "resource" as const, resource: "thumbnail" },
+            },
+          ]
+        : []),
     ],
+    ...(pictured
+      ? {
+          relations: [
+            {
+              id: "uses",
+              from: "link",
+              to: "picture",
+              kind: "uses" as const,
+              origin: { kind: "user" as const },
+            },
+          ],
+        }
+      : {}),
   };
   const environment = new WorkEnvironmentSession(profile, snapshot.space);
   environment.snapshot = snapshot;
@@ -69,40 +124,7 @@ test("a video link admits its thumbnail as its poster and opens its page", async
   }));
   native.resource.mockImplementation(async (_profile: string, call: { kind: string }) => ({
     profile,
-    response:
-      call.kind === "get"
-        ? {
-            kind: "record",
-            record: {
-              id: "thumbnail",
-              revision: "1",
-              created_at: "0",
-              updated_at: "0",
-              trashed: false,
-              draft: {
-                title: "hqdefault.jpg",
-                pinned: false,
-                related: [],
-                content: {
-                  kind: "media",
-                  asset: {
-                    version: 1,
-                    kind: "image",
-                    mime: "image/jpeg",
-                    bytes: 4096,
-                    digest: "e".repeat(64),
-                    name: "hqdefault.jpg",
-                    origin: {
-                      kind: "fetched",
-                      url: "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-                      observed_at: "2026-09-24",
-                    },
-                  },
-                },
-              },
-            },
-          }
-        : { kind: "page", items: [], next: null },
+    response: call.kind === "get" ? thumbnailRecord : { kind: "page", items: [], next: null },
   }));
   native.admit.mockImplementation(
     async (_profile: string, _environment: string, element: string) => {
@@ -127,7 +149,6 @@ test("a video link admits its thumbnail as its poster and opens its page", async
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: false,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
@@ -135,22 +156,49 @@ test("a video link admits its thumbnail as its poster and opens its page", async
   const root = screen.container.querySelector(".environment") as HTMLElement;
   root.style.height = "720px";
   root.style.width = "1100px";
-  await expect.poll(() => native.admit.mock.calls.length).toBe(1);
-  expect(native.admit.mock.calls[0]!.slice(1)).toEqual([
-    snapshot.id,
-    "link",
-    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
-  ]);
-  // The thumbnail is the video's poster, never a media card of its own.
-  // The picture waits on a notes lookup before its media read.
-  const poster = () =>
-    screen.container.querySelector<HTMLImageElement>(".media.video img")?.getAttribute("src") ?? "";
-  await expect.poll(poster, { timeout: 5000 }).toBe(`${PIXEL}#${"e".repeat(64)}`);
+  return { screen, environment };
+}
+
+// The thumbnail is the video's poster, never a media card of its own.
+// The picture waits on a notes lookup before its media read.
+const posterOf = (container: HTMLElement) =>
+  container.querySelector<HTMLImageElement>(".media.video img")?.getAttribute("src") ?? "";
+
+test("a video link draws its admitted thumbnail as its poster and opens its page", async () => {
+  native.admit.mockClear();
+  const { screen, environment } = await workspace(true);
+  await expect
+    .poll(() => posterOf(screen.container), { timeout: 5000 })
+    .toBe(`${PIXEL}#${"e".repeat(64)}`);
   expect(screen.container.textContent).not.toContain("hqdefault.jpg");
+  // One picture is enough: a pictured link asks for nothing more.
+  expect(native.admit).not.toHaveBeenCalled();
   // A click opens its page like any link: nothing plays in the canvas.
   (screen.container.querySelector(".media.video button") as HTMLElement).click();
   await expect.poll(() => native.paneShow.mock.calls.length).toBeGreaterThan(0);
   expect(screen.container.querySelector("iframe")).toBeNull();
+  await screen.unmount();
+  environment.dispose();
+});
+
+test("a pasted video link asks for the poster its video host serves, once, and draws it", async () => {
+  native.admit.mockClear();
+  const { screen, environment } = await workspace(false);
+  await expect.poll(() => native.admit.mock.calls.length, { timeout: 5000 }).toBe(1);
+  expect(native.admit.mock.calls[0]!.slice(1)).toEqual([
+    "00000000000000000000000003",
+    "link",
+    "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+  ]);
+  await expect
+    .poll(() => posterOf(screen.container), { timeout: 5000 })
+    .toBe(`${PIXEL}#${"e".repeat(64)}`);
+  // A pasted link is stored with its host for a name: the card says what it is instead.
+  expect(screen.container.querySelector(".media.video figcaption")?.textContent).toContain(
+    "YouTube video",
+  );
+  await new Promise((settled) => setTimeout(settled, 300));
+  expect(native.admit).toHaveBeenCalledTimes(1);
   await screen.unmount();
   environment.dispose();
 });

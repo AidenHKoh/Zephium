@@ -18,7 +18,7 @@
   label={m.utilities()}
   menu
   triggerClass="utilities-trigger"
-  panelClass="utilities-panel"
+  panelClass="utilities-panel sidebar-softens"
   align="end"
 >
   {#snippet trigger()}<Icon icon={Settings05Icon} size={15} />{/snippet}
@@ -27,15 +27,22 @@
 
 <style>
   /*
-    Present but unpainted until the field it rides is in use. It acts on the
-    page that field names, so it has no business drawing the eye the rest of
-    the time; hovering the field, focusing into it, or its own panel being
-    open all count as in use. The hook belongs to the field, which is the
-    only element that knows when it is being addressed.
+    Present but unpainted until the column is in use. It acts on the page the
+    field names, so it has no business drawing the eye the rest of the time;
+    the pointer resting in the column brings it in after a beat, and focusing
+    the field or opening its own panel brings it at once.
   */
-  :global(.utilities-trigger[data-state="open"]),
-  :global(.address-field:is(:hover, :focus-within)) :global(.utilities-trigger) {
+  :global(.browser-sidebar[data-pointer-in="true"]) :global(.utilities-trigger) {
     opacity: 1;
+    transition-delay: 160ms, 0ms, 0ms;
+  }
+
+  :global(.utilities-trigger[data-state="open"]),
+  :global(.browser-sidebar[data-pointer-in="true"] .address-field:hover)
+    :global(.utilities-trigger),
+  :global(.address-field:focus-within) :global(.utilities-trigger) {
+    opacity: 1;
+    transition-delay: 0ms;
   }
 
   :global(.utilities-trigger) {

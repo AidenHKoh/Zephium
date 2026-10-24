@@ -20,7 +20,9 @@
   const token = Array.from(random, n => n.toString(16).padStart(8, "0")).join("");
   const slots = new Map();
   const inlineOverrides = new Map();
-  const allowed = new Set(["subscription", "personal", "preview"]);
+  const allowed = new Set(["subscription", "personal", "preview", "page-style"]);
+  // The shared picker look; absent only where this file runs on its own.
+  const kit = typeof pickerKit === "object" ? pickerKit : null;
   let picker = null;
   // Elements hidden the moment they are picked, until the saved personal
   // sheet (or its absence after a failed save) takes over.
@@ -346,10 +348,8 @@
     if (!picker) return;
     const current = picker;
     picker = null;
-    current.abort.abort();
     clearTimeout(current.expiry);
-    if (current.frame) cancelAnimationFrame(current.frame);
-    current.cover.remove();
+    current.ui.close();
     clearStyle("preview");
     enforceInline("personal");
     if (current.previousFocus instanceof HTMLElement && current.previousFocus.isConnected) {
@@ -357,186 +357,39 @@
     }
   }
 
-  function cssString(value) {
-    return String(value).replace(/[\0-\x1f\x7f"\\]/g, c => "\\" + c.charCodeAt(0).toString(16) + " ");
-  }
-
-  const NAMES = { iframe: "Embedded content", img: "Image", picture: "Image", video: "Video", audio: "Audio player", aside: "Sidebar", nav: "Navigation", header: "Header", footer: "Footer", form: "Form", dialog: "Dialog", button: "Button", a: "Link", ul: "List", ol: "List", table: "Table", svg: "Graphic", canvas: "Graphic" };
-  // A readable name for the hide list: a class or id turned into words when it
-  // reads like one ("promo-banner" becomes "Promo banner"), else the element's kind.
-  function describe(element) {
-    const words = value => {
-      const text = String(value || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ").trim().toLowerCase();
-      return /^[a-z][a-z ]{2,39}$/.test(text) && !/\b(css|jsx|sc|col|row|flex|grid|wrapper|container|inner|outer)\b/.test(text) ? text : "";
-    };
-    const found = words(element.getAttribute("id")) || Array.from(element.classList).map(words).find(Boolean) || "";
-    const text = found || NAMES[element.localName] || "Section";
-    return text.charAt(0).toUpperCase() + text.slice(1);
-  }
-
-  function candidate(element) {
-    if (!(element instanceof Element) || element === document.documentElement || element === document.body) return null;
-    let selector = "";
-    let positional = false;
-    const id = element.getAttribute("id");
-    if (id && id.length <= 128) selector = `[id="${cssString(id)}"]`;
-    else {
-      const classes = Array.from(element.classList).filter(c => c.length <= 80 && !/^(css|jsx|sc)-/.test(c)).slice(0, 2);
-      if (classes.length) selector = classes.map(c => `[class~="${cssString(c)}"]`).join("");
-    }
-    // A bounded ancestor path is the fallback, with its instability exposed to
-    // the UI. Never keep a DOM snapshot, arbitrary element text, or form values.
-    if (!selector) {
-      positional = true;
-      const path = [];
-      let node = element;
-      for (let depth = 0; depth < 8 && node && node !== document.body; depth++, node = node.parentElement) {
-        const name = node.localName;
-        if (!/^[a-z][a-z0-9-]{0,63}$/.test(name)) return null;
-        let index = 1;
-        let previous = node.previousElementSibling;
-        while (previous && index <= 10000) {
-          if (previous.localName === name) index++;
-          previous = previous.previousElementSibling;
-        }
-        if (index > 10000) return null;
-        path.unshift(`${name}:nth-of-type(${index})`);
-      }
-      selector = path.join(" > ");
-    }
-    if (!selector || selector.length > 2048) return null;
-    try {
-      const count = apply(queryAll, document, [selector]).length;
-      if (count === 0 || count > 100) return null;
-      const label = describe(element);
-      const result = create(null);
-      result.selector = selector; result.label = Array.from(label).slice(0, 64).join("");
-      result.count = count; result.positional = positional;
-      return result;
-    } catch (_) { return null; }
-  }
-
-  const PICKER_STYLE = `
-    :host { all: initial; }
-    .box { position: fixed; pointer-events: none; box-sizing: border-box; display: none;
-      border: 1.5px solid rgb(64 132 255); border-radius: 4px; background: rgb(64 132 255 / 16%);
-      box-shadow: 0 0 0 1px rgb(255 255 255 / 55%); transition: left 60ms, top 60ms, width 60ms, height 60ms; }
-    .chip { position: fixed; pointer-events: none; display: none; max-width: 320px; overflow: hidden;
-      padding: 3px 7px; border-radius: 6px; background: #1c1c1f; color: #ededf0; white-space: nowrap;
-      text-overflow: ellipsis; font: 500 11px/16px -apple-system, "Segoe UI", system-ui, sans-serif; }
-    .chip span { color: #8e8e96; }
-    .bar { position: fixed; left: 50%; bottom: 20px; translate: -50% 0; display: flex; align-items: center; gap: 6px;
-      padding: 8px 14px; border-radius: 12px; background: #1c1c1f; color: #ededf0; pointer-events: none;
-      box-shadow: 0 0 0 0.5px rgb(255 255 255 / 12%), 0 8px 24px rgb(0 0 0 / 35%);
-      font: 450 12.5px/18px -apple-system, "Segoe UI", system-ui, sans-serif; white-space: nowrap;
-      animation: rise 180ms cubic-bezier(.2,.8,.2,1) both; }
-    .bar kbd { font: inherit; padding: 0 5px; border-radius: 4px; background: rgb(255 255 255 / 10%); color: #b4b4bc; }
-    .muted { color: #8e8e96; }
-    @keyframes rise { from { opacity: 0; translate: -50% 6px; } }
-    @media (prefers-reduced-motion: reduce) { .box { transition: none; } .bar { animation: none; } }
-  `;
-
   function startPicker(expectedToken, expectedUrl, session) {
-    if (!matches(expectedToken, expectedUrl) || !/^[0-9a-f]{16}$/.test(session) || !document.documentElement) return false;
+    if (!matches(expectedToken, expectedUrl) || !/^[0-9a-f]{16}$/.test(session) || !document.documentElement || !kit) return false;
     stopPicker();
     try {
-      const cover = document.createElement("div");
-      cover.setAttribute("popover", "manual");
-      cover.style.cssText = "position:fixed;inset:0;margin:0;width:100%;height:100%;padding:0;border:0;background:transparent;z-index:2147483647;cursor:crosshair;overflow:visible";
-      const shadow = cover.attachShadow({ mode: "closed" });
-      // Constructed sheets are exempt from the page's style-src policy.
-      const sheet = new CSSStyleSheet();
-      apply(replace, sheet, [PICKER_STYLE]);
-      shadow.adoptedStyleSheets = [sheet];
-      const box = document.createElement("div");
-      box.className = "box";
-      const chip = document.createElement("div");
-      chip.className = "chip";
-      const bar = document.createElement("div");
-      bar.className = "bar";
-      // Built from nodes: pages enforcing Trusted Types reject innerHTML.
-      for (const [tag, text] of [["span", "Click to hide"], ["span", "·"], ["kbd", "↑"], ["kbd", "↓"], ["span", "wider or narrower"], ["span", "·"], ["kbd", "esc"], ["span", "done"]]) {
-        const part = document.createElement(tag);
-        part.textContent = text;
-        if (tag === "span" && text !== "Click to hide") part.className = "muted";
-        bar.append(part);
-      }
-      shadow.append(box, chip, bar);
-      document.documentElement.append(cover);
-      const abort = new AbortController();
-      picker = { cover, box, abort, session, selected: null, selectedElement: null, hovered: null, trail: [], frame: 0, point: null, previousFocus: document.activeElement, choose: null, key: null };
+      const bar = [["span", "Click to hide"], ["span", "·"], ["kbd", "↑"], ["kbd", "↓"], ["span", "wider or narrower"], ["span", "·"], ["kbd", "esc"], ["span", "done"]];
+      const ui = kit.session(bar, kit.describe, false);
+      if (!ui) return false;
+      const cover = ui.cover;
+      picker = { ui, cover, session, selected: null, selectedElement: null, previousFocus: document.activeElement, choose: null, key: null };
       cover.tabIndex = -1;
       cover.setAttribute("aria-label", "Hide elements. Click an element to hide it; press Escape when done.");
       apply(focus, cover, [{ preventScroll: true }]);
-      if (typeof cover.showPopover === "function") cover.showPopover();
+      ui.show();
       const current = picker;
       const expire = () => {
         clearTimeout(current.expiry);
         current.expiry = setTimeout(() => { if (picker === current) stopPicker(); }, 120000);
       };
       expire();
-      function targetAt(x, y) {
-        cover.style.pointerEvents = "none";
-        const target = document.elementFromPoint(x, y);
-        cover.style.pointerEvents = "auto";
-        return target;
-      }
-      const eligible = target => target instanceof Element && target !== cover && target !== document.documentElement && target !== document.body;
-      function highlight(target) {
-        if (!eligible(target)) {
-          box.style.display = "none"; chip.style.display = "none";
-          return;
-        }
-        const rect = target.getBoundingClientRect();
-        box.style.display = "block";
-        box.style.left = `${rect.left}px`; box.style.top = `${rect.top}px`;
-        box.style.width = `${rect.width}px`; box.style.height = `${rect.height}px`;
-        chip.textContent = describe(target);
-        const size = document.createElement("span");
-        size.textContent = ` · ${Math.round(rect.width)} × ${Math.round(rect.height)}`;
-        chip.append(size);
-        chip.style.display = "block";
-        const above = rect.top - 24;
-        chip.style.left = `${Math.max(4, Math.min(rect.left, innerWidth - chip.offsetWidth - 4))}px`;
-        chip.style.top = `${above >= 4 ? above : Math.min(rect.bottom + 4, innerHeight - 24)}px`;
-      }
-      cover.addEventListener("pointermove", event => {
-        if (!event.isTrusted) return;
-        current.point = [event.clientX, event.clientY];
-        if (current.frame) return;
-        current.frame = requestAnimationFrame(() => {
-          current.frame = 0;
-          if (picker !== current) return;
-          current.hovered = targetAt(...current.point);
-          current.trail = [];
-          highlight(current.hovered);
-        });
-      }, { signal: abort.signal, passive: true });
-      current.key = event => {
-        const hovered = current.hovered;
-        if (event.key === "ArrowUp" && eligible(hovered?.parentElement)) {
-          current.trail.push(hovered);
-          current.hovered = hovered.parentElement;
-        } else if (event.key === "ArrowDown" && current.trail.length) {
-          current.hovered = current.trail.pop();
-        } else return;
-        expire();
-        highlight(current.hovered);
-      };
+      current.key = event => { if (ui.key(event)) expire(); };
       // One pick waits for its save; the page never gets the click either way.
       current.choose = event => {
         if (!event.isTrusted || picker !== current || current.selected) return;
-        const target = current.hovered && current.hovered.isConnected ? current.hovered : targetAt(event.clientX, event.clientY);
-        const selection = eligible(target) ? candidate(target) : null;
+        const target = ui.target(event);
+        const selection = target ? kit.candidate(target) : null;
         if (!selection) return;
         expire();
         current.selected = selection;
         current.selectedElement = new WeakRef(target);
         hidePicked(target);
-        current.hovered = null; current.trail = [];
-        highlight(null);
+        ui.reset();
       };
-      globalThis.addEventListener("pagehide", stopPicker, { signal: abort.signal, once: true });
+      globalThis.addEventListener("pagehide", stopPicker, { signal: ui.signal, once: true });
       return true;
     } catch (_) { stopPicker(); return false; }
   }

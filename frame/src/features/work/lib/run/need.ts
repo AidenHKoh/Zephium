@@ -54,6 +54,12 @@ export function needWords(
 ): { text: string; action: string } {
   const said = (site: string, reason: PartNeed["reason"]) =>
     where === "row" ? siteReason(site || part, reason) : partReason(part, reason);
+  // A run that moved on no longer waits at the site: one quiet line, and to try again.
+  if (need.past && (need.kind === "sign_in" || need.kind === "check"))
+    return {
+      text: said(need.target, need.kind === "check" ? "blocked_by_check" : "signed_out"),
+      action: m.work_need_again(),
+    };
   switch (need.kind) {
     case "sign_in":
       return {
@@ -63,8 +69,15 @@ export function needWords(
             : partReason(part, "signed_out"),
         action: m.work_ask_sign_in(),
       };
+    case "check":
+      return {
+        text: said(need.target, "blocked_by_check"),
+        action: m.work_human_open(),
+      };
     case "allow_site":
       return { text: m.work_need_allow_site({ site: need.target }), action: m.work_ask_allow() };
+    case "choose_folder":
+      return { text: m.work_start_choose_folder(), action: m.work_ask_folder_choose() };
     case "allow_folder":
       return { text: m.work_need_allow_folder({ name: need.target }), action: m.work_ask_allow() };
     case "use_connection":
@@ -80,6 +93,13 @@ export function needWords(
         action: m.work_need_connect_action({ service: need.target }),
       };
     case "retry":
-      return { text: said(need.target, need.reason), action: m.work_need_again() };
+      return {
+        text: said(need.target, need.reason),
+        // The island names the site the check is met on again; the row already does.
+        action:
+          where === "island" && need.reason === "blocked_by_check" && need.target
+            ? m.work_need_again_site({ site: need.target })
+            : m.work_need_again(),
+      };
   }
 }

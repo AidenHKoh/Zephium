@@ -6,7 +6,7 @@ import {
 } from "$shared/ipc/bindings";
 import type { MediaAssetV1 } from "$domain/resources";
 import type { WorkEnvironmentSession } from "$domain/work-environment";
-import { youtubeThumbnail } from "../link-media";
+import { isBareTitle, pickCandidates, youtubeId, youtubeThumbnail } from "../link-media";
 import { subjectImageCandidates, subjectsOf } from "../subjects";
 
 function canonical(url: string): string {
@@ -56,7 +56,11 @@ export class PictureQueue {
   readonly #admissions = new SvelteSet<string>();
   readonly #refusals = new SvelteMap<string, { count: number; after: number }>();
   readonly #admittedFor = new SvelteSet<string>();
+  /** The media element the backend placed for a candidate address, so the next subject sharing it relates instead of asking again. */
+  readonly #admittedMedia = new SvelteMap<string, string>();
   readonly #gallery = new SvelteSet<string>();
+  /** One lookup of a video's name per link per session, whatever it finds. */
+  readonly #described = new SvelteSet<string>();
   #running = false;
   #again = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -71,6 +75,8 @@ export class PictureQueue {
 
   /** The media element on this canvas that already holds one candidate. */
   #placed(snapshot: WorkEnvironmentSnapshot, address: string): string | undefined {
+    const admitted = this.#admittedMedia.get(`${snapshot.id} ${address}`);
+    if (admitted && snapshot.elements.some((element) => element.id === admitted)) return admitted;
     const media = this.#deps.media();
     for (const element of snapshot.elements) {
       if (element.reference.kind !== "resource") continue;
@@ -107,7 +113,7 @@ export class PictureQueue {
         if (artifact?.data.kind !== "picks") return [];
         return artifact.data.items.flatMap((item, index): Owed[] => {
           const key = `${element.id}#${index}`;
-          const candidates = (item.image_candidates ?? []).slice(0, ITEM_CANDIDATES);
+          const candidates = pickCandidates(item).slice(0, ITEM_CANDIDATES);
           if (!candidates.length || this.#admittedFor.has(`${current.id} ${key}`)) return [];
           const own = candidates.map(canonical);
           const done = (snapshot: WorkEnvironmentSnapshot) => {
@@ -120,7 +126,7 @@ export class PictureQueue {
       if (this.#admittedFor.has(`${current.id} ${element.id}`)) return [];
       const done = (snapshot: WorkEnvironmentSnapshot) => pictured(snapshot, element.id);
       if (reference.kind === "link") {
-        // A video link's picture is its thumbnail, admitted like a subject's.
+        // A video link's picture is the poster its own video host serves.
         const thumbnail = youtubeThumbnail(reference.url);
         if (!thumbnail || done(current)) return [];
         return [{ element: element.id, key: element.id, candidates: [thumbnail], done }];
@@ -132,7 +138,8 @@ export class PictureQueue {
         ?.executions.find((entry) => entry.id === reference.execution);
       const artifact = run?.artifacts.find((entry) => entry.id === reference.artifact);
       const subject = artifact ? subjectsOf(artifact)[reference.index] : undefined;
-      const candidates = subject && run ? subjectImageCandidates(run, subject) : [];
+      const candidates =
+        subject && run && !subject.media_attempted ? subjectImageCandidates(run, subject) : [];
       return candidates.length ? [{ element: element.id, key: element.id, candidates, done }] : [];
     });
     const near = this.#deps.near?.();
@@ -149,9 +156,30 @@ export class PictureQueue {
         element,
         candidate,
       );
-      return result.status === "ok" && result.data.kind === "admitted";
+      return result.status === "ok" && result.data.kind === "admitted"
+        ? result.data.element
+        : undefined;
     } catch {
-      return false;
+      return undefined;
+    }
+  }
+
+  /** A pasted video link still carrying its bare host asks Rust, once, what the video is called. */
+  #describe(snapshot: WorkEnvironmentSnapshot) {
+    for (const element of snapshot.elements) {
+      const reference = element.reference;
+      if (
+        reference.kind !== "link" ||
+        !youtubeId(reference.url) ||
+        !isBareTitle(reference.title, reference.url)
+      )
+        continue;
+      const key = `${snapshot.id} ${element.id}`;
+      if (this.#described.has(key)) continue;
+      this.#described.add(key);
+      commands
+        .linkDescribe(this.#deps.session().profile, snapshot.id, element.id)
+        .catch(() => undefined);
     }
   }
 
@@ -167,6 +195,7 @@ export class PictureQueue {
         const session = this.#deps.session();
         const current = session.snapshot;
         if (!current) break;
+        this.#describe(current);
         let retry = Infinity;
         for (const { element, key: owed, candidates, done } of this.#unpictured(current)) {
           for (const candidate of candidates) {
@@ -190,7 +219,9 @@ export class PictureQueue {
               continue;
             }
             this.#admissions.add(key);
-            if (await this.#admit(current.id, element, candidate)) {
+            const admitted = await this.#admit(current.id, element, candidate);
+            if (admitted) {
+              this.#admittedMedia.set(key, admitted);
               this.#admittedFor.add(`${current.id} ${owed}`);
               break;
             }

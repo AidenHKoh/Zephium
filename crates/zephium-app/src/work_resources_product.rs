@@ -7,7 +7,6 @@ use crate::{AgentWorkProfileBinding, AgentWorkProfileReadiness, CallbackHandle, 
 use std::collections::VecDeque;
 use std::time::Instant;
 use zephium_agent_controller::*;
-use zephium_agent_provider_transport::AgentProviderCredential;
 
 fn retain_latest_frame(
     current: &mut Option<Arc<zephium_agentic::WorkBrowserFrame>>,
@@ -34,9 +33,10 @@ impl PreparedRetainedContinuation {
         generation: u32,
         input: AgentWorkRunInput,
         config: crate::AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         task: Box<dyn AgentWorkTask>,
     ) -> Result<Self, AgentWorkFailure> {
+        let access = access.into();
         let spec = input.retained_resource_spec()?;
         let (runtime, provider) = config.into_parts();
         let actor = ActorRequest {
@@ -49,7 +49,7 @@ impl PreparedRetainedContinuation {
                     browser,
                     runtime,
                     provider,
-                    credential,
+                    access,
                     audit,
                     task,
                     Some(waiting),
@@ -109,6 +109,7 @@ impl RetainedWorkPorts {
 pub struct PreparedRetainedWork {
     construction_attempt: zephium_agentic::WorkBrowserConstructionAttempt,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     page: Option<RetainedPageAdmission>,
     work: Option<WorkId>,
     engine: crate::SharedEngine,
@@ -151,6 +152,7 @@ impl PreparedRetainedWork {
         session: zephium_agentic::WorkBrowserSession,
     ) -> Result<Self, AgentWorkFailure> {
         if !self.spec.isolated_public
+            || self.spec.work_website_data
             || !self
                 .work
                 .is_some_and(|work| session.admits(self.profile.profile(), work))
@@ -158,6 +160,19 @@ impl PreparedRetainedWork {
             return Err(AgentWorkFailure::Contract);
         }
         self.anonymous_session = Some(session);
+        Ok(self)
+    }
+
+    /// Keeps where a public first load was redirected; the native gate still
+    /// refuses the redirect, and the page fails as `Redirected`.
+    pub fn with_redirect(
+        mut self,
+        redirect: zephium_agentic::WorkBrowserRedirect,
+    ) -> Result<Self, AgentWorkFailure> {
+        if !self.spec.isolated_public || !self.spec.document_policy.is_public() {
+            return Err(AgentWorkFailure::Contract);
+        }
+        self.redirect = Some(redirect);
         Ok(self)
     }
 
@@ -171,7 +186,7 @@ impl PreparedRetainedWork {
         input: AgentWorkRunInput,
         profile: AgentWorkProfileBinding,
         config: crate::AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: AgentBrowserModelAccess,
         task: Box<dyn AgentWorkTask>,
         ports: RetainedWorkPorts,
     ) -> Result<Self, AgentWorkFailure> {
@@ -182,7 +197,7 @@ impl PreparedRetainedWork {
             deadline: spec.expires_at,
             prepare: Box::new(move |browser, audit, waiting| {
                 StagedActor::try_new(
-                    input, browser, runtime, provider, credential, audit, task, waiting,
+                    input, browser, runtime, provider, access, audit, task, waiting,
                 )
             }),
         };
@@ -217,6 +232,7 @@ impl PreparedRetainedWork {
         Ok(Self {
             construction_attempt: Default::default(),
             anonymous_session: None,
+            redirect: None,
             page: None,
             work: None,
             engine,
@@ -304,6 +320,9 @@ pub enum RetainedRefusal {
     Expired,
     /// The Shell dropped it unprocessed, or the app is quitting.
     Discarded,
+    /// An earlier page's record could not be saved, so its seat cannot
+    /// free in this process: waiting for one would only run out its time.
+    Unsettled,
 }
 
 /// The Shell's page lane when a page was refused.
@@ -317,6 +336,8 @@ pub struct RetainedLaneFacts {
     pub lost: u8,
     /// Pages waiting for a seat.
     pub queued: u8,
+    /// Pages whose record could not be saved, holding their seat for good.
+    pub unsettled: u8,
     pub group_failed: bool,
     pub group_sealed: bool,
 }
@@ -343,9 +364,19 @@ pub struct RetainedWorkSnapshot {
     pub refusal: Option<(RetainedRefusal, RetainedLaneFacts)>,
 }
 struct Projection {
+    media_command: Option<(
+        Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        zephium_agentic::WorkBrowserMediaFetchMode,
+    )>,
+    media_result: Option<Vec<zephium_agentic::WorkBrowserRecordImage>>,
+    media_requested: bool,
+    public_asset: Option<zephium_agentic::WorkBrowserPublicAssetRequest>,
+
+    active_deadline: Instant,
     human: Option<RetainedHumanSnapshot>,
     human_resume: Option<RetainedHumanResume>,
     human_command: Option<HumanCommand>,
+    human_check_progress: Option<WorkBrowserHumanProgress>,
     continuation: Option<PreparedRetainedContinuation>,
     #[cfg(feature = "work-execution-probe")]
     construction_resource: Option<WorkBrowserResourceJoin>,
@@ -378,8 +409,70 @@ pub struct RetainedWorkHandle {
     callback: CallbackHandle,
 }
 impl RetainedWorkHandle {
+    /// Original resource's remaining active-time deadline, crediting only its
+    /// bounded genuine human handoffs. This grants no new scope or budget.
+    pub fn active_deadline(&self) -> Option<Instant> {
+        self.signal
+            .projection
+            .lock()
+            .ok()
+            .map(|projection| projection.active_deadline)
+    }
     pub fn human_snapshot(&self) -> Option<RetainedHumanSnapshot> {
         self.signal.projection.lock().ok()?.human
+    }
+    /// Logical admission closes immediately on Stop, independently of native drain.
+    pub fn human_requests_open(&self) -> bool {
+        !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && !self.is_closed()
+    }
+    /// Request a bounded fresh native wall survey on this exact presented page.
+    /// The native host schedules its existing bounded survey immediately;
+    /// no new timer, provider call, or actor authority is created.
+    pub fn check_human(&self, generation: u32) -> Option<zephium_agentic::WorkBrowserHumanCheck> {
+        if !self.human_requests_open() {
+            return None;
+        }
+        let projection = self.signal.projection.lock().ok()?;
+        let human = projection.human?;
+        if human.generation != generation
+            || human.phase != RetainedHumanPhase::Presented
+            || Instant::now() >= human.deadline
+        {
+            return None;
+        }
+        projection
+            .human_check_progress
+            .as_ref()?
+            .request_wall_check()
+    }
+    /// Rechecks logical revocation and the native revision before showing a result.
+    pub fn human_check_state(
+        &self,
+        generation: u32,
+        check: &zephium_agentic::WorkBrowserHumanCheck,
+    ) -> zephium_agentic::WorkBrowserHumanCheckState {
+        use zephium_agentic::WorkBrowserHumanCheckState as Check;
+        if self.signal.close.load(Ordering::Acquire) || self.signal.stop.load(Ordering::Acquire) {
+            return Check::Unavailable;
+        }
+        let Ok(projection) = self.signal.projection.lock() else {
+            return Check::Unavailable;
+        };
+        if projection.human.is_none_or(|human| {
+            human.generation != generation
+                || human.phase != RetainedHumanPhase::Presented
+                || Instant::now() >= human.deadline
+        }) {
+            return Check::Unavailable;
+        }
+        projection
+            .human_check_progress
+            .as_ref()
+            .map_or(Check::Unavailable, |progress| {
+                check.state(progress.revision())
+            })
     }
     pub fn human_resume(&self) -> Option<RetainedHumanResume> {
         self.signal.projection.lock().ok()?.human_resume.clone()
@@ -501,6 +594,47 @@ impl RetainedWorkHandle {
     /// Moves source-bound ModelMapped content only after original scoped drain
     /// and durable Succeeded ACK. When requested at admission, this additionally
     /// requires atomic artifact publication; the archived result remains in Store.
+    /// One optional same-page media batch after durable text success. Numeric
+    /// native source plans cannot add account, navigation, or action authority.
+    pub fn read_record_media(
+        &self,
+        plans: Vec<zephium_agentic::SemanticRecordMediaPlan>,
+        fetch_mode: zephium_agentic::WorkBrowserMediaFetchMode,
+    ) -> bool {
+        if self.signal.close.load(Ordering::Acquire)
+            || self.signal.stop.load(Ordering::Acquire)
+            || plans.is_empty()
+            || plans.len() > 12
+        {
+            return false;
+        }
+        let Ok(mut projection) = self.signal.projection.lock() else {
+            return false;
+        };
+        if projection.media_requested
+            || projection.snapshot.phase != RetainedWorkPhase::Terminal
+            || projection
+                .snapshot
+                .record
+                .is_none_or(|record| record.disposition() != AgentWorkDisposition::Succeeded)
+            || Instant::now() >= projection.active_deadline
+        {
+            return false;
+        }
+        projection.media_requested = true;
+        projection.media_command = Some((plans, fetch_mode));
+        drop(projection);
+        self.callback.dispatch(Command::WorkWake)
+    }
+    /// A terminal optional result; absence remains pending, an empty list is honest unavailability.
+    /// One source-bound anonymous request queued by the retained native media owner.
+    pub fn take_public_asset(&self) -> Option<zephium_agentic::WorkBrowserPublicAssetRequest> {
+        self.signal.projection.lock().ok()?.public_asset.take()
+    }
+    pub fn take_record_media(&self) -> Option<Vec<zephium_agentic::WorkBrowserRecordImage>> {
+        self.signal.projection.lock().ok()?.media_result.take()
+    }
+
     pub fn take_extraction(&self) -> Option<Box<SemanticOwnedExtractionResult>> {
         self.signal.projection.lock().ok()?.extraction.take()
     }
@@ -596,9 +730,15 @@ impl CallbackHandle {
             group_locally_retired: AtomicBool::new(false),
             lost: AtomicBool::new(false),
             projection: Mutex::new(Projection {
+                media_command: None,
+                media_result: None,
+                media_requested: false,
+                public_asset: None,
+                active_deadline: prepared.spec.deadline,
                 human: None,
                 human_resume: None,
                 human_command: None,
+                human_check_progress: None,
                 continuation: None,
                 #[cfg(feature = "work-execution-probe")]
                 construction_resource: None,
@@ -635,7 +775,9 @@ impl CallbackHandle {
             runtime_group: None,
             group_shutdown: false,
             clock: prepared.spec.clock.clone(),
-            deadline: prepared.spec.deadline,
+            human_time: zephium_agentic::WorkBrowserHumanTime::new(prepared.spec.deadline),
+            anonymous_session: prepared.anonymous_session.clone(),
+            human_session_hold: None,
             prepared: Some(prepared),
             coordinator: None,
             request: None,
@@ -669,7 +811,9 @@ pub(crate) struct ProductWork {
     native_uncertain: bool,
     deadline_expired: bool,
     clock: Arc<dyn TerraControllerClock>,
-    deadline: Instant,
+    human_time: zephium_agentic::WorkBrowserHumanTime,
+    anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    human_session_hold: Option<zephium_agentic::WorkBrowserSessionHumanHold>,
     signal: Arc<ProductSignal>,
     callback: CallbackHandle,
 }
@@ -746,7 +890,8 @@ impl ProductWork {
     /// prove a clean close. It keeps its debt and its shutdown duty, but it
     /// must not hold the one retained slot against fresh pages.
     pub(crate) fn is_stuck(&self) -> bool {
-        (self.signal.close.load(Ordering::Acquire) || Instant::now() >= self.deadline)
+        (self.signal.close.load(Ordering::Acquire)
+            || Instant::now() >= self.human_time.deadline(Instant::now()))
             && !self.is_closed()
             && self.signal.projection.lock().is_ok_and(|projection| {
                 matches!(
@@ -796,6 +941,15 @@ impl ProductWork {
                 .as_ref()
                 .is_some_and(RetainedWork::native_audit_settled)
     }
+    /// An unclosed page whose record cannot be classified in this process:
+    /// it keeps its seat, and its group cannot close around it.
+    pub(crate) fn durably_unsettled(&self) -> bool {
+        !self.is_closed()
+            && self
+                .coordinator
+                .as_ref()
+                .is_some_and(RetainedWork::durably_unsettled)
+    }
     /// Marks it waiting for a seat; true the first time.
     pub(crate) fn begin_wait(&mut self) -> bool {
         let first = self.waiting_since.is_none();
@@ -829,7 +983,7 @@ impl ProductWork {
                 && std::ptr::addr_eq(Arc::as_ptr(store), Arc::as_ptr(&prepared.journal))
                 && std::ptr::addr_eq(Arc::as_ptr(store), Arc::as_ptr(&prepared.audit))
                 && readiness == AgentWorkProfileReadiness::Ready(prepared.profile)
-                && self.deadline > Instant::now()
+                && self.human_time.deadline(Instant::now()) > Instant::now()
                 && !self.signal.stop.load(Ordering::Acquire)
         })
     }
@@ -848,7 +1002,9 @@ impl ProductWork {
             self.refuse(RetainedRefusal::Stale, RetainedLaneFacts::default());
             return;
         };
-        if now >= prepared.spec.expires_at || Instant::now() >= self.deadline {
+        if now >= prepared.spec.expires_at
+            || Instant::now() >= self.human_time.deadline(Instant::now())
+        {
             self.refuse(RetainedRefusal::Expired, RetainedLaneFacts::default());
             return;
         }
@@ -873,7 +1029,10 @@ impl ProductWork {
             prepared.spec.target,
             prepared.spec.document_policy,
             prepared.spec.isolated_public,
+            prepared.spec.work_website_data,
+            prepared.spec.anonymous_read_authority.clone(),
             prepared.anonymous_session,
+            prepared.redirect.clone(),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
             now,
         ) {
@@ -888,6 +1047,11 @@ impl ProductWork {
                     prepared.journal,
                     prepared.audit,
                 ));
+                if let (Some(redirect), Some(coordinator)) =
+                    (prepared.redirect, self.coordinator.as_mut())
+                {
+                    coordinator.set_redirect(redirect);
+                }
                 if let Some(group) = self.runtime_group.take() {
                     if let Some(coordinator) = self.coordinator.as_mut() {
                         coordinator.set_runtime_group(group);
@@ -926,7 +1090,29 @@ impl ProductWork {
         let Some(work) = &mut self.coordinator else {
             return;
         };
-        if !self.deadline_expired && Instant::now() >= self.deadline {
+        let human_held = !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && work.human_snapshot().is_some_and(|human| {
+                matches!(
+                    human.phase,
+                    RetainedHumanPhase::WaitingForHuman
+                        | RetainedHumanPhase::Presenting
+                        | RetainedHumanPhase::Presented
+                        | RetainedHumanPhase::Continuing
+                )
+            });
+        self.human_time.set_held(human_held, Instant::now());
+        if human_held {
+            if self.human_session_hold.is_none() {
+                self.human_session_hold = self
+                    .anonymous_session
+                    .as_ref()
+                    .and_then(zephium_agentic::WorkBrowserSession::hold_for_person);
+            }
+        } else {
+            self.human_session_hold = None;
+        }
+        if !self.deadline_expired && Instant::now() >= self.human_time.deadline(Instant::now()) {
             self.deadline_expired = true;
             self.signal.stop.store(true, Ordering::Release);
         }
@@ -945,6 +1131,35 @@ impl ProductWork {
         }
         if self.signal.reconcile.swap(false, Ordering::AcqRel) {
             work.reconcile();
+        }
+        let media = self
+            .signal
+            .projection
+            .lock()
+            .ok()
+            .and_then(|mut projection| {
+                projection
+                    .media_command
+                    .take()
+                    .map(|(plans, fetch_mode)| (plans, fetch_mode, projection.active_deadline))
+            });
+        if let Some((plans, fetch_mode, deadline)) = media {
+            let remaining = deadline
+                .saturating_duration_since(Instant::now())
+                .min(std::time::Duration::from_secs(8));
+            let expires = now
+                .millis()
+                .checked_add(u64::try_from(remaining.as_millis()).unwrap_or(0))
+                .map(AgentPolicyInstant::from_millis);
+            let accepted = !self.signal.close.load(Ordering::Acquire)
+                && !self.signal.stop.load(Ordering::Acquire)
+                && expires.is_some_and(|expires| work.read_media(plans, fetch_mode, now, expires));
+            if !accepted {
+                crate::work_trace::record_media(crate::work_trace::RecordMediaTrace::OwnerRefused);
+                if let Ok(mut projection) = self.signal.projection.lock() {
+                    projection.media_result = Some(Vec::new());
+                }
+            }
         }
         let (human_command, continuation) = match self.signal.projection.lock() {
             Ok(mut projection) => (
@@ -972,7 +1187,7 @@ impl ProductWork {
                             && resume.context == continuation.spec.identity.id()
                             && resume.document == continuation.spec.target
                     })
-                    && continuation.spec.deadline <= self.deadline
+                    && continuation.spec.deadline <= self.human_time.deadline(Instant::now())
                     && continuation.spec.deadline > Instant::now();
                 if valid {
                     if let Ok(mut projection) = self.signal.projection.lock() {
@@ -1040,8 +1255,32 @@ impl ProductWork {
             };
             projection.events.push_back(event);
         }
-        work.start_human_wait(self.deadline, now);
+        work.start_human_wait(self.human_time.handoff_deadline(Instant::now()), now);
+        // Start credit in the same poll that publishes the durable handoff;
+        // there may be no other wake before its original active deadline.
+        let human_held = !self.signal.close.load(Ordering::Acquire)
+            && !self.signal.stop.load(Ordering::Acquire)
+            && work.human_snapshot().is_some_and(|human| {
+                matches!(
+                    human.phase,
+                    RetainedHumanPhase::WaitingForHuman
+                        | RetainedHumanPhase::Presenting
+                        | RetainedHumanPhase::Presented
+                        | RetainedHumanPhase::Continuing
+                )
+            });
+        self.human_time.set_held(human_held, Instant::now());
+        if human_held && self.human_session_hold.is_none() {
+            self.human_session_hold = self
+                .anonymous_session
+                .as_ref()
+                .and_then(zephium_agentic::WorkBrowserSession::hold_for_person);
+        } else if !human_held {
+            self.human_session_hold = None;
+        }
+        projection.active_deadline = self.human_time.deadline(Instant::now());
         projection.human = work.human_snapshot();
+        projection.human_check_progress = work.human_check_progress();
         projection.human_resume = work.human_resume();
         retain_latest_frame(&mut projection.frame, work.latest_frame());
         #[cfg(feature = "work-execution-probe")]
@@ -1087,6 +1326,12 @@ impl ProductWork {
             projection.snapshot.failure,
             projection.snapshot.persistence_failure,
         ) = work.failures();
+        if projection.public_asset.is_none() {
+            projection.public_asset = work.take_public_asset();
+        }
+        if let Some(media) = work.take_media_result() {
+            projection.media_result = Some(media);
+        }
         if projection.extraction.is_none() {
             projection.extraction = work.take_extraction();
         }
@@ -1112,11 +1357,13 @@ impl ProductWork {
                         .coordinator
                         .as_ref()
                         .is_some_and(|work| work.phase() != AdmissionPhase::Terminal))
-                .then_some(self.deadline),
+                .then_some(self.human_time.deadline(Instant::now())),
             )
             .min()
     }
     pub(crate) fn begin_shutdown(&mut self) {
+        self.human_time.set_held(false, Instant::now());
+        self.human_session_hold = None;
         self.prepared.take();
         self.request.take();
         self.signal.close.store(true, Ordering::Release);

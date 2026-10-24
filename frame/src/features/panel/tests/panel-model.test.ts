@@ -10,6 +10,8 @@ const snapshot = (revision: string): PanelState => ({
   profile_name: "Personal",
   space_id: "s",
   error: false,
+  seed: null,
+  seed_tab: null,
   corner_radius: 20,
 });
 describe("panel presentation and search identity", () => {

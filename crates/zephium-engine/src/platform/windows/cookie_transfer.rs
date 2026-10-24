@@ -11,8 +11,11 @@
 //! This owner never pumps the message loop, blocks a thread, exposes a cookie
 //! field, or writes before every requested origin has completed preflight.
 //! Destination mutation is sequential. Legacy transfers clear their disposable
-//! destination after a failed write; retained Work seeds delete only journaled
-//! new identities. An unproven cleanup must quarantine the automation profile.
+//! destination after a failed write. Retained Work syncs add missing
+//! identities in scope and replace only provably newer ones, never clear a
+//! profile, and on failure delete the identities they created and restore the
+//! ones they overwrote. An
+//! unproven cleanup must quarantine the logical profile.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -136,7 +139,9 @@ type TransferCompletion = Box<dyn FnOnce(WindowsAgentCookieTerminal) + 'static>;
 struct TransferState {
     source: ICoreWebView2CookieManager,
     destination: ICoreWebView2CookieManager,
-    destination_profile: ICoreWebView2Profile2,
+    /// Present only for legacy disposable destinations, whose failed write
+    /// clears the whole profile. A retained sync never holds one.
+    destination_profile: Option<ICoreWebView2Profile2>,
     scope: ContextCookieScope,
     preflight: Option<AgentCookiePreflight<ICoreWebView2Cookie>>,
     application: Option<AgentCookieApplication<ICoreWebView2Cookie>>,
@@ -148,8 +153,15 @@ struct TransferState {
 }
 
 struct WorkSeed {
-    existing: Vec<CookieIdentity>,
+    existing: Vec<ExistingCookie>,
     attempted: Vec<ICoreWebView2Cookie>,
+}
+
+/// A destination cookie in scope before the first write; its retained native
+/// object restores the prior value if this sync fails.
+struct ExistingCookie {
+    identity: CookieIdentity,
+    native: ICoreWebView2Cookie,
 }
 
 #[derive(PartialEq, Eq)]
@@ -210,7 +222,7 @@ impl WindowsAgentCookieTransfer {
         Self::start_mode(
             source,
             destination,
-            destination_profile,
+            Some(destination_profile),
             scope,
             terminal_deadline,
             completion,
@@ -219,11 +231,13 @@ impl WindowsAgentCookieTransfer {
         )
     }
 
-    /// Host admission serializes this initial seed while no Work page can mutate the store.
-    pub(crate) fn start_work_scoped(
+    /// Adds the scoped cookies the destination lacks and replaces those the
+    /// source holds a provably newer copy of, in either direction between a
+    /// profile and one of its Work site stores. Host admission serializes it
+    /// per store; it never deletes a destination cookie the source lacks.
+    pub(crate) fn start_work_sync(
         source: ICoreWebView2CookieManager,
         destination: ICoreWebView2CookieManager,
-        destination_profile: ICoreWebView2Profile2,
         scope: ContextCookieScope,
         terminal_deadline: Instant,
         completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
@@ -232,7 +246,7 @@ impl WindowsAgentCookieTransfer {
         Self::start_mode(
             source,
             destination,
-            destination_profile,
+            None,
             scope,
             terminal_deadline,
             completion,
@@ -245,7 +259,7 @@ impl WindowsAgentCookieTransfer {
     fn start_mode(
         source: ICoreWebView2CookieManager,
         destination: ICoreWebView2CookieManager,
-        destination_profile: ICoreWebView2Profile2,
+        destination_profile: Option<ICoreWebView2Profile2>,
         scope: ContextCookieScope,
         terminal_deadline: Instant,
         completion: impl FnOnce(WindowsAgentCookieTerminal) + 'static,
@@ -407,21 +421,21 @@ fn start_origin(shared: &Rc<TransferShared>, index: usize) {
 }
 
 fn check_work_destination(shared: &Rc<TransferShared>) {
-    let destination = shared
-        .state
-        .try_borrow()
-        .ok()
-        .and_then(|owner| owner.as_ref().map(|state| state.destination.clone()));
-    let Some(destination) = destination else {
+    let prepared = shared.state.try_borrow().ok().and_then(|owner| {
+        owner
+            .as_ref()
+            .map(|state| (state.destination.clone(), scope_origins(&state.scope)))
+    });
+    let Some((destination, origins)) = prepared else {
         return;
     };
-    let owner = shared.clone();
-    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
-        let panic_owner = owner.clone();
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let checked = result
-                .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)
-                .and_then(|_| cookie_identities(cookies));
+    list_scope(
+        shared,
+        destination,
+        origins,
+        0,
+        Vec::new(),
+        Box::new(|owner, listed| {
             if owner.terminal.get() {
                 return;
             }
@@ -443,39 +457,117 @@ fn check_work_destination(shared: &Rc<TransferShared>) {
                     .work_seed
                     .as_mut()
                     .ok_or(ContextCookieTransferFailure::DestinationUnavailable)?
-                    .existing = checked?;
+                    .existing = listed?;
                 state.phase = TransferPhase::Enumerating(0);
                 Ok(())
             })();
             match result {
-                Ok(()) => start_origin(&owner, 0),
-                Err(failure) => fail_transfer(&owner, failure, None),
+                Ok(()) => start_origin(owner, 0),
+                Err(failure) => fail_transfer(owner, failure, None),
             }
+        }),
+        Rc::new(|owner| {
+            invoke_callback_panic(owner);
+            fail_transfer(owner, ContextCookieTransferFailure::EnumerationFailed, None);
+        }),
+    );
+}
+
+fn scope_origins(scope: &ContextCookieScope) -> Rc<Vec<HSTRING>> {
+    Rc::new(
+        scope
+            .origins()
+            .iter()
+            .map(|origin| HSTRING::from(origin.as_url().as_str()))
+            .collect(),
+    )
+}
+
+type ListingPanic = Rc<dyn Fn(&Rc<TransferShared>)>;
+type ScopeListingDone =
+    Box<dyn FnOnce(&Rc<TransferShared>, Result<Vec<ExistingCookie>, ContextCookieTransferFailure>)>;
+
+/// Lists one manager's cookies for each scope origin in turn, deduplicated by
+/// identity. A profile-wide listing would read every site of a person's
+/// profile; scope queries read only what this sync may touch.
+fn list_scope(
+    shared: &Rc<TransferShared>,
+    manager: ICoreWebView2CookieManager,
+    origins: Rc<Vec<HSTRING>>,
+    index: usize,
+    collected: Vec<ExistingCookie>,
+    done: ScopeListingDone,
+    panicked: ListingPanic,
+) {
+    let Some(origin) = origins.get(index).cloned() else {
+        finish_listing(shared, done, Ok(collected), &panicked);
+        return;
+    };
+    let pending = Rc::new(RefCell::new(Some((collected, done))));
+    let callback_pending = pending.clone();
+    let owner = shared.clone();
+    let next_manager = manager.clone();
+    let callback_panicked = panicked.clone();
+    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
+        let taken = callback_pending
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        let Some((mut collected, done)) = taken else {
+            return Ok(());
+        };
+        let listed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            result.map_err(|_| ContextCookieTransferFailure::EnumerationFailed)?;
+            merge_listing(&mut collected, cookies)
         }))
-        .is_err()
-        {
-            invoke_callback_panic(&panic_owner);
-            fail_transfer(
-                &panic_owner,
-                ContextCookieTransferFailure::EnumerationFailed,
-                None,
-            );
+        .unwrap_or(Err(ContextCookieTransferFailure::EnumerationFailed));
+        match listed {
+            Ok(()) => list_scope(
+                &owner,
+                next_manager.clone(),
+                origins.clone(),
+                index + 1,
+                collected,
+                done,
+                callback_panicked.clone(),
+            ),
+            Err(failure) => finish_listing(&owner, done, Err(failure), &callback_panicked),
         }
         Ok(())
     }));
-    // SAFETY: exact retained manager and handler are live; an empty URI requests all cookies.
-    if unsafe { destination.GetCookies(PCWSTR::null(), &handler) }.is_err() {
-        fail_transfer(
-            shared,
-            ContextCookieTransferFailure::EnumerationFailed,
-            None,
-        );
+    // SAFETY: exact retained manager and handler are live COM owners; the
+    // origin string outlives this call and WebView2 copies it.
+    if unsafe { manager.GetCookies(PCWSTR::from_raw(origin.as_ptr()), &handler) }.is_err() {
+        let taken = pending
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut pending| pending.take());
+        if let Some((_, done)) = taken {
+            finish_listing(
+                shared,
+                done,
+                Err(ContextCookieTransferFailure::EnumerationFailed),
+                &panicked,
+            );
+        }
     }
 }
 
-fn cookie_identities(
+fn finish_listing(
+    shared: &Rc<TransferShared>,
+    done: ScopeListingDone,
+    result: Result<Vec<ExistingCookie>, ContextCookieTransferFailure>,
+    panicked: &ListingPanic,
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| done(shared, result))).is_err() {
+        panicked(shared);
+    }
+}
+
+fn merge_listing(
+    collected: &mut Vec<ExistingCookie>,
     cookies: Option<ICoreWebView2CookieList>,
-) -> Result<Vec<CookieIdentity>, ContextCookieTransferFailure> {
+) -> Result<(), ContextCookieTransferFailure> {
     let cookies = cookies.ok_or(ContextCookieTransferFailure::EnumerationFailed)?;
     let mut count = 0;
     // SAFETY: live callback list and initialized count output.
@@ -484,20 +576,22 @@ fn cookie_identities(
     if count as usize > MAX_COOKIES_PER_TRANSFER {
         return Err(ContextCookieTransferFailure::LimitExceeded);
     }
-    let mut result = Vec::with_capacity(count as usize);
-    let mut bytes = 0;
+    let mut bytes: usize = collected.iter().map(|cookie| cookie.identity.bytes()).sum();
     for index in 0..count {
         // SAFETY: index is within this exact bounded native list.
-        let cookie = unsafe { cookies.GetValueAtIndex(index) }
+        let native = unsafe { cookies.GetValueAtIndex(index) }
             .map_err(|_| ContextCookieTransferFailure::EnumerationFailed)?;
-        let identity = cookie_identity(&cookie)?;
+        let identity = cookie_identity(&native)?;
+        if collected.iter().any(|cookie| cookie.identity == identity) {
+            continue;
+        }
         bytes += identity.bytes();
-        if bytes > MAX_COOKIE_TRANSFER_BYTES {
+        if bytes > MAX_COOKIE_TRANSFER_BYTES || collected.len() >= MAX_COOKIES_PER_TRANSFER {
             return Err(ContextCookieTransferFailure::LimitExceeded);
         }
-        result.push(identity);
+        collected.push(ExistingCookie { identity, native });
     }
-    Ok(result)
+    Ok(())
 }
 
 fn cookie_identity(
@@ -623,15 +717,25 @@ fn on_origin_completed(
                     }
                 };
                 if let Some(seed) = &state.work_seed {
-                    match cookie_identity(&copied) {
-                        Ok(identity) if !seed.existing.contains(&identity) => {}
-                        Ok(_) => {
-                            failure = Some(ContextCookieTransferFailure::DestinationUnavailable);
-                            break;
-                        }
+                    let identity = match cookie_identity(&copied) {
+                        Ok(identity) => identity,
                         Err(error) => {
                             failure = Some(error);
                             break;
+                        }
+                    };
+                    if let Some(existing) = seed
+                        .existing
+                        .iter()
+                        .find(|cookie| cookie.identity == identity)
+                    {
+                        match read_cookie_fields(&existing.native) {
+                            Ok(current) if !fields.supersedes(&current) => continue,
+                            Ok(_) => {}
+                            Err(native_failure) => {
+                                failure = Some(native_failure);
+                                break;
+                            }
                         }
                     }
                 }
@@ -959,7 +1063,10 @@ fn begin_cleanup(
         if Instant::now() >= state.terminal_deadline {
             None
         } else {
-            Some((state.destination.clone(), state.destination_profile.clone()))
+            state
+                .destination_profile
+                .clone()
+                .map(|profile| (state.destination.clone(), profile))
         }
     };
     let Some((destination, profile)) = native else {
@@ -1005,46 +1112,70 @@ fn rollback_work_seed(
         state.preflight = None;
         state.application = None;
         state.phase = TransferPhase::WorkRollback { failure, stats };
-        (Instant::now() < state.terminal_deadline).then(|| {
-            (
-                state.destination.clone(),
-                state
-                    .work_seed
-                    .as_ref()
-                    .map(|seed| seed.attempted.clone())
-                    .unwrap_or_default(),
-            )
-        })
+        if Instant::now() >= state.terminal_deadline {
+            return None;
+        }
+        let seed = state.work_seed.as_ref()?;
+        let mut journal = Vec::with_capacity(seed.attempted.len());
+        for cookie in &seed.attempted {
+            let identity = cookie_identity(cookie).ok()?;
+            let prior = seed
+                .existing
+                .iter()
+                .find(|existing| existing.identity == identity)
+                .map(|existing| existing.native.clone());
+            journal.push((cookie.clone(), identity, prior));
+        }
+        Some((
+            state.destination.clone(),
+            scope_origins(&state.scope),
+            journal,
+        ))
     });
-    let Some((destination, attempted)) = native else {
+    let Some((destination, origins, journal)) = native else {
         finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
         return;
     };
-    for cookie in &attempted {
-        // SAFETY: the journal contains only copied cookies attempted by this initial seed.
-        // No pre-existing identity was admitted, and host admission keeps the store quiescent.
-        let _ = unsafe { destination.DeleteCookie(cookie) };
+    for (attempted, _, prior) in &journal {
+        match prior {
+            Some(prior) => {
+                // SAFETY: the prior object is this live destination manager's own
+                // cookie, listed before the first write; re-adding restores it.
+                let _ = unsafe { destination.AddOrUpdateCookie(prior) };
+            }
+            None => {
+                // SAFETY: the journal holds only copied cookies this sync attempted;
+                // an identity absent before the first write is this sync's own.
+                let _ = unsafe { destination.DeleteCookie(attempted) };
+            }
+        }
     }
-    let owner = shared.clone();
-    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, cookies| {
-        let panic_owner = owner.clone();
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let expected: Vec<(CookieIdentity, bool)> = journal
+        .into_iter()
+        .map(|(_, identity, prior)| (identity, prior.is_some()))
+        .collect();
+    list_scope(
+        shared,
+        destination,
+        origins,
+        0,
+        Vec::new(),
+        Box::new(move |owner, listed| {
             if owner.terminal.get() {
                 return;
             }
-            let verified = result.is_ok()
-                && cookie_identities(cookies).is_ok_and(|current| {
-                    attempted.iter().all(|cookie| {
-                        cookie_identity(cookie).is_ok_and(|identity| !current.contains(&identity))
-                    })
-                });
+            let verified = listed.is_ok_and(|current| {
+                expected.iter().all(|(identity, restored)| {
+                    current.iter().any(|cookie| cookie.identity == *identity) == *restored
+                })
+            });
             let timely = owner.state.try_borrow().is_ok_and(|state| {
                 state
                     .as_ref()
                     .is_some_and(|state| Instant::now() < state.terminal_deadline)
             });
             finish_work_rollback(
-                &owner,
+                owner,
                 failure,
                 stats,
                 if verified && timely {
@@ -1053,23 +1184,12 @@ fn rollback_work_seed(
                     WindowsAgentCookieCleanup::Unproven
                 },
             );
-        }))
-        .is_err()
-        {
-            invoke_callback_panic(&panic_owner);
-            finish_work_rollback(
-                &panic_owner,
-                failure,
-                stats,
-                WindowsAgentCookieCleanup::Unproven,
-            );
-        }
-        Ok(())
-    }));
-    // SAFETY: live retained manager and copied native handler; all-cookie readback verifies only journaled identities.
-    if unsafe { destination.GetCookies(PCWSTR::null(), &handler) }.is_err() {
-        finish_work_rollback(shared, failure, stats, WindowsAgentCookieCleanup::Unproven);
-    }
+        }),
+        Rc::new(move |owner| {
+            invoke_callback_panic(owner);
+            finish_work_rollback(owner, failure, stats, WindowsAgentCookieCleanup::Unproven);
+        }),
+    );
 }
 
 fn finish_work_rollback(

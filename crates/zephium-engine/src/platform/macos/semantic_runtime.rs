@@ -9,7 +9,7 @@
 //! Private production semantic runtime registration for owned agent contexts.
 //!
 //! WebKit's public evaluation APIs confer user activation, so this adapter
-//! never evaluates JavaScript. The immutable document-start program instead
+//! never evaluates JavaScript for automated invocations. The immutable document-start program instead
 //! holds one Promise on a content-world-scoped reply handler. Native code may
 //! answer that pull only with [`SemanticRuntimeInvocation`]'s closed grammar.
 
@@ -24,6 +24,14 @@ use block2::RcBlock;
 #[cfg(feature = "native-agentic-semantic-probe")]
 #[path = "agentic_semantic_program_probe.rs"]
 mod program_probe;
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(super) fn media_diagnostics_enabled() -> bool {
+    program_probe::media_diagnostics_enabled()
+}
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(super) fn configure_media_diagnostic(public: bool, account: bool) {
+    program_probe::configure_media_diagnostic(public, account);
+}
 use objc2::{define_class, msg_send, rc::Retained, runtime::AnyObject, runtime::NSObject};
 use objc2::{DefinedClass as _, MainThreadOnly, Message as _};
 use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString, NSUTF8StringEncoding};
@@ -47,11 +55,19 @@ const SEMANTIC_RUNTIME_WORLD_NAME_PREFIX: &str = "zephium-semantic-runtime-v1-";
 const SEMANTIC_RUNTIME_FIXED_ERROR: &str = "zephium semantic channel refused";
 static NEXT_SEMANTIC_RUNTIME_WORLD: AtomicU64 = AtomicU64::new(1);
 
+use crate::platform::record_media::{MediaCompletion, MediaInvocation, NativeMediaResult};
+use crate::platform::semantic_pixel_privacy::{PixelPrivacyProof, PrivacyCompletion};
+
 type ReplyBlock = RcBlock<dyn Fn(*mut AnyObject, *mut NSString)>;
 type SemanticCompletion = Box<dyn FnOnce(Result<SemanticSnapshot, AgentSemanticRuntimeFailure>)>;
 type SemanticActionCompletion =
     Box<dyn FnOnce(Result<SemanticActionRuntimeEvidence, AgentSemanticActionRuntimeFailure>)>;
 type SemanticParkCompletion = Box<dyn FnOnce(bool)>;
+/// Receives the survey's closed decimal code, or an empty string when the
+/// document could not answer.
+type SurveyCompletion = Box<dyn FnOnce(String)>;
+/// Receives an Ask panel recipe's validated answer, or none.
+type RecipeCompletion = Box<dyn FnOnce(Option<String>)>;
 
 /// Synchronous refusal before one exact invocation enters the native channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -139,6 +155,21 @@ enum DocumentPhase {
 }
 
 enum PendingInvocation {
+    Media {
+        invocation: MediaInvocation,
+        completion: MediaCompletion,
+    },
+    Privacy {
+        completion: PrivacyCompletion,
+        public: bool,
+    },
+    Survey {
+        completion: SurveyCompletion,
+    },
+    Recipe {
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: RecipeCompletion,
+    },
     Observation {
         invocation: SemanticRuntimeInvocation,
         completion: SemanticCompletion,
@@ -153,6 +184,16 @@ enum PendingInvocation {
 impl PendingInvocation {
     fn as_str(&self) -> &str {
         match self {
+            Self::Privacy { public, .. } => {
+                if *public {
+                    crate::platform::semantic_pixel_privacy::PUBLIC_INVOCATION
+                } else {
+                    crate::platform::semantic_pixel_privacy::INVOCATION
+                }
+            }
+            Self::Media { invocation, .. } => invocation.as_str(),
+            Self::Survey { .. } => zephium_agentic::SEMANTIC_RUNTIME_HUMAN_SURVEY,
+            Self::Recipe { recipe, .. } => recipe.as_str(),
             Self::Observation { invocation, .. } => invocation.as_str(),
             Self::Action { invocation, .. } => invocation.as_str(),
         }
@@ -194,6 +235,22 @@ impl ReplyAction {
 }
 
 enum CompletionAction {
+    Media {
+        completion: MediaCompletion,
+        outcome: Option<NativeMediaResult>,
+    },
+    Privacy {
+        completion: PrivacyCompletion,
+        outcome: Option<PixelPrivacyProof>,
+    },
+    Survey {
+        completion: SurveyCompletion,
+        wire: String,
+    },
+    Recipe {
+        completion: RecipeCompletion,
+        outcome: Option<String>,
+    },
     Observation {
         completion: SemanticCompletion,
         outcome: Result<Box<SemanticSnapshot>, AgentSemanticRuntimeFailure>,
@@ -209,7 +266,13 @@ impl CompletionAction {
     fn observation_outcome(self) -> Result<SemanticSnapshot, AgentSemanticRuntimeFailure> {
         match self {
             Self::Observation { outcome, .. } => outcome.map(|snapshot| *snapshot),
-            Self::Action { .. } => panic!("expected observation completion"),
+            Self::Action { .. }
+            | Self::Privacy { .. }
+            | Self::Survey { .. }
+            | Self::Recipe { .. }
+            | Self::Media { .. } => {
+                panic!("expected observation completion")
+            }
         }
     }
 }
@@ -249,6 +312,8 @@ struct SemanticRuntimeChannelState {
     completed_invocations: u16,
     #[cfg(feature = "native-agentic-semantic-probe")]
     prepared_fill: Option<program_probe::PreparedFill>,
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    form_receipt: Option<(SemanticActionAttemptId, u16)>,
 }
 
 impl Default for SemanticRuntimeChannelState {
@@ -265,6 +330,8 @@ impl Default for SemanticRuntimeChannelState {
             completed_invocations: 0,
             #[cfg(feature = "native-agentic-semantic-probe")]
             prepared_fill: None,
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            form_receipt: None,
         }
     }
 }
@@ -308,6 +375,70 @@ impl SemanticRuntimeChannelState {
             completion,
         });
         Ok(self.prepare_pump())
+    }
+
+    fn dispatch_media(
+        &mut self,
+        invocation: MediaInvocation,
+        completion: MediaCompletion,
+    ) -> Result<ChannelActions, MediaCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Media {
+            invocation,
+            completion,
+        });
+        Ok(self.prepare_pump())
+    }
+    #[cfg(test)]
+    fn dispatch_privacy(
+        &mut self,
+        completion: PrivacyCompletion,
+    ) -> Result<ChannelActions, PrivacyCompletion> {
+        self.dispatch_privacy_mode(false, completion)
+    }
+    fn dispatch_privacy_mode(
+        &mut self,
+        public: bool,
+        completion: PrivacyCompletion,
+    ) -> Result<ChannelActions, PrivacyCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Privacy { completion, public });
+        Ok(self.prepare_pump())
+    }
+
+    fn dispatch_survey(
+        &mut self,
+        completion: SurveyCompletion,
+    ) -> Result<ChannelActions, SurveyCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Survey { completion });
+        Ok(self.prepare_pump())
+    }
+
+    fn dispatch_recipe(
+        &mut self,
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: RecipeCompletion,
+    ) -> Result<ChannelActions, RecipeCompletion> {
+        if self.admission_failure().is_some() {
+            return Err(completion);
+        }
+        self.pending = Some(PendingInvocation::Recipe { recipe, completion });
+        Ok(self.prepare_pump())
+    }
+
+    /// Whether the only work in flight is a human-wall survey, which a
+    /// person's own navigation may abandon.
+    fn survey_only(&self) -> bool {
+        self.phase == DocumentPhase::Ready
+            && self.park_completion.is_none()
+            && matches!(self.pending, Some(PendingInvocation::Survey { .. }))
     }
 
     fn dispatch_action(
@@ -441,6 +572,17 @@ impl SemanticRuntimeChannelState {
     }
 
     fn cancel(&mut self) -> ChannelActions {
+        if matches!(
+            self.phase,
+            DocumentPhase::Ready | DocumentPhase::AuthorityRevoked
+        ) && self.awaiting_result
+            && matches!(
+                self.pending,
+                Some(PendingInvocation::Privacy { .. } | PendingInvocation::Media { .. })
+            )
+        {
+            return self.revoke_document_authority();
+        }
         let actions = self.invalidate_current(RuntimeChannelFailure::Cancelled);
         if self.phase != DocumentPhase::Retired {
             self.phase = DocumentPhase::Failed;
@@ -455,8 +597,15 @@ impl SemanticRuntimeChannelState {
         ) {
             return self.cancel();
         }
-        let handed_off =
-            self.awaiting_result && matches!(self.pending, Some(PendingInvocation::Action { .. }));
+        let handed_off = self.awaiting_result
+            && matches!(
+                self.pending,
+                Some(
+                    PendingInvocation::Action { .. }
+                        | PendingInvocation::Privacy { .. }
+                        | PendingInvocation::Media { .. }
+                )
+            );
         let mut actions = if handed_off || self.settling_action.is_some() {
             ChannelActions::default()
         } else {
@@ -509,6 +658,20 @@ impl SemanticRuntimeChannelState {
             .is_none_or(|pending| !pending.matches_observation(invocation))
         {
             return (ChannelActions::default(), false);
+        }
+        // A look the page never pulled (its main thread was busy) ran nothing
+        // in the page: it ends timed out and the document stays usable, so a
+        // later look can still be read. One the page took may still answer
+        // late, and only a fresh document can rejoin that channel.
+        if !self.awaiting_result {
+            let mut actions = ChannelActions::default();
+            if let Some(PendingInvocation::Observation { completion, .. }) = self.pending.take() {
+                actions.completion = Some(CompletionAction::Observation {
+                    completion,
+                    outcome: Err(RuntimeChannelFailure::TimedOut.observation()),
+                });
+            }
+            return (actions, false);
         }
         let actions = self.invalidate_current(RuntimeChannelFailure::TimedOut);
         if self.phase != DocumentPhase::Retired {
@@ -567,6 +730,22 @@ impl SemanticRuntimeChannelState {
         }
         if let Some(pending) = self.pending.take() {
             actions.completion = Some(match pending {
+                PendingInvocation::Media { completion, .. } => CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Privacy { completion, .. } => CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Survey { completion } => CompletionAction::Survey {
+                    completion,
+                    wire: String::new(),
+                },
+                PendingInvocation::Recipe { completion, .. } => CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -583,6 +762,11 @@ impl SemanticRuntimeChannelState {
     }
 
     fn on_message(&mut self, body: &str, reply: ReplyBlock) -> ChannelActions {
+        // The native NSString gate rejects before allocating this UTF-8 copy.
+        // Keep the same bound here, before any probe-envelope normalization.
+        if body.len() > MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES {
+            return self.fail_transport(Some(reply));
+        }
         #[cfg(feature = "native-agentic-semantic-probe")]
         if body == program_probe::PREPARE_MESSAGE && program_probe::preparation_selected() {
             return self.on_fill_preparation(reply);
@@ -668,6 +852,22 @@ impl SemanticRuntimeChannelState {
         let Some(completed) = self.completed_invocations.checked_add(1) else {
             let mut actions = self.fail_transport(Some(reply));
             actions.completion = Some(match pending {
+                PendingInvocation::Media { completion, .. } => CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Privacy { completion, .. } => CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
+                PendingInvocation::Survey { completion } => CompletionAction::Survey {
+                    completion,
+                    wire: String::new(),
+                },
+                PendingInvocation::Recipe { completion, .. } => CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
                 PendingInvocation::Observation { completion, .. } => {
                     CompletionAction::Observation {
                         completion,
@@ -689,14 +889,72 @@ impl SemanticRuntimeChannelState {
         }
 
         let (completion, recoverable) = match pending {
+            PendingInvocation::Media {
+                invocation,
+                completion,
+            } => (
+                CompletionAction::Media {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| {
+                            #[cfg(feature = "native-agentic-semantic-probe")]
+                            let bytes = program_probe::normalize_media_result_diagnostic(bytes);
+                            invocation.decode(bytes)
+                        })
+                        .flatten(),
+                },
+                true,
+            ),
+            PendingInvocation::Privacy { completion, public } => (
+                CompletionAction::Privacy {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| {
+                            if public {
+                                PixelPrivacyProof::decode_public(bytes)
+                            } else {
+                                PixelPrivacyProof::decode(bytes)
+                            }
+                        })
+                        .flatten(),
+                },
+                true,
+            ),
+            PendingInvocation::Survey { completion } => (
+                CompletionAction::Survey {
+                    completion,
+                    wire: (self.phase == DocumentPhase::Ready)
+                        .then(|| std::str::from_utf8(bytes).ok())
+                        .flatten()
+                        .filter(|wire| wire.len() <= 2)
+                        .and_then(crate::platform::work_human_survey::decode)
+                        .unwrap_or_default(),
+                },
+                true,
+            ),
+            PendingInvocation::Recipe { recipe, completion } => (
+                CompletionAction::Recipe {
+                    completion,
+                    outcome: (self.phase == DocumentPhase::Ready)
+                        .then(|| recipe.decode(bytes))
+                        .flatten(),
+                },
+                true,
+            ),
             PendingInvocation::Observation {
                 invocation,
                 completion,
             } => {
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                let (name_rows, bytes) = program_probe::normalize_media_diagnostic(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map(Box::new)
                     .map_err(AgentSemanticRuntimeFailure::Result);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                if let Ok(snapshot) = &outcome {
+                    program_probe::remember_media_names(snapshot, name_rows, bytes);
+                }
                 let recoverable = matches!(
                     &outcome,
                     Ok(_)
@@ -719,9 +977,19 @@ impl SemanticRuntimeChannelState {
             } => {
                 #[cfg(feature = "native-agentic-semantic-probe")]
                 let bytes = program_probe::normalize_diagnostic(bytes);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                let (form_witness, bytes) = program_probe::normalize_form_result(bytes);
                 let outcome = invocation
                     .decode_result(bytes)
                     .map_err(AgentSemanticActionRuntimeFailure::Result);
+                #[cfg(feature = "native-agentic-semantic-probe")]
+                {
+                    self.form_receipt = if outcome.is_ok() && self.form_receipt.is_none() {
+                        form_witness.map(|bits| (invocation.attempt(), bits))
+                    } else {
+                        None
+                    };
+                }
                 self.settling_action = matches!(
                     &outcome,
                     Err(AgentSemanticActionRuntimeFailure::Result(
@@ -864,6 +1132,12 @@ impl AgentSemanticRuntimeController {
             .try_borrow()
             .is_ok_and(|state| state.draining_action(attempt))
     }
+    /// Consume one probe witness matched to the native action attempt.
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn take_form_receipt(&self, attempt: SemanticActionAttemptId) -> Option<u16> {
+        let (expected, bits) = self.state.try_borrow_mut().ok()?.form_receipt.take()?;
+        (expected == attempt).then_some(bits)
+    }
     /// Passive rendering eligibility only, never document authority.
     pub(crate) fn settling_action(&self, attempt: SemanticActionAttemptId) -> bool {
         self.state
@@ -932,6 +1206,53 @@ impl AgentSemanticRuntimeController {
                 );
                 Err(failure)
             }
+        }
+    }
+
+    pub(crate) fn dispatch_media(
+        &self,
+        plan: &zephium_agentic::SemanticRecordMediaPlan,
+        validate: bool,
+        fetch: crate::platform::record_media::MediaFetchAttempt,
+        completion: MediaCompletion,
+    ) {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => {
+                state.dispatch_media(MediaInvocation::new(plan, validate, fetch), completion)
+            }
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Media {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
+        }
+    }
+    pub(crate) fn dispatch_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(false, completion);
+    }
+    pub(crate) fn dispatch_public_privacy(&self, completion: PrivacyCompletion) {
+        self.dispatch_privacy_mode(true, completion);
+    }
+    fn dispatch_privacy_mode(&self, public: bool, completion: PrivacyCompletion) {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_privacy_mode(public, completion),
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Privacy {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
         }
     }
 
@@ -1021,6 +1342,46 @@ impl AgentSemanticRuntimeController {
     }
 
     pub(crate) fn pending_for_audit(&self) -> Option<bool> {
+        self.pending_semantic_for_audit()
+    }
+    fn survey_only(&self) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.survey_only())
+    }
+    /// Runs the fixed human-wall survey through the document's closed pull.
+    /// Hands the completion back when the document cannot take it now.
+    fn dispatch_survey(&self, completion: SurveyCompletion) -> Result<(), SurveyCompletion> {
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_survey(completion),
+            Err(_) => Err(completion),
+        };
+        dispatched.map(|actions| self.execute(actions))
+    }
+    /// Runs one closed Ask panel recipe through the document's pull; the
+    /// completion receives none when the document could not answer.
+    pub(crate) fn dispatch_recipe(
+        &self,
+        recipe: crate::platform::page_recipe::PageRecipe,
+        completion: impl FnOnce(Option<String>) + 'static,
+    ) {
+        let completion: RecipeCompletion = Box::new(completion);
+        let dispatched = match self.state.try_borrow_mut() {
+            Ok(mut state) => state.dispatch_recipe(recipe, completion),
+            Err(_) => Err(completion),
+        };
+        match dispatched {
+            Ok(actions) => self.execute(actions),
+            Err(completion) => invoke_completion(
+                CompletionAction::Recipe {
+                    completion,
+                    outcome: None,
+                },
+                self.on_callback_panic.as_ref(),
+            ),
+        }
+    }
+    fn pending_semantic_for_audit(&self) -> Option<bool> {
         let state = self.state.try_borrow().ok()?;
         let pending = state.pending.is_some();
         let world_valid = if state.phase == DocumentPhase::Retired {
@@ -1034,7 +1395,13 @@ impl AgentSemanticRuntimeController {
                 || (state.pull.is_none()
                     && (!pending
                         || (state.awaiting_result
-                            && matches!(state.pending, Some(PendingInvocation::Action { .. }))))))
+                            && matches!(
+                                state.pending,
+                                Some(
+                                    PendingInvocation::Action { .. }
+                                        | PendingInvocation::Privacy { .. }
+                                )
+                            )))))
             && (!state.awaiting_result || (pending && state.pull.is_none()))
             && (state.pull.is_none() || (!state.awaiting_result && !pending))
             && (!matches!(
@@ -1210,6 +1577,19 @@ fn reconcile_failed_reply_park_completion(
 
 fn invoke_completion(completion: CompletionAction, on_panic: &dyn Fn()) {
     if std::panic::catch_unwind(AssertUnwindSafe(|| match completion {
+        CompletionAction::Media {
+            completion,
+            outcome,
+        } => completion(outcome),
+        CompletionAction::Privacy {
+            completion,
+            outcome,
+        } => completion(outcome),
+        CompletionAction::Survey { completion, wire } => completion(wire),
+        CompletionAction::Recipe {
+            completion,
+            outcome,
+        } => completion(outcome),
         CompletionAction::Observation {
             completion,
             outcome,
@@ -1487,7 +1867,7 @@ fn install_semantic_runtime_epoch(
     }
 
     #[cfg(not(feature = "native-agentic-semantic-probe"))]
-    let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());
+    let source = NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.installation_source());
     #[cfg(feature = "native-agentic-semantic-probe")]
     let source = NSString::from_str(&program_probe::source());
     // SAFETY: `mtm` proves main-thread allocation; source and content world are
@@ -1527,6 +1907,45 @@ fn install_semantic_runtime_epoch(
         script,
         handler,
     })
+}
+
+/// Binds a fresh channel to one Browse document's private world under
+/// `handler_name`, with the same closed state machine and message checks.
+/// The Browse reader owns the world, its scripts and the handler's removal.
+pub(crate) fn browse_channel(
+    controller: &WKUserContentController,
+    world: &WKContentWorld,
+    view: &WKWebView,
+    handler_name: &NSString,
+    on_invariant_failure: Rc<dyn Fn()>,
+    on_callback_panic: Rc<dyn Fn()>,
+) -> Result<AgentSemanticRuntimeController, ()> {
+    let mtm = MainThreadMarker::new().ok_or(())?;
+    let channel = AgentSemanticRuntimeController::new(on_invariant_failure, on_callback_panic);
+    channel.bind_view(view)?;
+    channel.bind_world(world)?;
+    channel.document_committed();
+    let handler = SemanticMessageHandler::alloc(mtm).set_ivars(SemanticMessageHandlerIvars {
+        controller: controller.retain(),
+        world: world.retain(),
+        handler_name: handler_name.retain(),
+        channel: channel.clone(),
+    });
+    // SAFETY: `handler` is a freshly allocated instance of the declared class
+    // with fully initialized ivars; `init` is NSObject's designated initializer.
+    let handler: Retained<SemanticMessageHandler> = unsafe { msg_send![super(handler), init] };
+    let protocol_handler = objc2::runtime::ProtocolObject::from_ref(&*handler);
+    // SAFETY: `mtm` proves main-thread registration and every Objective-C
+    // argument is retained for this call; exceptions become a refusal.
+    objc2::exception::catch(AssertUnwindSafe(|| unsafe {
+        controller.addScriptMessageHandlerWithReply_contentWorld_name(
+            protocol_handler,
+            world,
+            handler_name,
+        );
+    }))
+    .map_err(|_| channel.cancel())?;
+    Ok(channel)
 }
 
 /// Retains one production semantic world, handler, and document-start script.
@@ -1589,6 +2008,41 @@ impl AgentSemanticRuntimeRegistration {
         Ok(registration)
     }
 
+    /// Runs the fixed human-wall survey in the bound document's private world.
+    /// It travels as one closed pull answer, never through WebKit's
+    /// evaluation APIs, so the page gains no user activation from it.
+    pub(crate) fn sample_human_wall(
+        &self,
+        view: &WKWebView,
+        completion: impl FnOnce(String) + 'static,
+    ) -> Result<(), ()> {
+        if self.retired || self.channel.pending_for_audit() != Some(false) {
+            return Err(());
+        }
+        self.installation.attest_controller()?;
+        let world = self
+            .installation
+            .epochs
+            .try_borrow()
+            .map_err(|_| ())?
+            .active
+            .as_ref()
+            .ok_or(())?
+            .world
+            .clone();
+        {
+            let state = self.channel.state.try_borrow().map_err(|_| ())?;
+            if state.expected_view != Some(std::ptr::from_ref(view).addr())
+                || state.active_world != Some(Retained::as_ptr(&world).addr())
+            {
+                return Err(());
+            }
+        }
+        self.channel
+            .dispatch_survey(Box::new(completion))
+            .map_err(|_| ())
+    }
+
     pub(crate) fn bind_view(&self, view: &WKWebView) -> Result<(), ()> {
         self.channel.bind_view(view)
     }
@@ -1623,6 +2077,16 @@ impl AgentSemanticRuntimeRegistration {
         epochs.active_runtime = None;
         epochs.parked.clear();
         Ok(())
+    }
+
+    /// A live document whose runtime no history entry holds yet: one a
+    /// hand-on load put in place rather than an admitted navigation.
+    pub(crate) fn active_unbound(&self) -> bool {
+        !self.retired
+            && self
+                .epochs
+                .try_borrow()
+                .is_ok_and(|epochs| epochs.active.is_some() && epochs.active_runtime.is_none())
     }
 
     pub(crate) fn active_parked(&self) -> bool {
@@ -1710,8 +2174,9 @@ impl AgentSemanticRuntimeRegistration {
                     ) {
                         return false;
                     }
+                    // Only the newest documents can be returned to by Back.
                     if epochs.parked.len() >= super::agent_history::MAX_AGENT_HISTORY_ENTRIES {
-                        return false;
+                        epochs.parked.remove(0);
                     }
                     epochs.parked.push((runtime, active));
                     true
@@ -1733,8 +2198,10 @@ impl AgentSemanticRuntimeRegistration {
     pub(crate) fn human_navigation_preparer(&self) -> Rc<dyn Fn() -> bool> {
         let installation = self.installation.clone();
         Rc::new(move || {
-            if !installation.channel.ready_for_history()
-                || installation.channel.pending_for_audit() != Some(false)
+            // A survey still running on the old page never holds the person back.
+            if !installation.channel.survey_only()
+                && (!installation.channel.ready_for_history()
+                    || installation.channel.pending_semantic_for_audit() != Some(false))
             {
                 return false;
             }
@@ -1798,6 +2265,20 @@ impl AgentSemanticRuntimeRegistration {
 }
 
 impl SemanticDocumentInstallation {
+    #[cfg(feature = "native-agentic-semantic-probe")]
+    pub(crate) fn form_observer_world(&self) -> Option<Retained<WKContentWorld>> {
+        crate::platform::form_qualification::selection()?;
+        self.attest_controller().ok()?;
+        Some(
+            self.epochs
+                .try_borrow()
+                .ok()?
+                .active
+                .as_ref()?
+                .world
+                .clone(),
+        )
+    }
     /// Revokes the old document world and installs the immutable program in a
     /// fresh one before native navigation can begin.
     fn prepare_document_load(&self) -> Result<(), ()> {
@@ -1888,7 +2369,7 @@ impl SemanticDocumentInstallation {
             )
         };
         #[cfg(not(feature = "native-agentic-semantic-probe"))]
-        let source_mismatch = source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
+        let source_mismatch = source.to_string() != SEMANTIC_RUNTIME_PROGRAM.installation_source();
         #[cfg(feature = "native-agentic-semantic-probe")]
         let source_mismatch = source.to_string() != program_probe::source();
         if Retained::as_ptr(&script) != Retained::as_ptr(&active.script)
@@ -1930,6 +2411,120 @@ mod tests {
         SemanticObservationBudget, SemanticObservationId, SemanticObservationRequest,
         SemanticOrigin, SemanticRuntimeBudget, SemanticRuntimeFault, SemanticSnapshotGeneration,
     };
+
+    fn ready_state() -> SemanticRuntimeChannelState {
+        SemanticRuntimeChannelState {
+            expected_view: Some(17),
+            active_world: Some(18),
+            phase: DocumentPhase::Ready,
+            ..Default::default()
+        }
+    }
+
+    fn survey_wire(actions: ChannelActions) -> Option<String> {
+        match actions.completion {
+            Some(CompletionAction::Survey { wire, .. }) => Some(wire),
+            _ => None,
+        }
+    }
+
+    fn sent(actions: &ChannelActions) -> Option<&str> {
+        match &actions.first_reply.as_ref()?.value {
+            ReplyValue::Success(value) => Some(value),
+            ReplyValue::Error => None,
+        }
+    }
+
+    #[test]
+    fn human_survey_travels_only_as_a_closed_pull_answer() {
+        for (result, expected) in [
+            (&b"0"[..], "0"),
+            (b"24", "24"),
+            (b"25", ""),
+            (b"E1:survey", ""),
+            (b"07", ""),
+            (b"private text", ""),
+        ] {
+            let mut state = ready_state();
+            let Ok(actions) = state.dispatch_survey(Box::new(|_| {})) else {
+                panic!("survey admission");
+            };
+            assert!(actions.first_reply.is_none() && state.survey_only());
+            let pulled = state.on_pull(reply());
+            assert_eq!(
+                sent(&pulled),
+                Some(zephium_agentic::SEMANTIC_RUNTIME_HUMAN_SURVEY)
+            );
+            assert!(state.awaiting_result);
+            let answered = state.on_result(result, reply());
+            assert_eq!(sent(&answered), Some(SEMANTIC_RUNTIME_CHANNEL_ACK));
+            assert!(!answered.invariant_failed);
+            assert_eq!(survey_wire(answered).as_deref(), Some(expected));
+            assert_eq!(state.phase, DocumentPhase::Ready);
+            assert!(state.pending.is_none() && !state.survey_only());
+        }
+    }
+
+    #[test]
+    fn human_survey_is_refused_while_busy_and_ends_empty_on_navigation_or_retirement() {
+        let mut state = ready_state();
+        state.phase = DocumentPhase::Loading;
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_err());
+
+        let mut state = ready_state();
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_ok());
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_err());
+        let _ = state.on_pull(reply());
+        assert_eq!(
+            survey_wire(state.begin_document_load()).as_deref(),
+            Some("")
+        );
+        assert_eq!(state.phase, DocumentPhase::Loading);
+
+        let mut state = ready_state();
+        assert!(state.dispatch_survey(Box::new(|_| {})).is_ok());
+        assert_eq!(survey_wire(state.retire()).as_deref(), Some(""));
+
+        let controller = AgentSemanticRuntimeController::new(Rc::new(|| {}), Rc::new(|| {}));
+        *controller.state.borrow_mut() = ready_state();
+        assert_eq!(controller.pending_for_audit(), Some(false));
+        let answered = Rc::new(RefCell::new(None));
+        let sink = answered.clone();
+        assert!(controller
+            .dispatch_survey(Box::new(move |wire| *sink.borrow_mut() = Some(wire)))
+            .is_ok());
+        assert_eq!(controller.pending_for_audit(), Some(true));
+        assert!(controller.survey_only());
+        assert!(controller.retire());
+        assert_eq!(answered.borrow().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn handed_off_privacy_probe_drains_after_stop_without_authorizing_capture() {
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            expected_view: Some(7),
+            active_world: Some(8),
+            ..SemanticRuntimeChannelState::default()
+        };
+        state
+            .dispatch_privacy(Box::new(|_| {}))
+            .unwrap_or_else(|_| panic!("admission"));
+        state.on_pull(reply());
+        let actions = state.cancel();
+        assert!(actions.completion.is_none());
+        assert!(state.awaiting_result);
+        assert_eq!(state.phase, DocumentPhase::AuthorityRevoked);
+        let result = state.on_result(
+            br#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#,
+            reply(),
+        );
+        assert!(matches!(
+            result.completion,
+            Some(CompletionAction::Privacy { outcome: None, .. })
+        ));
+        assert!(!state.awaiting_result && state.pending.is_none());
+    }
 
     fn pending_action(handed_off: bool) -> (SemanticRuntimeChannelState, SemanticActionAttemptId) {
         let native = crate::agent_context_port::WorkActionTask::native_for_test();
@@ -2234,6 +2829,8 @@ mod tests {
 
     #[test]
     fn owned_view_fill_is_private_isolated_recipe_without_page_entry_point() {
+        // The page reader alone; the photo helper installed beside it finds
+        // card images by selector and dispatches nothing.
         let source = SEMANTIC_RUNTIME_PROGRAM.source();
         assert!(source.contains("function runFixedFill(target, descriptor, request, finish)"));
         assert!(source.contains("resolveKeyAtGeneration(request.t, request.g) !== target"));
@@ -2314,6 +2911,38 @@ mod tests {
             ReplyValue::Success(value) => value,
             ReplyValue::Error => panic!("unexpected reply error"),
         }
+    }
+
+    #[test]
+    fn oversized_diagnostic_result_refuses_pending_owner_before_decode_once() {
+        let mut state = SemanticRuntimeChannelState {
+            phase: DocumentPhase::Ready,
+            awaiting_result: true,
+            pending: Some(PendingInvocation::Observation {
+                invocation: invocation(1, SemanticSnapshotGeneration::INITIAL),
+                completion: Box::new(|_| {}),
+            }),
+            ..SemanticRuntimeChannelState::default()
+        };
+        let mut raw = format!(
+            "{}MN1:[]\nMD1:0,0,0,0\n{{}}",
+            SEMANTIC_RUNTIME_CHANNEL_RESULT_PREFIX
+        );
+        raw.extend(std::iter::repeat_n(
+            ' ',
+            zephium_agentic::MAX_SEMANTIC_WIRE_BYTES - 2,
+        ));
+        assert!(raw.len() > MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES);
+        let actions = state.on_message(&raw, reply());
+        assert!(matches!(
+            actions.completion.unwrap().observation_outcome(),
+            Err(AgentSemanticRuntimeFailure::Transport)
+        ));
+        assert_eq!(state.phase, DocumentPhase::Failed);
+        assert_eq!(state.completed_invocations, 0);
+        assert!(!state.awaiting_result);
+        assert!(state.pending.is_none());
+        assert!(state.on_message(&raw, reply()).completion.is_none());
     }
 
     #[test]
@@ -2576,7 +3205,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_is_invocation_exact_and_permanently_stops_the_document_channel() {
+    fn timeout_is_invocation_exact_and_stops_the_channel_only_after_page_handoff() {
         let mut state = SemanticRuntimeChannelState {
             expected_view: Some(23),
             active_world: Some(24),
@@ -2596,7 +3225,30 @@ mod tests {
         assert!(actions.completion.is_none());
         assert!(state.pending.is_some());
 
+        // Never pulled by a busy page: timed out, and the document stays usable.
         let (actions, matched) = state.timeout(invocation_id);
+        assert!(!matched);
+        assert!(matches!(
+            actions
+                .completion
+                .expect("timeout completion")
+                .observation_outcome(),
+            Err(AgentSemanticRuntimeFailure::TimedOut)
+        ));
+        assert_eq!(state.phase, DocumentPhase::Ready);
+        assert!(state.pending.is_none());
+        let handed = SemanticInvocationId::new(23).expect("invocation");
+        state
+            .dispatch_observation(
+                invocation(23, SemanticSnapshotGeneration::INITIAL),
+                Box::new(|_| {}),
+            )
+            .unwrap_or_else(|_| panic!("a look after an unpulled timeout is admitted"));
+        // Pulled by the page: it may still answer late, so the channel closes.
+        let mut pulled = state.on_message(SEMANTIC_RUNTIME_CHANNEL_PULL, reply());
+        assert!(pulled.first_reply.take().is_some());
+        assert!(state.awaiting_result);
+        let (actions, matched) = state.timeout(handed);
         assert!(matched);
         assert!(matches!(
             actions
@@ -2609,7 +3261,7 @@ mod tests {
         assert!(state.pending.is_none());
         assert!(state
             .dispatch_observation(
-                invocation(23, SemanticSnapshotGeneration::INITIAL),
+                invocation(24, SemanticSnapshotGeneration::INITIAL),
                 Box::new(|_| {}),
             )
             .is_err());

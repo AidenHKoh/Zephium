@@ -9,6 +9,7 @@ mod agent_audit;
 mod agent_work;
 mod blocker;
 mod bookmarks;
+mod chats;
 mod compatibility;
 mod deletion;
 mod downloads;
@@ -17,6 +18,7 @@ mod filesystem;
 mod history;
 pub mod media;
 mod page_permissions;
+pub mod profile_avatars;
 mod resources;
 mod session;
 mod settings;
@@ -26,6 +28,8 @@ mod userscripts;
 #[cfg(all(windows, feature = "work-execution"))]
 mod windows_work_storage;
 mod work_document;
+#[cfg(feature = "work-execution")]
+mod work_record_media;
 #[cfg(all(windows, feature = "work-execution"))]
 pub use windows_work_storage::WindowsWorkStorage;
 
@@ -57,6 +61,9 @@ pub(crate) use agent_audit::{AgentAuditAppendOutcome, MAX_DURABLE_AGENT_AUDIT_EV
 pub(crate) use agent_work::work_test_guard;
 #[cfg(all(test, windows, feature = "work-execution"))]
 pub(crate) use agent_work::work_test_storage;
+#[cfg(feature = "work-execution")]
+pub(crate) use agent_work::AGENT_WORK_PRUNE_BATCH;
+pub(crate) use chats::{valid_chat, valid_chat_id};
 use compatibility::remove_legacy_source;
 pub(crate) use compatibility::LEGACY_IMPORT_STATE_KEY;
 #[cfg(test)]
@@ -103,6 +110,8 @@ pub struct Hub {
     /// cap; the cap's ordered walk runs once per batch of visits, not each.
     visits_since_prune: HashMap<ProfileId, u32>,
     legacy_state_purged: bool,
+    /// The session this Hub last committed, to skip rewriting an identical one.
+    committed_session: Option<String>,
     recovery_required: Option<String>,
     /// One unpredictable token shared by every Hub constructed in this
     /// process. A completed Windows unlink may be reconciled only by a Hub
@@ -194,6 +203,7 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
+            committed_session: None,
             recovery_required,
             deletion_process_generation,
             #[cfg(test)]
@@ -278,6 +288,13 @@ impl Hub {
                 }
             }
         }
+        // Windows Work storage opens lazily and prunes when it does.
+        #[cfg(all(feature = "work-execution", not(windows)))]
+        hub.prune_agent_work(0, agent_work::AGENT_WORK_PRUNE_AT_OPEN);
+        #[cfg(all(feature = "work-execution", windows))]
+        if hub.windows_work_storage.is_none() {
+            hub.prune_agent_work(0, agent_work::AGENT_WORK_PRUNE_AT_OPEN);
+        }
         Ok(hub)
     }
 
@@ -302,6 +319,7 @@ impl Hub {
             degraded_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
+            committed_session: None,
             recovery_required: None,
             deletion_process_generation: deletion_process_generation(),
             #[cfg(test)]

@@ -24,6 +24,17 @@ impl SearchEngine {
         }
     }
 
+    /// The id the `search.engine` preference stores.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::DuckDuckGo => "duckduckgo",
+            Self::Bing => "bing",
+            Self::Brave => "brave",
+            Self::Custom => "custom",
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Google => "Google",
@@ -266,6 +277,7 @@ mod tests {
             SearchEngine::Bing,
             SearchEngine::Brave,
         ] {
+            assert_eq!(SearchEngine::from_id(engine.id()), Some(engine));
             let url = engine.search("rust & svelte 日本").unwrap();
             assert_eq!(
                 url.query_pairs().collect::<Vec<_>>(),

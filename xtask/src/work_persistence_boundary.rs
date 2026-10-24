@@ -48,6 +48,11 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             .map_err(|_| "missing bounded Work artifact codec")?;
     validate_artifact(&artifact)?;
     validate_artifact_store(&hub)?;
+    validate_retention(
+        &hub,
+        &fs::read_to_string(root.join("crates/zephium-store/src/migrations.rs"))
+            .map_err(|_| "missing Store migrations")?,
+    )?;
     let manifest = fs::read_to_string(root.join("crates/zephium-app/Cargo.toml"))
         .map_err(|_| "missing application manifest")?;
     for required in [
@@ -132,6 +137,34 @@ fn validate_artifact_store(source: &str) -> Result<(), String> {
         if !source.contains(required) {
             return Err(format!(
                 "Work artifact Store lost atomic original-owner boundary: {required}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Retention prunes clean history only; recovery history stays undeletable in
+// SQL as well, and only it counts against admission.
+fn validate_retention(hub: &str, migrations: &str) -> Result<(), String> {
+    for required in [
+        "const CLEAN_TERMINAL: &str = \"terminal = 1 AND substr(record, 3, 1) = X'00'\";",
+        "DELETE FROM agent_work_runs WHERE run_key = ?1 AND {CLEAN_TERMINAL}",
+        "outstanding(&transaction)? >= MAX_DURABLE_AGENT_WORK_RUNS",
+        "if self.work_result_cited(profile, id) {",
+    ] {
+        if !hub.contains(required) {
+            return Err(format!(
+                "Work retention lost its clean-history bound: {required}"
+            ));
+        }
+    }
+    for required in [
+        "WHEN OLD.terminal = 0 OR substr(OLD.record, 3, 1) != X'00'",
+        "WHERE terminal = 0 OR substr(record, 3, 1) != X'00') >= 1024",
+    ] {
+        if !migrations.contains(required) {
+            return Err(format!(
+                "Work schema lost its recovery-history guard: {required}"
             ));
         }
     }
@@ -313,6 +346,24 @@ mod tests {
         ] {
             assert!(validate_artifact_store(&store.replace(removed, "removed_boundary")).is_err());
         }
+    }
+
+    #[test]
+    fn retention_prunes_only_clean_history_and_never_cited_results() {
+        let hub = include_str!("../../crates/zephium-store/src/hub/agent_work.rs");
+        let migrations = include_str!("../../crates/zephium-store/src/migrations.rs");
+        validate_retention(hub, migrations).unwrap();
+        for removed in [
+            "AND {CLEAN_TERMINAL}",
+            "if self.work_result_cited(profile, id) {",
+        ] {
+            assert!(validate_retention(&hub.replace(removed, "removed"), migrations).is_err());
+        }
+        assert!(validate_retention(
+            hub,
+            &migrations.replace("WHEN OLD.terminal = 0 OR", "WHEN 0 AND")
+        )
+        .is_err());
     }
 
     #[test]

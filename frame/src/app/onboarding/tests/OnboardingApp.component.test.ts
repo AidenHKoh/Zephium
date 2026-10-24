@@ -3,7 +3,7 @@ import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
-import type { Material } from "$shared/ipc/bindings";
+import type { AccountReplyV1, Material, WorkModelsV1 } from "$shared/ipc/bindings";
 import { browserImport, type ImportAdapter, type ImportJob } from "$domain/browser-import";
 import { fakeTabs } from "./onboarding-tabs.svelte";
 import OnboardingApp from "../OnboardingApp.svelte";
@@ -13,6 +13,8 @@ const native = vi.hoisted(() => ({
   intro: 0,
   ready: 0,
   finished: 0,
+  then: undefined as string | null | undefined,
+  endpoint: null as string | null,
   opens: true,
   material: "none" as Material,
 }));
@@ -31,9 +33,23 @@ vi.mock("$shared/ipc/bindings", async () => {
       native.ready++;
       return true;
     },
-    onboardingFinish: async () => {
+    onboardingFinish: async (then: string | null) => {
       native.finished++;
+      native.then = then;
       return native.opens;
+    },
+    accountGet: async () =>
+      ({
+        account: { available: true, hosted_models: true, signed_in: false },
+        fault: null,
+        retry_after: null,
+      }) as unknown as AccountReplyV1,
+    workLocalServers: async () => [
+      { kind: "ollama", base: "http://localhost:11434/v1", models: 3 },
+    ],
+    workSetModelEndpoint: async (_profile: string, base: string | null) => {
+      native.endpoint = base;
+      return {} as WorkModelsV1;
     },
     onboardingPlayIntro: async () => {
       native.intro++;
@@ -99,6 +115,8 @@ beforeEach(async () => {
   native.intro = 0;
   native.ready = 0;
   native.finished = 0;
+  native.then = undefined;
+  native.endpoint = null;
   native.opens = true;
   native.material = "none";
   fakeTabs.reset();
@@ -233,6 +251,17 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   await capture("10-work", { wait: false });
 
   await next();
+  await expect
+    .element(page.getByRole("heading", { name: "Choose how Work thinks." }))
+    .toBeVisible();
+  // Nothing is chosen for the person; a server already running here is named.
+  await expect.element(page.getByRole("button", { name: /^Not now/u })).toBeVisible();
+  await expect.element(page.getByText("Ollama is running")).toBeVisible();
+  await page.getByRole("radio", { name: /A local model/u }).click();
+  await expect.element(page.getByRole("button", { name: /^Continue/u })).toBeVisible();
+  await capture("10b-ai");
+
+  await next();
   await expect.element(page.getByRole("heading", { name: "Ready when you are." })).toBeVisible();
   await capture("11-ready");
 
@@ -240,6 +269,9 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   // nothing of onboarding stays mounted.
   await page.getByRole("button", { name: /Start browsing/u }).click();
   await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
+  // The running server is connected here, so nothing needs opening after.
+  expect(native.endpoint).toBe("http://localhost:11434/v1");
+  expect(native.then).toBeNull();
   await expect.poll(() => document.querySelector(".onboarding")).toBeNull();
 });
 

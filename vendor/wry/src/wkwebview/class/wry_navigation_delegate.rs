@@ -80,6 +80,8 @@ pub struct WryNavigationDelegateIvars {
   pub navigation_policy_function: Box<dyn Fn(String, AppleNavigationAction) -> bool>,
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+  #[cfg(target_os = "macos")]
+  pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -285,6 +287,11 @@ define_class!(
       let disposition = if method.isEqualToString(NSURLAuthenticationMethodServerTrust) {
         NSURLSessionAuthChallengeDisposition::PerformDefaultHandling
       } else {
+        if let Some(notify) = &self.ivars().credential_challenge_denied_handler {
+          // Notification failure must never skip the native cancellation or
+          // unwind through WebKit's Objective-C callback boundary.
+          let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify()));
+        }
         NSURLSessionAuthChallengeDisposition::CancelAuthenticationChallenge
       };
       completion_handler.call((disposition, std::ptr::null_mut()));
@@ -320,6 +327,7 @@ impl WryNavigationDelegate {
     navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
     apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
+    #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
     navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
@@ -366,6 +374,8 @@ impl WryNavigationDelegate {
         navigation_policy_function,
         #[cfg(target_os = "macos")]
         main_frame_navigation_attempt_handler,
+        #[cfg(target_os = "macos")]
+        credential_challenge_denied_handler,
         has_download_handler,
         #[cfg(target_os = "macos")]
         new_window_req_handler,

@@ -17,6 +17,8 @@ mod decision_observation;
 mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod loopback_support;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_account;
 #[cfg(target_os = "macos")]
 mod work_actor;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
@@ -27,10 +29,16 @@ mod work_app_views;
 mod work_application;
 #[cfg(target_os = "macos")]
 mod work_artifact_cleanup;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_blocks;
 #[cfg(any(target_os = "macos", test))]
 mod work_commerce;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_durable;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_heldout_blocks;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod work_local_fixture;
 #[cfg(any(target_os = "macos", test))]
 mod work_navigation;
 #[cfg(any(target_os = "macos", test))]
@@ -47,6 +55,8 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn main() {
+    #[cfg(feature = "durable-runtime")]
+    zephium_app::work_commands::private_guard_main();
     use std::io::Write as _;
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
@@ -95,6 +105,10 @@ fn main() {
             result
         }
         [argument] if argument == "--live-lead-smoke" => lead_smoke::run(),
+        #[cfg(feature = "durable-runtime")]
+        [argument, body, model, thinking, times] if argument == "--live-page-replay" => {
+            lead_smoke::replay_page(body, model, thinking, times)
+        }
         [argument] if argument == "--live-fixed-click" => run_fixed_click(),
         [argument] if argument == "--live-public-wikipedia-fill" => run_public_wikipedia_fill(),
         [argument] if argument == "--live-two-action" => run_two_action(
@@ -207,6 +221,21 @@ fn main() {
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument, case, export] if argument == "--live-local-fixture" => {
+            work_durable::run_local_fixture(case, export)
+        }
+        [argument, request, answer] if argument == "--live-lead-request" => {
+            work_durable::run_lead_request(request, answer)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, start] if argument == "--live-account-read" => {
+            work_durable::run_account_read(start)
+        }
+        #[cfg(feature = "durable-runtime")]
+        [argument, start] if argument == "--live-disposable-slack-send" => {
+            work_durable::run_account_send(start)
+        }
         #[cfg(feature = "durable-runtime")]
         [argument, start, goal] if argument == "--live-site" => work_durable::run_site(start, goal),
         #[cfg(feature = "durable-runtime")]
@@ -503,6 +532,7 @@ impl ProbeFailure {
             Self::Provider(TerraProbeProviderError::RequestContract(_)) => {
                 "provider_request_contract"
             }
+            Self::Provider(TerraProbeProviderError::RequestEncoding) => "provider_request_encoding",
             Self::Provider(TerraProbeProviderError::ActionProposalLoop) => {
                 "provider_action_proposal_loop"
             }
@@ -570,6 +600,7 @@ impl ProbeFailure {
             AgentBrowserToolKind::Snapshot => "snapshot",
             AgentBrowserToolKind::Locate => "locate",
             AgentBrowserToolKind::Act => "act",
+            AgentBrowserToolKind::FillForm => "fill_form",
             AgentBrowserToolKind::Wait => "wait",
             AgentBrowserToolKind::Read => "read",
             AgentBrowserToolKind::Extract => "extract",

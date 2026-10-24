@@ -230,7 +230,7 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         repository.join("crates/zephium-agentic/src/semantic_runtime.rs"),
     )?);
     for required in [
-        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=176*1024;",
+        "MAX_SEMANTIC_RUNTIME_SOURCE_BYTES:usize=216*1024;",
         "MAX_SEMANTIC_RUNTIME_REQUEST_BYTES:usize=2*1024;",
         "MAX_SEMANTIC_ACTION_RUNTIME_RESULT_BYTES:usize=512;",
         "SEMANTIC_RUNTIME_SOURCE_SHA256:[u8;32]",
@@ -451,6 +451,9 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
     validate_agentic_no_direct_logging_calls(PROVIDER_TRANSPORT_ROOT, &provider_transport_root)?;
     validate_provider_secret_diagnostic_contract(&provider_transport_root)?;
     validate_provider_revocation_before_secret_materialization(&provider_transport_root)?;
+    validate_chosen_model_drive_contract(&read(
+        repository.join("crates/zephium-agentic/src/provider_transport/model_client.rs"),
+    )?)?;
     validate_engine_manifest(&read(repository.join(ENGINE_MANIFEST))?)?;
     validate_engine_root(&read(repository.join(ENGINE_ROOT))?)?;
     for path in ENGINE_AGENTIC_PRODUCTION_MODULES {
@@ -773,17 +776,30 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
             "engine production agentic-browser feature must remain probe-independent".to_owned(),
         );
     }
-    let image = windows_dependencies
-        .get("image")
+    // 801fcc49 moved the codec to both platforms for bounded record photos
+    // (platform/record_media.rs caps bytes, 2048 px and 24 MiB allocation).
+    if windows_dependencies.contains_key("image") {
+        return Err("Work thumbnail codec must be declared once for every platform".to_owned());
+    }
+    let image = manifest
+        .get("dependencies")
+        .and_then(|dependencies| dependencies.get("image"))
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| "Windows Work thumbnail codec is missing".to_owned())?;
+        .ok_or_else(|| "Work thumbnail codec is missing".to_owned())?;
     if image.get("version").and_then(toml::Value::as_str) != Some("=0.25.10")
         || image.get("optional").and_then(toml::Value::as_bool) != Some(true)
         || image.get("default-features").and_then(toml::Value::as_bool) != Some(false)
         || image.get("features").and_then(toml::Value::as_array)
-            != Some(&vec![toml::Value::String("png".to_owned())])
+            != Some(
+                &["png", "jpeg", "webp", "gif"]
+                    .map(|feature| toml::Value::String(feature.to_owned()))
+                    .to_vec(),
+            )
     {
-        return Err("Windows Work thumbnail codec must remain optional and PNG-only".to_owned());
+        return Err(
+            "Work thumbnail codec must remain optional and limited to PNG, JPEG, WebP and GIF"
+                .to_owned(),
+        );
     }
     let semantic_probe_feature = manifest
         .get("features")
@@ -1542,12 +1558,22 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
     let module_at = module
         .find(module_marker)
         .ok_or_else(|| "production Windows cookie adapter module is missing".to_owned())?;
-    let module_prefix = &module[..module_at];
-    let gate_at = module_prefix
-        .rfind("#[cfg")
-        .ok_or_else(|| "production Windows cookie adapter lost its feature gate".to_owned())?;
-    let gate = compact(&module_prefix[gate_at..]);
-    if !gate.contains("#[cfg(feature=\"agentic-browser\")]") {
+    // Only the attributes attached to the item gate it: stop at the first line
+    // that is neither an attribute nor a comment, so a gated sibling declared
+    // just above cannot stand in for this module's gate.
+    let line_start = module[..module_at].rfind('\n').map_or(0, |at| at + 1);
+    let attached = module[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .take_while(|line| line.starts_with("#[") || line.starts_with("//"))
+        .filter(|line| line.starts_with("#["))
+        .map(compact)
+        .collect::<Vec<_>>();
+    if !attached
+        .iter()
+        .any(|gate| gate == "#[cfg(feature=\"agentic-browser\")]")
+    {
         return Err(
             "production Windows cookie adapter must remain agentic-browser gated".to_owned(),
         );
@@ -1570,17 +1596,19 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
         "Self::start_scoped(source,destination,destination_profile,request.scope().clone(),terminal_deadline,completion,callback_panicked,)",
         "AgentCookiePreflight::try_new(scope.len())",
         "pub(crate)fnstart_scoped(",
-        "pub(crate)fnstart_work_scoped(",
+        "pub(crate)fnstart_work_sync(",
         "fnstart_mode(",
         "work_seed:retained.then(||WorkSeed{existing:Vec::new(),attempted:Vec::new(),})",
         "ifretained{check_work_destination(&shared);}else{start_origin(&shared,0);}",
         "countasusize>MAX_COOKIES_PER_TRANSFER",
         "bytes>MAX_COOKIE_TRANSFER_BYTES",
-        "Ok(identity)if!seed.existing.contains(&identity)=>{}",
+        "Ok(current)if!fields.supersedes(&current)=>continue,",
         "seed.attempted.push(cookie.clone());",
         "rollback_work_seed(shared,failure,stats);",
-        "destination.DeleteCookie(cookie)",
-        "attempted.iter().all(|cookie|{cookie_identity(cookie).is_ok_and(|identity|!current.contains(&identity))})",
+        ".find(|existing|existing.identity==identity).map(|existing|existing.native.clone());journal.push((cookie.clone(),identity,prior));",
+        "let_=unsafe{destination.AddOrUpdateCookie(prior)};",
+        "let_=unsafe{destination.DeleteCookie(attempted)};",
+        "expected.iter().all(|(identity,restored)|{current.iter().any(|cookie|cookie.identity==*identity)==*restored})",
         "GetCookies(PCWSTR::from_raw(origin.as_ptr()),&handler)",
         "count>maximum",
         "state.destination.CopyCookie(&source_cookie)",
@@ -1614,11 +1642,11 @@ fn validate_engine_windows_cookie_transfer(module: &str, source: &str) -> Result
     // select its separate destination preflight and journal-only rollback.
     let legacy_scoped = source
         .split_once("fnstart_scoped(")
-        .and_then(|(_, body)| body.split_once("fnstart_work_scoped("))
+        .and_then(|(_, body)| body.split_once("fnstart_work_sync("))
         .map(|(body, _)| body)
         .ok_or_else(|| "production Windows legacy scoped cookie entry is missing".to_owned())?;
     let work_scoped = source
-        .split_once("fnstart_work_scoped(")
+        .split_once("fnstart_work_sync(")
         .and_then(|(_, body)| body.split_once("fnstart_mode("))
         .map(|(body, _)| body)
         .ok_or_else(|| "production Windows retained scoped cookie entry is missing".to_owned())?;
@@ -1787,7 +1815,8 @@ fn validate_engine_windows_semantic_screenshot(
         .split_once("pub(crate)fndispatch_screenshot(")
         .map(|(_, method)| method.split("pub(crate)fn").next().unwrap_or(method))
         .ok_or("production Windows semantic screenshot lost its dispatch method")?;
-    let guarded_capture = "ifself.semantic().is_none_or(|semantic|semantic.document_content_available_for_audit()!=Some(true))||(self.work_navigation.is_none()&&attest_hidden_owner(&self.view,self.expected_parent,self.viewport).is_err()){returnErr(SemanticScreenshotNativeFailure::NotReady);}super::semantic_screenshot::capture_viewport(";
+    // ad2ef7cb: the capture additionally runs only behind the pixel privacy proof.
+    let guarded_capture = "ifself.semantic().is_none_or(|semantic|semantic.document_content_available_for_audit()!=Some(true))||(self.work_navigation.is_none()&&attest_hidden_owner(&self.view,self.expected_parent,self.viewport).is_err()){returnErr(SemanticScreenshotNativeFailure::NotReady);}letSome(semantic)=self.semantic().cloned()else{returnErr(SemanticScreenshotNativeFailure::NotReady);};letnative=self.view.webview();letcapture_cancelled=cancelled.clone();letpublic=request.requires_public_page();crate::platform::semantic_pixel_privacy::guarded_model_capture(public,Rc::new(move|completion|{ifpublic{semantic.dispatch_public_privacy(completion)}else{semantic.dispatch_privacy(completion)}}),move|completion|{super::semantic_screenshot::capture_viewport(";
     if !screenshot.contains(guarded_capture) {
         return Err("production Windows semantic screenshot lost its exact early ownership refusal before capture".into());
     }
@@ -2421,6 +2450,9 @@ fn validate_engine_windows_semantic_protocol(module: &str, source: &str) -> Resu
             ));
         }
     }
+    if source.contains("\"userGesture\":true") {
+        return Err("production Windows semantic CDP protocol grants user activation".to_owned());
+    }
     if production.contains("expect(")
         || production.contains("unwrap(")
         || production.contains("panic!")
@@ -2501,7 +2533,12 @@ fn validate_engine_windows_semantic_runtime(module: &str, source: &str) -> Resul
         "CommandStage::CleanupRuntimeDisable",
         "install_runtime_in_context_command(&context)",
         "decode_runtime_install_response(&response)",
-        "invoke_runtime_command(context,&state.pending.as_ref()?.invocation)",
+        "state.pending.as_ref()?.invocation.command(context)",
+        "enumReadInvocation{HumanWall,Observation(Box<SemanticRuntimeInvocation>),Privacy(bool),Media(MediaInvocation),}",
+        "Self::HumanWall=>{crate::platform::agent_semantic_cdp_protocol::invoke_human_wall_command(context).ok()}",
+        "Self::Observation(value)=>invoke_runtime_command(context,value).ok(),",
+        "Self::Privacy(public)=>{crate::platform::agent_semantic_cdp_protocol::invoke_privacy_command_mode(context,*public,).ok()}",
+        "Self::Media(value)=>{crate::platform::agent_semantic_cdp_protocol::invoke_media_command(context,value).ok()}",
         "state.installed_context=None",
         "state.document_generation=state.document_generation.checked_add(1)",
         "fnwork_drained_for_audit(&self)->Option<bool>",
@@ -2643,9 +2680,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         for required in [
             "#[cfg(feature=\"native-agentic-semantic-probe\")]#[path=\"agentic_semantic_program_probe.rs\"]modprogram_probe;",
             "#[cfg(any(not(feature=\"native-agentic-semantic-probe\"),test))]usezephium_agentic::SEMANTIC_RUNTIME_PROGRAM;",
-            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.source());",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource=NSString::from_str(SEMANTIC_RUNTIME_PROGRAM.installation_source());",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource=NSString::from_str(&program_probe::source());",
-            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source();",
+            "#[cfg(not(feature=\"native-agentic-semantic-probe\"))]letsource_mismatch=source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.installation_source();",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letsource_mismatch=source.to_string()!=program_probe::source();",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]letbytes=program_probe::normalize_diagnostic(bytes);",
             "#[cfg(feature=\"native-agentic-semantic-probe\")]prepared_fill:Option<program_probe::PreparedFill>,",
@@ -2669,8 +2706,9 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
     }
     let expected_probe_gates = if source.contains("program_probe") {
         // Includes stopping the existing preparation reply on authority loss
-        // and the regression proving late preparation cannot reopen it.
-        17
+        // and the regression proving late preparation cannot reopen it, plus
+        // the probe-only record media and form receipt diagnostics.
+        28
     } else {
         0
     };
@@ -2692,11 +2730,11 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)",
         "MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES",
         "MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS",
-        "SEMANTIC_RUNTIME_PROGRAM.source()",
+        "SEMANTIC_RUNTIME_PROGRAM.installation_source()",
         "scripts.count()!=1",
         "scripts.objectAtIndex(0)",
         "Retained::as_ptr(&script)!=Retained::as_ptr(&active.script)",
-        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.source()",
+        "source.to_string()!=SEMANTIC_RUNTIME_PROGRAM.installation_source()",
         "removeScriptMessageHandlerForName_contentWorld",
         "controller.removeAllScriptMessageHandlers()",
         "controller.removeAllUserScripts()",
@@ -2712,7 +2750,7 @@ fn validate_engine_semantic_runtime_boundary(source: &str) -> Result<(), String>
         "self.settling_action==Some(attempt)",
         "super::semantic_action::map_runtime_fault(*fault)==zephium_agentic::SemanticActionNativeFailure::AppliedUnverified",
         "DocumentPhase::AuthorityRevoked",
-        "self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}))",
+        "lethanded_off=self.awaiting_result&&matches!(self.pending,Some(PendingInvocation::Action{..}|PendingInvocation::Privacy{..}|PendingInvocation::Media{..}));",
         "fnretire",
         "fnadmission_failure(&mutself)->Option<AgentSemanticRuntimeDispatchError>",
         "DocumentPhase::Loading=>{returnSome(AgentSemanticRuntimeDispatchError::NotReady);}",
@@ -5530,7 +5568,7 @@ fn validate_provider_transport_manifest(source: &str) -> Result<(), String> {
         .iter()
         .filter_map(toml::Value::as_str)
         .collect::<BTreeSet<_>>();
-    let expected = ["sync", "time"].into_iter().collect::<BTreeSet<_>>();
+    let expected = ["net", "sync", "time"].into_iter().collect::<BTreeSet<_>>();
     if actual != expected || actual.len() != features.len() {
         return Err("agent provider transport Tokio feature graph drifted".to_owned());
     }
@@ -5872,7 +5910,9 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
         "letshutdown_gate=ifcancellation.shares_authority(&self.shared.shutdown)",
         "matchself.shared.shutdown.lock_commit_gate()",
         "ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()",
-        "letcommitted=matchinput.commit(policy)",
+        "letcommitted=ifletSome(fence)=&image_fence{",
+        "letcurrent=fence.while_current(&mut||{ifletSome(input)=owned.take(){committed=Some(input.commit(policy));}});",
+        "}else{input.commit(policy)};letcommitted=matchcommitted{",
         "slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);",
     ] {
         if !source.contains(required) {
@@ -5898,7 +5938,7 @@ fn validate_provider_transport_commit_boundary(source: &str) -> Result<(), Strin
         .find("ifcancellation.is_cancelled()||self.shared.shutdown.is_cancelled()")
         .ok_or_else(|| "agent provider transport final cancellation check is missing".to_owned())?;
     let commit = source
-        .find("letcommitted=matchinput.commit(policy)")
+        .find("letcommitted=ifletSome(fence)=&image_fence{")
         .ok_or_else(|| "agent provider transport disclosure commit is missing".to_owned())?;
     let marked = source
         .find("slot.mark_committed();drop(shutdown_gate);drop(cancellation_gate);")
@@ -5979,7 +6019,7 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
         .ok_or_else(|| "count drive no longer publishes disclosure before send".to_owned())?;
     // 697c56d0: the free count call retries once on overload with a cloned request.
     let count_send = count
-        .find("response=send.send()=>response")
+        .find("response=lead::image_fence::fenced(image_fence.as_ref(),send.send())=>matchresponse{Ok(response)=>response,Err(())=>returnself.counted_failure(cancelled_failure())}")
         .ok_or_else(|| "count drive send boundary is missing".to_owned())?;
     if !count.contains("letSome(send)=request.try_clone()else{")
         || !count
@@ -6008,7 +6048,7 @@ fn validate_abortable_provider_operation_contract(source: &str) -> Result<(), St
         .find("self.mark_model_may_have_dispatched()")
         .ok_or_else(|| "generation drive no longer publishes dispatch before send".to_owned())?;
     let generation_send = generation
-        .find("response=request.send()=>response")
+        .find("response=lead::image_fence::fenced(image_fence.as_ref(),request.send())=>matchresponse{Ok(response)=>response,Err(())=>returnself.finish_terminal(cancelled_failure())}")
         .ok_or_else(|| "generation drive send boundary is missing".to_owned())?;
     if !(generation_begin < generation_disclosure && generation_disclosure < generation_send) {
         return Err(
@@ -6259,15 +6299,17 @@ fn validate_provider_transport_http2_ingress_boundary(source: &str) -> Result<()
     Ok(())
 }
 
-// These fixed platform vault loaders each retry Inaccessible once,
-// under the existing process-wide lock. No other thread or sleep is exempted.
+// These fixed platform vault loaders each retry Inaccessible once, under the
+// process-wide vault turn, whose wait for the call ahead is itself bounded so
+// one unanswered OS prompt cannot queue every later load. No other thread or
+// sleep is exempted.
 const KEYCHAIN_RETRY_SLEEP: &str = "std::thread::sleep(std::time::Duration::from_millis(40));";
 const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: AgentCredentialBinding>(
     provider: P,
     service: &'static str,
     account: &'static str,
 ) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     match read_keychain_login_credential(provider, service, account) {
         Err(MacosAgentProviderCredentialError::Inaccessible) => {
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6277,7 +6319,7 @@ const KEYCHAIN_LOGIN_LOADER: &str = r#"fn load_keychain_login_credential<P: Agen
     }
 }"#;
 const LEAD_KEYCHAIN_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = turn();
+        let _turn = turn()?;
         match read_once(service) {
             Err(LeadKeyError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6292,7 +6334,7 @@ const WINDOWS_VAULT_LOADER: &str = r#"fn load_windows_credential<P: AgentCredent
     provider: P,
     target: &str,
 ) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     let read = || zephium_credentials::read(target);
     let loaded = match read() {
         Err(zephium_credentials::VaultError::Inaccessible) => {
@@ -6301,19 +6343,14 @@ const WINDOWS_VAULT_LOADER: &str = r#"fn load_windows_credential<P: AgentCredent
         }
         loaded => loaded,
     };
-    let secret = loaded.map_err(|error| match error {
-        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
-        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
-        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
-        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
-    })?;
+    let secret = loaded.map_err(vault_error)?;
     AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
         AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
         AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
     })
 }"#;
 const LEAD_WINDOWS_VAULT_LOADER: &str = r#"pub(super) fn read(service: &str) -> Result<LeadSecret, LeadKeyError> {
-        let _turn = crate::provider_transport::keychain_turn();
+        let _turn = crate::provider_transport::keychain_turn().map_err(map)?;
         let loaded = match zephium_credentials::read(service) {
             Err(VaultError::Inaccessible) => {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -6370,7 +6407,7 @@ fn validate_provider_transport_shutdown_contract(
     );
     for required in [
         "pubconstMAX_AGENT_PROVIDER_TRANSPORT_SHUTDOWN_PROOF_BYTES:usize=32;",
-        "#[cfg(feature=\"probe-harness\")]pubfnload_probe_openai_credential()->Result<AgentProviderCredential,AgentProviderVaultError>{#[cfg(target_os=\"macos\")]{returnload_macos_probe_openai_credential();}#[cfg(not(target_os=\"macos\"))]load_development_openai_credential()}",
+        "#[cfg(feature=\"probe-harness\")]pubfnload_probe_openai_credential()->Result<AgentProviderCredential,AgentProviderVaultError>{#[cfg(target_os=\"macos\")]letloaded=load_macos_probe_openai_credential();#[cfg(not(target_os=\"macos\"))]letloaded=load_development_openai_credential();loaded}",
         "pubconstfnis_idle(self)->bool{self.active==0}",
         "pubconstfnis_quiescent(self)->bool{self.sealed&&self.active==0}",
         "drained:Notify,",
@@ -6614,6 +6651,73 @@ fn validate_provider_revocation_before_secret_materialization(source: &str) -> R
             "agent provider cancellation must precede secret materialization and be rechecked before dispatch"
                 .to_owned(),
         );
+    }
+    Ok(())
+}
+
+/// A chosen model's drive keeps the fixed-endpoint ordering: it moves the
+/// body out of the retained owner, checks sticky cancellation twice, then
+/// publishes possible dispatch before the client can first be polled. It
+/// holds no key and reaches no network of its own. A reply with no usable
+/// browser call may be asked again a fixed number of times, every ask
+/// summed into the one call's usage and held to its one reservation.
+fn validate_chosen_model_drive_contract(source: &str) -> Result<(), String> {
+    let production = source
+        .split_once("\n#[cfg(test)]\nmod tests")
+        .map_or(source, |(production, _)| production);
+    let source = compact(
+        &production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<String>(),
+    );
+    for forbidden in ["reqwest", "credential", "sensitive_header", "count_openai"] {
+        if source.contains(forbidden) {
+            return Err(format!(
+                "chosen-model drive acquired fixed-endpoint authority {forbidden}"
+            ));
+        }
+    }
+    let drive_start = source
+        .find("pubasyncfnexecute_model_client<F>(&mutself,")
+        .ok_or_else(|| "chosen-model drive is missing or consuming".to_owned())?;
+    let drive = &source[drive_start..];
+    let begin = drive
+        .find("=self.begin_generation_drive()?")
+        .ok_or_else(|| "chosen-model drive no longer moves its body first".to_owned())?;
+    let cancellation =
+        "ifself.cancellation.is_cancelled()||self.shutdown.is_cancelled(){returnself.finish_terminal(cancelled_failure());}";
+    let checks = drive
+        .match_indices(cancellation)
+        .map(|(offset, _)| offset)
+        .collect::<Vec<_>>();
+    let dispatch = drive
+        .find("self.mark_model_may_have_dispatched();")
+        .ok_or_else(|| "chosen-model drive no longer publishes dispatch".to_owned())?;
+    let call = drive
+        .find("outcome=model.client.call(request.clone(),&events)=>outcome")
+        .ok_or_else(|| "chosen-model drive call boundary is missing".to_owned())?;
+    if checks.len() != 2 || !(begin < checks[0] && checks[1] < dispatch && dispatch < call) {
+        return Err(
+            "chosen-model drive must move authority, recheck cancellation and publish dispatch before its call"
+                .to_owned(),
+        );
+    }
+    for required in [
+        "spent.input_tokens>reserved||spent.output_tokens>max_output",
+        "outcome.usage=spent;",
+        "reasks<MAX_REASKS",
+        "contract.finish(call,&config,outcome)",
+        "Err(_)=>{self.fail_stop();returnself.finish_terminal(integration_failure());}",
+    ] {
+        if !drive.contains(required) {
+            return Err(format!(
+                "chosen-model drive lost required settlement rule {required}"
+            ));
+        }
+    }
+    if !source.contains("constMAX_REASKS:u8=2;") {
+        return Err("chosen-model drive re-asks a malformed call more than twice".to_owned());
     }
     Ok(())
 }
@@ -6914,8 +7018,8 @@ fn validate_semantic_read_continuation_contract(
         "pub(crate)fnmatches_acknowledgement(",
         "acknowledgement.guard()==self.observation_fingerprint.digest()",
         "node.sensitivity()==SemanticSensitivity::Secret",
-        "pubconstMAX_SEMANTIC_READ_ITEMS:u16=256",
-        "pubconstMAX_SEMANTIC_READ_BYTES:u32=64*1024",
+        "pubconstMAX_SEMANTIC_READ_ITEMS:u16=768",
+        "pubconstMAX_SEMANTIC_READ_BYTES:u32=128*1024",
     ] {
         if !read.contains(required) {
             return Err(format!(
@@ -6943,9 +7047,10 @@ fn validate_semantic_read_continuation_contract(
     for required in [
         "pubfnbind_read_request(",
         "self.correlation.kind()!=AgentBrowserToolKind::Read",
-        "self.correlation.read_scope.as_ref(),Some(super::AgentBrowserScopeProposal::Initial)",
-        "Some(super::AgentBrowserScopeProposal::Initial)",
-        "returnErr(AgentProviderContinuationError::Scope)",
+        "match(self.correlation.read_scope.as_ref(),read.selected_target()){",
+        "(Some(super::AgentBrowserScopeProposal::Initial),None)=>{}",
+        "(Some(super::AgentBrowserScopeProposal::Subtree(wanted)),Some(actual))if*wanted==actual&&!read.has_retained_evidence()=>{}",
+        "_=>returnErr(AgentProviderContinuationError::Scope),",
         "if!read.matches_acknowledgement(&self.baseline)",
         "if!payload.matches_read(read)",
         "pubstructAgentProviderBoundReadContinuation",
@@ -7080,10 +7185,10 @@ fn validate_semantic_extraction_provider_contract(
 
     let provider_tool = compact(provider_tool);
     for required in [
-        "AgentBrowserToolProposal::Extract{schema,..}=>Some(*schema)",
+        "Some(AgentBrowserToolProposal::Extract{schema,..})=>Some(*schema)",
         "extraction_schema:Option<SemanticExtractionSchemaId>",
         "extraction_schema,extraction_scope,read_scope,snapshot_scope,navigation_target,provider_item_id:self.provider_item_id",
-        "AgentBrowserToolProposal::Read(scope)=>Some(scope.clone())",
+        "Some(AgentBrowserToolProposal::Read(scope))=>Some(scope.clone())",
     ] {
         if !provider_tool.contains(required) {
             return Err(format!(
@@ -7102,7 +7207,8 @@ fn validate_semantic_extraction_provider_contract(
         "output_schema:super::request::bound_extraction_output_schema(schema,Some(read))",
         "pubstructAgentProviderBoundExtractionContinuation",
         "AgentBrowserToolKind::Locate|AgentBrowserToolKind::Read|AgentBrowserToolKind::Extract|AgentBrowserToolKind::Screenshot",
-        "AgentProviderInputEvidence::Extraction(_)|AgentProviderInputEvidence::Screenshot(_)=>{returnNone;}",
+        "AgentProviderInputEvidence::Screenshot(receipt)=>{letbaseline=continuation_baseline?;if!receipt.matches_baseline(&baseline){returnNone;}baseline}",
+        "AgentProviderInputEvidence::Extraction(_)=>{returnNone;}",
     ] {
         if !continuation.contains(required) {
             return Err(format!(
@@ -8155,11 +8261,11 @@ fn validate_progress_manifest_revision_contract(
     let effect_policy = compact(effect_policy);
     for required in [
         "pubstructAgentNeedsHumanTransition{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "pubstructAgentEffectPermit{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "pubstructAgentActiveEffect{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentEffectPermit{approval_binding:Option<crate::SemanticApprovalBinding>,manifest:AgentRunManifestId,manifest_guard:[u8;32]",
+        "pubstructAgentActiveEffect{approval_binding:Option<crate::SemanticApprovalBinding>,manifest:AgentRunManifestId,manifest_guard:[u8;32]",
         "pubstructAgentEffectReceipt{manifest:AgentRunManifestId,manifest_guard:[u8;32]",
-        "AgentEffectAuthorization::Permit(AgentEffectPermit{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
-        "Ok(AgentActiveEffect{manifest:permit.manifest,manifest_guard:permit.manifest_guard",
+        "AgentEffectAuthorization::Permit(AgentEffectPermit{approval_binding:assessment.approval_binding,manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
+        "Ok(AgentActiveEffect{approval_binding:permit.approval_binding,manifest:permit.manifest,manifest_guard:permit.manifest_guard",
         "Ok(AgentEffectReceipt{manifest:self.manifest.id(),manifest_guard:active.manifest_guard",
         "AgentEffectAuthorization::NeedsHuman(AgentNeedsHumanTransition{manifest:self.manifest.id(),manifest_guard:self.manifest.guard()",
     ] {
@@ -9215,6 +9321,14 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
         return Err("zephium-agentic public asset fetch escaped provider-transport".to_owned());
     }
     let transport = source_directory.join("provider_transport");
+    // Policy tests live beside agent_policy.rs and compile only under cfg(test).
+    let policy_tests = source_directory.join("agent_policy").join("tests");
+    let policy = compact(&read(source_directory.join("agent_policy.rs"))?);
+    if !policy.contains(
+        "#[cfg(test)]modtests{#[cfg(feature=\"provider-transport\")]modimage_tests;modnavigation_tests;",
+    ) {
+        return Err("zephium-agentic policy test modules escaped cfg(test)".to_owned());
+    }
     let mut files = Vec::new();
     collect_files(&source_directory, &mut files)?;
     for path in files {
@@ -9232,7 +9346,12 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
         let transport_owned = path.starts_with(&transport)
             || path.parent() == Some(source_directory.as_path())
                 && path.file_name().and_then(|name| name.to_str()) == Some("public_asset.rs");
-        if !transport_owned {
+        let test_only = path.parent() == Some(policy_tests.as_path())
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "image_tests.rs" | "navigation_tests.rs"));
+        if !transport_owned && !test_only {
             validate_agentic_zero_idle_source(
                 &path
                     .strip_prefix(repository)
@@ -9255,6 +9374,10 @@ fn validate_agentic_zero_idle_sources(repository: &Path) -> Result<(), String> {
 }
 
 fn validate_agentic_zero_idle_source(label: &str, source: &str) -> Result<(), String> {
+    // Reading the current thread's identity grants no authority; 0eeb8c21's
+    // test uses it to keep parallel tests from sharing a global probe hook.
+    let source = source.replace("std::thread::current().id()", "");
+    let source = source.as_str();
     for forbidden in [
         "std::net::",
         "std::thread::",
@@ -12006,10 +12129,12 @@ mod tests {
                 manifest_guard: [u8; 32],
             }
             pub struct AgentEffectPermit {
+                approval_binding: Option<crate::SemanticApprovalBinding>,
                 manifest: AgentRunManifestId,
                 manifest_guard: [u8; 32],
             }
             pub struct AgentActiveEffect {
+                approval_binding: Option<crate::SemanticApprovalBinding>,
                 manifest: AgentRunManifestId,
                 manifest_guard: [u8; 32],
             }
@@ -12030,10 +12155,12 @@ mod tests {
                 self.manifest == manifest && self.manifest_guard == manifest_guard
             }
             AgentEffectAuthorization::Permit(AgentEffectPermit {
+                approval_binding: assessment.approval_binding,
                 manifest: self.manifest.id(),
                 manifest_guard: self.manifest.guard(),
             });
             Ok(AgentActiveEffect {
+                approval_binding: permit.approval_binding,
                 manifest: permit.manifest,
                 manifest_guard: permit.manifest_guard,
             });
@@ -12897,7 +13024,7 @@ mod tests {
             [dependencies]
             futures-util = { version = "=0.3.32", optional = true }
             reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
-            tokio = { workspace = true, features = ["sync", "time"], optional = true }
+            tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
             zeroize = { version = "=1.9.0", optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "=3.7.0", optional = true }
@@ -13398,10 +13525,10 @@ mod tests {
                 loader.replace(sleep, &format!("loop {{ {sleep} }}")),
                 loader.replace("::Inaccessible)", "::Missing)"),
                 loader
-                    .replace("let _turn = keychain_turn();", "")
-                    .replace("let _turn = turn();", "")
+                    .replace("let _turn = keychain_turn().map_err(vault_error)?;", "")
+                    .replace("let _turn = turn()?;", "")
                     .replace(
-                        "let _turn = crate::provider_transport::keychain_turn();",
+                        "let _turn = crate::provider_transport::keychain_turn().map_err(map)?;",
                         "",
                     ),
             ] {
@@ -13600,8 +13727,8 @@ mod tests {
             [dependencies]
             zephium-agentic = { optional = true }
             zeroize = { version = "=1.9.0", optional = true }
+            image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
-            image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
             windows = { version = "0.61", features = ["Win32_System_Threading"] }
             windows-probe-sys = { package = "windows-sys", version = "=0.61.2", optional = true, features = [
               "Win32_Foundation",
@@ -13630,7 +13757,7 @@ mod tests {
         )
         .is_err());
         assert!(validate_engine_manifest(
-            &valid.replace("features = [\"png\"]", "features = [\"png\", \"jpeg\"]")
+            &valid.replace("\"webp\", \"gif\"]", "\"webp\", \"gif\", \"bmp\"]")
         )
         .is_err());
         assert!(validate_engine_manifest(&valid.replace(
@@ -14195,13 +14322,20 @@ mod tests {
             compact(transfer).replace("callback_panicked,true,)", "callback_panicked,false,)"),
             transfer.replace("count as usize > MAX_COOKIES_PER_TRANSFER", "false"),
             transfer.replace("bytes > MAX_COOKIE_TRANSFER_BYTES", "false"),
-            transfer.replace("!seed.existing.contains(&identity)", "true"),
+            transfer.replace(
+                "if !fields.supersedes(&current) => continue",
+                "if false => continue",
+            ),
             transfer.replace("seed.attempted.push(cookie.clone());", ""),
             transfer.replace(
-                "destination.DeleteCookie(cookie)",
+                "destination.DeleteCookie(attempted)",
                 "destination.DeleteAllCookies()",
             ),
-            transfer.replace("!current.contains(&identity)", "true"),
+            transfer.replace("destination.AddOrUpdateCookie(prior)", "Ok(())"),
+            transfer.replace(
+                "cookie.identity == *identity) == *restored",
+                "cookie.identity == *identity) || true",
+            ),
             transfer.replace(
                 "state.destination.CopyCookie(&source_cookie)",
                 "source_cookie.clone()",
@@ -14258,11 +14392,11 @@ mod tests {
             body.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
             MAX_SEMANTIC_RUNTIME_CHANNEL_RESULT_BYTES;
             MAX_SEMANTIC_RUNTIME_DOCUMENT_INVOCATIONS;
-            SEMANTIC_RUNTIME_PROGRAM.source();
+            SEMANTIC_RUNTIME_PROGRAM.installation_source();
             if scripts.count() != 1 {}
             let script = scripts.objectAtIndex(0);
             Retained::as_ptr(&script) != Retained::as_ptr(&active.script);
-            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.source();
+            source.to_string() != SEMANTIC_RUNTIME_PROGRAM.installation_source();
             removeScriptMessageHandlerForName_contentWorld();
             controller.removeAllScriptMessageHandlers();
             controller.removeAllUserScripts();
@@ -14276,8 +14410,15 @@ mod tests {
                 super::semantic_action::map_runtime_fault(*fault) ==
                     zephium_agentic::SemanticActionNativeFailure::AppliedUnverified;
                 DocumentPhase::AuthorityRevoked;
-                self.awaiting_result &&
-                    matches!(self.pending, Some(PendingInvocation::Action { .. }));
+                let handed_off = self.awaiting_result
+                    && matches!(
+                        self.pending,
+                        Some(
+                            PendingInvocation::Action { .. }
+                                | PendingInvocation::Privacy { .. }
+                                | PendingInvocation::Media { .. }
+                        )
+                    );
             }
             fn revoked_settling_action() {}
             fn renderer_lost() {}
@@ -14349,7 +14490,7 @@ mod tests {
         assert!(!shipping.contains("applied_unverified_preparation_only"));
         let engine = include_str!("../../crates/zephium-engine/src/lib.rs");
         assert!(engine.contains("#[cfg(all(feature = \"native-agentic-semantic-probe\", not(debug_assertions)))]\ncompile_error!(\"the native agentic semantic probe is forbidden in optimized builds\");"));
-        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request);"));
+        assert!(candidate.contains("return commandPreparationOnly ? \"unsupported_interaction\" : runSyntheticFill(target, descriptor, request, finish);"));
         let revalidation = candidate.find("if (!preparedCurrent()) return \"applied_unverified_beforeinput_revalidation\";\n      // The consumed").unwrap();
         let stop = candidate
             .find("if (commandPreparationOnly) return \"applied_unverified_preparation_only\";")
@@ -14414,7 +14555,25 @@ mod tests {
                         && attest_hidden_owner(&self.view, self.expected_parent, self.viewport).is_err()) {
                     return Err(SemanticScreenshotNativeFailure::NotReady);
                 }
-                super::semantic_screenshot::capture_viewport(&self.view);
+                let Some(semantic) = self.semantic().cloned() else {
+                    return Err(SemanticScreenshotNativeFailure::NotReady);
+                };
+                let native = self.view.webview();
+                let capture_cancelled = cancelled.clone();
+                let public = request.requires_public_page();
+                crate::platform::semantic_pixel_privacy::guarded_model_capture(
+                    public,
+                    Rc::new(move |completion| {
+                        if public {
+                            semantic.dispatch_public_privacy(completion)
+                        } else {
+                            semantic.dispatch_privacy(completion)
+                        }
+                    }),
+                    move |completion| {
+                        super::semantic_screenshot::capture_viewport(&native);
+                    },
+                );
             }
         "#;
         let buffer = r#"
@@ -14450,6 +14609,11 @@ mod tests {
             ),
             (".is_err()", ".is_ok()"),
             ("return Err(SemanticScreenshotNativeFailure::NotReady);", ""),
+            ("guarded_model_capture(", "unguarded_capture("),
+            (
+                "semantic.dispatch_privacy(completion)",
+                "completion(Ok(()))",
+            ),
             (
                 "pub(crate) fn dispatch_screenshot()",
                 "pub(crate) fn semantic_runtime_ready_for_history()",

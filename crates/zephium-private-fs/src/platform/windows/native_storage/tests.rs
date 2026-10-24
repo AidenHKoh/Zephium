@@ -53,6 +53,18 @@ mod validation {
             fixture.path().join(ANCHOR).join("app.zephium")
         );
         let expected = product.identity();
+        let review =
+            NativeStorageAnchor::prepare_under(fixture.path(), NativeApplication::ReviewQa, None)
+                .unwrap();
+        assert_eq!(
+            review.directory(),
+            fixture.path().join(ANCHOR).join("app.zephium.review-qa")
+        );
+        assert_ne!(review.identity(), expected);
+        assert!(matches!(
+            NativeStorageAnchor::prepare_under(fixture.path(), NativeApplication::ReviewQa, None),
+            Err(PrivateFsError::LockUnavailable)
+        ));
         assert!(matches!(
             NativeStorageAnchor::prepare_under(fixture.path(), NativeApplication::Product, None),
             Err(PrivateFsError::LockUnavailable)

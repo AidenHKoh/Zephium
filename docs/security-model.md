@@ -464,14 +464,18 @@ Quarantine is OS provenance, not malware scanning.
 DownloadStarting event/deferral and operation. Default cancellation and hidden
 native download UI precede host admission. Cookies, POST bodies and blob/data
 payloads remain native. Pending destination selection requires the exact live
-view/navigation/presentation and foreground parent. Automatic
-saving is not inferred from a recent click or a concurrent browser navigation:
-the event has no initiating-frame activation/navigation identity proof, so every
-Windows download requires native confirmation. HTTP origins
+view/navigation/presentation and foreground parent. The default saves into the
+system Downloads directory; a custom directory requires its picker-issued identity.
+The optional ask-first preference opens the native save dialog. WebView2's
+multiple-automatic-download permission remains denied. This admits a first download
+from a foreground document without claiming initiating-frame activation, which
+DownloadStarting does not expose. HTTP origins
 are displayed without URL secrets; origin-less data downloads label their top
 page origin as context, not an initiating-frame assertion.
 
-Directory handles pin canonical ancestors; a protected staging DACL admits only
+Directory handles pin canonical ancestors; the WebView2 destination uses verified
+ordinary Win32 spelling because verbatim paths fail in its download writer.
+A protected staging DACL admits only
 the current user and SYSTEM. File identities retain all 128 Windows file-ID bits.
 Publication invokes Attachment Services with the proposed filename/source origin,
 requires an Internet zone stream, flushes the payload and moves it without a
@@ -601,8 +605,10 @@ types afterward before removing the canonical profile directory. Opaque native-b
 failure, manager mismatch, or failed clear/fetch creates sticky process-lifetime proof
 debt; no later empty retry may authorize disk deletion, and successful handles are
 released only for the exact attempt that verified disk absence. macOS clears and
-fetch-verifies ephemeral stores and removes a named store before re-enumerating its
-identifier. Windows closes the profile's controllers, requests an opportunistic
+fetch-verifies ephemeral stores and removes each named store (the profile's own, then
+Work's own website data store for the profile) before re-enumerating identifiers; a
+removed identifier still listed fails the erasure. Windows erases Work's own store
+folder for the profile through the same process-exit-proven path. Windows closes the profile's controllers, requests an opportunistic
 `ICoreWebView2Profile2` all-data clear, and requires the matching
 `Environment5.BrowserProcessExited` event for the exact PID and monotonic environment
 generation before deletion. The clear callback is not authoritative because WebView2
@@ -1851,3 +1857,77 @@ updates mitigate some of these risks but do not remove them.
       gates; exact advisory exceptions stay justified, reviewed, and tied to removal work.
 - [ ] This document is updated when a guarantee or accepted platform limitation
       changes.
+
+### Work Computer capability gate
+
+Bounded file text, tool arguments, copied review inputs and command output are also checked for recognized credential and private-key shapes before model disclosure or evidence persistence. Matching content is withheld with a fixed refusal; matching names are excluded from listings and searches. This heuristic does not identify arbitrary secrets.
+
+Computer inspects granted folders and proposes file writes and edits that the
+person approves one diff at a time. A shared
+path policy excludes `.env*`, named credential stores, private-key extensions and
+browser credential files from reads, listings and searches, including Unicode case aliases
+(such as long-s ſ) and alternate-stream/trailing-dot spellings. Regular files with multiple hard links
+are refused. Unix inspection opens components relative to held directory descriptors
+with `O_NOFOLLOW`; Windows inspection retains its directory/reparse checks and adds
+handle-based hard-link checks. Search loads local ignore files through the same
+bounded reader and does not load parent or global ignore configuration. Project
+descriptions use those same guarded readers/listings; their Git state is explicitly
+unavailable and does not launch an independent Git process.
+
+Arbitrary commands and coding-agent hand-offs fail before spawning, regardless of
+prior approval. Legacy Connection CLI execution, login-shell discovery and automatic `gh` status probes are also gated; service consent cannot enable that path. Configured MCP servers remain separately authorized service capabilities, not Computer subprocess grants. Narrow Git status/diff/check execution and public-only gh reads use the independently owned private guard on the measured macOS build. The separate `review_changes` implementation reviews only the current part's
+approved before/after edits in a private copy, with a synthetic Git baseline. It
+refuses intervening file changes and never reports original repository status or
+history. Native profile qualification is limited to Apple silicon macOS build `25G83`: its tested Seatbelt profile denies
+network access, fork and child spawning and permits writes only to generated Git
+metadata and scratch. System startup requires read access to the literal `/` directory;
+there is no recursive root grant. User-home/private-root and symlink probes use
+open-only helpers that never consume secret bytes or directory names; absent
+real targets are reported separately from denial evidence. Windows LPAC token,
+ACL and job adapters remain gated pending physical Windows qualification. Darwin
+spawn closes all non-stdio descriptors atomically; child reap and shutdown share
+the process registry lock. Qualified single-process cleanup signals only its exact unreaped child, so a group change cannot evade Stop or cause an unrelated group member to be killed; independently reaped legacy children remain group-only. Stop is reported as confirmed only after exit is observed.
+
+`git_changes` compares 1–64 selected ordinary text paths with their current SHA-1 Git index content. A typed no-follow broker reads only index v2/v3 and selected loose or pack-v2/idx-v2 objects; it never reads source configuration, hooks, alternates or HEAD. Protected-path object IDs (including aliased IDs and delta bases) are refused. Checksums, CRCs, offsets, delta cycles/depth, input/output budgets and source identities are checked, and the index plus selected working files are revalidated before disclosure. Only validated text copies enter the qualified runner. This is a content comparison, excluding staged-versus-HEAD, untracked files, modes and filter transformations; unsupported layouts and `.gitattributes` inputs fail closed. Both current-index inspection and approved-edit review send only validated before/after text maps to the private current-executable guard; original grants and repository metadata never cross that protocol. The guard owns snapshot creation through verified close and runs five closed Git stages with a 90-second independent operation clock and 15-second per-child clock starting before spawn. Host EOF and Stop terminate the exact owned child; no cleanup receipt is accepted before its reap and snapshot close. Native host-death and Stop fixtures plus connected ComputerTools receipts qualify this narrow route, not a model or durable Store end-to-end flow. The broker has a cooperative 5-second processing budget. Review, Git-index, Python and gh workers each have four process-wide custody slots, a 10-second filesystem-phase bound and respective 90/100/40/30-second caller bounds. Slots belong to the physical worker through acknowledged cleanup; a bounded caller timeout or Stop cannot release an unsettled worker or advertise clean shutdown. Windows implementation is source-checked but runtime-gated pending native qualification.
+
+`python_tests` runs selected stdlib unittest modules and explicitly supplied supporting text files in a read-only copy. The qualified Apple silicon macOS class enters a private current-executable guard before app initialization. Its single bounded request carries only filtered relative filenames, text and module names, never source grant paths or credentials. The guard owns private snapshot creation and cleanup, rejects incomplete/unknown requests, and requires a fresh Prepared challenge before launch. It directly launches the actual Apple Command Line Tools Python 3.9 framework executable with a 256 MiB fatal active/inactive footprint limit. Its fixed isolated bootstrap seals Seatbelt before any project import and emits one private readiness prefix; that prefix is consumed and withheld from model evidence, and duplicate/malformed prefixes fail closed. The executable, framework and complete stdlib/extension/bytecode closure are pinned; the private Apple spawn SPI and custom profile require requalification after OS/runtime changes and fail closed when unavailable. The profile permits only metadata at literal `/`, selected copied inputs and fixed system/runtime reads; it permits no exec, fork, network or regular-file writes. Request intake is bounded to 10 seconds and the guard has an independent 35-second operation clock. The child’s 15-second wall clock starts before spawn; status writes cannot postpone it. Host control EOF and Stop cause exact owned-child termination, and the guard retains custody until reap and verified snapshot close before acknowledging cleanup. Shutdown closes the control channel synchronously without killing the guard. Target processes inherit no control/status descriptors. Combined output is held and capped at 64 KiB. No hard CPU-seconds or thread-count guarantee is made. Recognized secrets are withheld before any live output or evidence, including values split across pipe reads. Source contents are rechecked before accepting the result; empty suites and missing summaries never count as a test pass. Windows has shared typed requests and read-only LPAC/Job dispatch source, but requires a pinned packaged runtime and physical qualification before availability. This class does not run pytest, install dependencies or perform general project builds.
+
+`github_cli_repository`, `github_cli_issue` and `github_cli_pr` provide bounded public GitHub reads only after an explicit “Use GitHub CLI (gh)” choice. That choice is distinct from cached generic service consent. The Apple silicon macOS `25G83` implementation executes a digest-pinned private copy of the installed Homebrew gh `2.96.0` image (this is a local runtime pin, not production distribution support), with a private home and exact generated read-only `http_unix_socket` config, fixed argv/environment, closed inherited descriptors and no provider credential. Seatbelt permits only its exact private AF_UNIX endpoint (no IP grants), fixed system/runtime reads and a read-only private copy; it denies regular-file writes, fork/spawn and other network access. Literal `/` data access remains necessary for startup; the only extra sysctl is `hw.pagesize_compat`. The one-use local route forwards no child-selected resource, headers or credentials: the app captures a fixed public repository/issue/PR GET, uses vetted public DNS addresses at the connector, disables proxies and redirects, caps the full body and checks decoded credential shapes before any child/model disclosure. Execution is capped at 15 seconds and 64 KiB combined output, with a separate 10-second preparation bound and 12-second broker bound. The private guard owns the pinned image, socket and child through reap and verified copy removal. It has a 30-second independent clock; host EOF stops the exact owned child. Only a fresh guard challenge issued after the validated native socket request admits one bounded public response from the app; no remote URL or credential enters this protocol. Privacy and limit failures retain their typed reason after cleanup. Four separate DNS-worker slots remain occupied until blocking resolution actually returns, even after the requesting future is cancelled. The broker nonce is transient and never enters receipts. Private repositories, account reads, arbitrary API paths and writes remain unavailable. Windows implements the same typed request and AF_UNIX broker transport, with a digest-pinned official gh 2.96.0 image, no-capability LPAC/Job launch, and one no-delete-handle-pinned `IO_REPARSE_TAG_AF_UNIX` endpoint ACL exception. Generic reparse points remain denied. Endpoint names are limited to 100 UTF-8 bytes and local drive paths on Windows. Its packaged runtime, endpoint ACL/LPAC interoperability, denial/Stop/cleanup matrix and physical machine qualification remain outstanding, so Windows availability stays closed. These are controlled native/local-socket qualification results, not live GitHub account proof.
+
+An approved write or edit resolves through the same path policy, writes
+atomically after checking the prior digest. Unix creation, publication and cleanup
+are relative to held directory descriptors; Windows guard markers are created
+relative to the held parent before pathname-based publication. These checks reject
+observed changes; they are not a compare-and-swap against hostile same-user writers.
+Generic moves and deletes remain unavailable. The qualified macOS `trash` tool
+accepts regular text files up to 64 KiB, matching the approved restore contract.
+It binds source identity and digest across approval, durably stores a private
+saved copy and receipt before same-volume staging, then requires NSFileManager's
+returned Trash item to match the original inode. No permanent fallback exists.
+A dropped or cancelled queued request cannot start a later removal; a native
+request already dispatched is settled from its actual acknowledgment. Uncertain
+results retain recovery and are never replayed automatically. `recoveries` is
+profile- and current-grant-scoped; `restore_saved` requires ordinary file approval
+and exclusive creation at the original path. It restores saved text, not original
+metadata. Recovery storage is protected from all Computer paths and snapshots.
+The journal admits at most 64 active/incomplete records per profile and retains 256 verified completed/restored records. Older eligible history expires only after acknowledged native completion and empty staging/backup directories; active copies, staged originals and OS Trash are untouched. A durable expiration marker permits exact-entry metadata cleanup after a crash without replaying a file operation. Unknown contents are preserved, and missing/expired receipt IDs always fail closed. New completion markers order retention; legacy markers remain readable.
+Binary files, directories and cross-volume Trash remain refused. Windows has a
+handle-bound staging and IFileOperation backend requiring recycle pre-admission,
+exact returned-item acknowledgment and no abort; its runtime gate stays closed
+until the private namespace and Recycle Bin matrix pass on Windows.
+
+The qualified macOS `move_file` tool uses the same text, approval, grant and
+same-volume bounds. It stages the verified original, requires native Trash
+acknowledgment for a separate recovery copy, then publishes the original with an
+exclusive handle-relative rename into the approved destination directory. The
+original identity and permissions survive. Durable receipts distinguish backup
+acknowledgment from confirmed publication; cancellation, destination conflicts or
+unknown native results retain recovery without replay or overwrite. Restoring a
+saved copy is a separate approved action and does not undo a completed move.
+Windows contains the matching pinned-handle implementation but remains runtime-gated.
+
+Process groups, Windows JobObjects and command classification are lifecycle/approval
+mechanisms, not a sandbox. The retained runner uses a fixed environment and no Unix
+login shell. Native Windows runtime qualification remains outstanding. This policy
+cannot identify secrets stored in arbitrary ordinary file contents and is not a
+claim of complete secret detection or same-user process isolation.

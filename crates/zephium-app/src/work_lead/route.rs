@@ -6,7 +6,7 @@ use zephium_core::work::parts::{WorkHelperV1, WorkPartServiceV1};
 use zephium_ipc::work::WorkServerV1;
 
 /// Services people reach both ways, by the name the lead may use for them.
-const SERVICES: [(&str, &str, &str); 8] = [
+const SERVICES: [(&str, &str, &str); 11] = [
     ("slack", "Slack", "app.slack.com"),
     ("github", "GitHub", "github.com"),
     ("gmail", "Gmail", "mail.google.com"),
@@ -15,13 +15,17 @@ const SERVICES: [(&str, &str, &str); 8] = [
     ("linear", "Linear", "linear.app"),
     ("figma", "Figma", "www.figma.com"),
     ("discord", "Discord", "discord.com"),
+    ("todoist", "Todoist", "app.todoist.com"),
+    ("sentry", "Sentry", "sentry.io"),
+    ("stripe", "Stripe", "dashboard.stripe.com"),
 ];
 
 /// Services with an MCP server people add in Settings → Connections, by
 /// the brand the lead names them with (the presets Settings offers).
-const KNOWN_SERVERS: [(&str, &str); 5] = [
+const KNOWN_SERVERS: [(&str, &str); 6] = [
     ("linear", "Linear"),
     ("notion", "Notion"),
+    ("todoist", "Todoist"),
     ("sentry", "Sentry"),
     ("stripe", "Stripe"),
     ("figma", "Figma"),
@@ -35,13 +39,73 @@ pub(crate) fn known_server(brand: &str) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
+pub(crate) const USE_CONNECTION: &str = "Use connection";
+pub(crate) const USE_WEBSITE: &str = "Use the website";
+pub(crate) const ALWAYS_WEBSITE: &str = "Always the website";
+pub(crate) const NOT_NOW: &str = "Not now";
+const CONNECT: &str = "Connect ";
+
+/// How the person has a part reach a service.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Way {
+    Connection,
+    Website,
+    AlwaysWebsite,
+    /// Connect it in Settings first; the part ends with that need.
+    Connect,
+    NotNow,
+}
+
+/// The one question a part about the person's own data in a service asks:
+/// their connection or the website when they have a connection, the website
+/// or connecting first when the service has one they could add.
+pub(crate) fn question(name: &str, connected: bool) -> (String, Vec<String>) {
+    let (prompt, first) = if connected {
+        (
+            format!("Use your {name} connection, or work on the website?"),
+            USE_CONNECTION.to_owned(),
+        )
+    } else {
+        (
+            format!("Work on the {name} website, or connect {name} first?"),
+            USE_WEBSITE.to_owned(),
+        )
+    };
+    let second = if connected {
+        USE_WEBSITE.to_owned()
+    } else {
+        format!("{CONNECT}{name}")
+    };
+    (
+        prompt,
+        vec![first, second, ALWAYS_WEBSITE.to_owned(), NOT_NOW.to_owned()],
+    )
+}
+
+/// What an answer to the question chooses; anything unknown is a no.
+pub(crate) fn way(answer: &str) -> Way {
+    let answer = answer.trim();
+    if answer.eq_ignore_ascii_case(USE_CONNECTION) {
+        Way::Connection
+    } else if answer.eq_ignore_ascii_case(USE_WEBSITE) {
+        Way::Website
+    } else if answer.eq_ignore_ascii_case(ALWAYS_WEBSITE) {
+        Way::AlwaysWebsite
+    } else if answer
+        .get(..CONNECT.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(CONNECT))
+    {
+        Way::Connect
+    } else {
+        Way::NotNow
+    }
+}
+
 /// A connection the person has for a service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Offer {
     /// What the part's service names, for the connection helper's tools.
     pub connection: String,
-    /// "Use Slack (MCP)?"
-    pub prompt: String,
     /// "Use Slack": the connection helper's own first-use answer.
     pub yes: String,
 }
@@ -84,10 +148,39 @@ pub(crate) fn site(brand: &str) -> Option<&'static str> {
 
 /// Whether a browsing part opens the person's own app for the service (its
 /// signed-in home), not the service's public site: only then is their
-/// connection the better way in. A part with no host names the service itself.
+/// connection the better way in. A part with no host names the service itself,
+/// and so does any host on the app's site (the lead writes todoist.com for
+/// app.todoist.com): a public read there (pricing, docs) is told apart by its
+/// goal before this.
 pub(crate) fn reaches_own_app(brand: &str, host: Option<&str>) -> bool {
-    host.is_none_or(|host| site(brand) == Some(host))
+    host.is_none_or(|host| {
+        let site_of = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
+        site(brand).is_some_and(|app| {
+            app == host || site_of(app).is_some_and(|app| site_of(host).as_deref() == Some(&*app))
+        }) || FORMER_SITES
+            .iter()
+            .any(|(key, former)| *key == brand && site_of(host).as_deref() == Some(*former))
+    })
 }
+
+/// The app's own host for a service named by a bare site that only
+/// redirects to it on another site: gmail.com for mail.google.com.
+pub(crate) fn app_host(host: &str) -> Option<&'static str> {
+    let host = host.trim_start_matches("www.").to_ascii_lowercase();
+    let site_of = |host: &str| crate::work_sites::site_of(&format!("https://{host}/"));
+    let bare = site_of(&host).is_some_and(|site| site == host);
+    let app = site(&brand(
+        Some(&WorkPartServiceV1 {
+            host: Some(host.clone()),
+            connection: None,
+        }),
+        "",
+    )?)?;
+    (bare && site_of(app) != site_of(&host)).then_some(app)
+}
+
+/// Sites an app moved away from, which models still name it by.
+const FORMER_SITES: [(&str, &str); 1] = [("notion", "notion.so")];
 
 /// The person's connection for the service: gh for GitHub when it is
 /// installed and signed in, else an enabled MCP server named for it.
@@ -95,7 +188,6 @@ pub(crate) fn offer(brand: &str, gh_ready: bool, servers: &[WorkServerV1]) -> Op
     if brand == "github" && gh_ready {
         return Some(Offer {
             connection: "GitHub".into(),
-            prompt: crate::work_connections::gh::ASK.into(),
             yes: crate::work_connections::gh::USE.into(),
         });
     }
@@ -112,10 +204,6 @@ pub(crate) fn offer(brand: &str, gh_ready: bool, servers: &[WorkServerV1]) -> Op
     })?;
     Some(Offer {
         connection: server.name.clone(),
-        prompt: format!(
-            "Use {} (MCP)? Its tools read {} as you in this work.",
-            server.name, server.name
-        ),
         yes: format!("Use {}", server.name),
     })
 }
@@ -198,20 +286,20 @@ mod tests {
             server("notion", "Notion", false),
         ];
         let slack = offer("slack", false, &servers).unwrap();
-        assert_eq!(
-            slack.prompt,
-            "Use Slack (MCP)? Its tools read Slack as you in this work."
-        );
         assert_eq!(slack.yes, "Use Slack");
         assert_eq!(offer("notion", false, &servers), None);
-        assert_eq!(offer("github", true, &servers).unwrap().yes, "Use GitHub");
+        assert_eq!(
+            offer("github", true, &servers).unwrap().yes,
+            "Use GitHub CLI (gh)"
+        );
         assert_eq!(offer("github", false, &servers), None);
         assert_eq!(offer("sla", false, &servers), None);
         assert!(reaches_own_app("notion", Some("app.notion.com")));
         assert!(reaches_own_app("slack", None));
-        assert!(!reaches_own_app("notion", Some("www.notion.so")));
-        assert!(!reaches_own_app("notion", Some("notion.com")));
-        assert!(!reaches_own_app("stripe", Some("stripe.com")));
+        assert!(reaches_own_app("notion", Some("www.notion.so")));
+        assert!(!reaches_own_app("notion", Some("notion.site")));
+        assert!(reaches_own_app("todoist", Some("todoist.com")));
+        assert!(!reaches_own_app("todoist", Some("doist.com")));
 
         let used = settle(WorkHelperV1::Browser, "slack", Some(&slack), true).unwrap();
         assert_eq!(used.0, WorkHelperV1::Connection);
@@ -225,5 +313,66 @@ mod tests {
         let website = settle(WorkHelperV1::Connection, "linear", None, false).unwrap();
         assert_eq!(website.0, WorkHelperV1::Browser);
         assert_eq!(website.1.host.as_deref(), Some("linear.app"));
+    }
+
+    #[test]
+    fn a_service_named_by_a_site_that_only_redirects_opens_its_app() {
+        assert_eq!(app_host("gmail.com"), Some("mail.google.com"));
+        assert_eq!(app_host("www.gmail.com"), Some("mail.google.com"));
+        assert_eq!(app_host("mail.google.com"), None);
+        assert_eq!(app_host("slack.com"), None);
+        assert_eq!(app_host("example.com"), None);
+    }
+
+    #[test]
+    fn the_way_question_names_the_choices_and_reads_each_answer() {
+        let (prompt, options) = question("Linear", true);
+        assert_eq!(
+            prompt,
+            "Use your Linear connection, or work on the website?"
+        );
+        assert_eq!(
+            options,
+            [
+                "Use connection",
+                "Use the website",
+                "Always the website",
+                "Not now"
+            ]
+        );
+        let (prompt, options) = question("Linear", false);
+        assert_eq!(
+            prompt,
+            "Work on the Linear website, or connect Linear first?"
+        );
+        assert_eq!(
+            options,
+            [
+                "Use the website",
+                "Connect Linear",
+                "Always the website",
+                "Not now"
+            ]
+        );
+        assert_eq!(way("Use connection"), Way::Connection);
+        assert_eq!(way("Use the website"), Way::Website);
+        assert_eq!(way("Always the website"), Way::AlwaysWebsite);
+        assert_eq!(way("Connect Linear"), Way::Connect);
+        assert_eq!(way("Not now"), Way::NotNow);
+        assert_eq!(way("maybe"), Way::NotNow);
+    }
+
+    #[test]
+    fn the_popular_services_with_an_official_server_are_known_and_have_a_website() {
+        for brand in ["linear", "notion", "todoist", "sentry", "stripe", "figma"] {
+            assert!(known_server(brand).is_some(), "{brand}");
+            assert!(site(brand).is_some(), "{brand}");
+        }
+        assert_eq!(known_server("slack"), None);
+        assert!(reaches_own_app("todoist", Some("app.todoist.com")));
+        assert_eq!(
+            brand(Some(&host("app.todoist.com")), "Tasks").as_deref(),
+            Some("todoist")
+        );
     }
 }

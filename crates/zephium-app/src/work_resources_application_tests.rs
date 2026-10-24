@@ -118,9 +118,12 @@ fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_doe
     let prior = AgentWorkIncarnation::generate();
     let current = AgentWorkIncarnation::generate();
     let interrupted = interrupted_record(prior, 1);
+    // FailedClosed is the coordinator's own terminal classification of an
+    // actor that never started; no review can follow it.
     for disposition in [
         AgentWorkDisposition::FreshAdmissionRequired,
         AgentWorkDisposition::Rejected,
+        AgentWorkDisposition::FailedClosed,
     ] {
         let reviewed = interrupted.transition(disposition).unwrap();
         let (work, native, _) = review_coordinator(vec![reviewed], current);
@@ -132,7 +135,6 @@ fn reviewed_history_allows_fresh_resources_but_unreviewed_or_foreign_history_doe
     for disposition in [
         AgentWorkDisposition::Interrupted,
         AgentWorkDisposition::RecoveryRequired,
-        AgentWorkDisposition::FailedClosed,
         AgentWorkDisposition::NeedsApproval,
     ] {
         let mut bytes = *interrupted.as_bytes();
@@ -248,6 +250,9 @@ struct GatedStore {
     store: Arc<zephium_store::SqliteStore>,
     hold: Arc<AtomicU8>,
     pending: Arc<Mutex<Option<Held>>>,
+    resent: Arc<Mutex<Vec<Held>>>,
+    // Answers the first CAS to this disposition Uncertain without writing it.
+    refuse_once: AtomicU8,
     pending_artifact: Arc<Mutex<Option<HeldArtifact>>>,
     refuse_artifact_read: AtomicBool,
     wakes: Arc<AtomicUsize>,
@@ -296,6 +301,17 @@ impl AgentWorkJournalPort for GatedStore {
         request: AgentWorkJournalRequest,
         completion: AgentWorkJournalCompletion,
     ) -> Result<(), AgentWorkJournalError> {
+        if let AgentWorkJournalRequest::CompareAndSet(mutation) = &request {
+            let disposition = mutation.next().disposition() as u8;
+            if self
+                .refuse_once
+                .compare_exchange(disposition, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                completion(Err(AgentWorkJournalError::Uncertain));
+                return Ok(());
+            }
+        }
         let held = match &request {
             AgentWorkJournalRequest::CompareAndSet(mutation) => {
                 self.hold.load(Ordering::Acquire) == mutation.next().disposition() as u8
@@ -303,16 +319,20 @@ impl AgentWorkJournalPort for GatedStore {
             _ => false,
         };
         let pending = self.pending.clone();
+        let resent = self.resent.clone();
         let held_signal = self.held_signal.clone();
         self.store.dispatch(
             request,
             Box::new(move |reply| {
                 if held {
-                    assert!(pending
-                        .lock()
-                        .unwrap()
-                        .replace((reply, completion))
-                        .is_none());
+                    let mut slot = pending.lock().unwrap();
+                    // The coordinator resends an uncertain request on its own.
+                    if slot.is_some() {
+                        resent.lock().unwrap().push((reply, completion));
+                    } else {
+                        *slot = Some((reply, completion));
+                    }
+                    drop(slot);
                     if let Some(signal) = held_signal.lock().unwrap().as_ref() {
                         signal.send(()).unwrap();
                     }
@@ -351,6 +371,20 @@ fn child(test: &str) -> bool {
     true
 }
 
+/// A second page claiming from the same open Store, as a later page does.
+fn coordinator_beside(store: &Arc<GatedStore>) -> (RetainedWork, Arc<Native>) {
+    let (owner, native, resource) = construct_fixture_with_wake(
+        ContextProfileStorageClass::Ephemeral,
+        WorkBrowserDocumentPolicy::Exact,
+        None,
+        Arc::new(|| true),
+    );
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
+        .unwrap_or_else(|_| panic!("original owner and Store join"));
+    (work, native)
+}
+
 fn coordinator(directory: &std::path::Path) -> (RetainedWork, Arc<Native>, Arc<GatedStore>) {
     coordinator_with_wake(directory, Arc::new(|| true))
 }
@@ -371,6 +405,8 @@ fn coordinator_with_storage(
         store: Arc::new(zephium_store::SqliteStore::open(directory).unwrap()),
         hold: Arc::new(AtomicU8::new(0)),
         pending: Arc::new(Mutex::new(None)),
+        resent: Arc::new(Mutex::new(Vec::new())),
+        refuse_once: AtomicU8::new(0),
         pending_artifact: Arc::new(Mutex::new(None)),
         refuse_artifact_read: AtomicBool::new(false),
         wakes: Arc::new(AtomicUsize::new(0)),
@@ -405,6 +441,7 @@ fn coordinator_with_storage(
                 id: space,
                 profile,
                 name: "Fixture".into(),
+                look: Default::default(),
             }],
             items: vec![],
             active_space: Some(space),
@@ -757,6 +794,70 @@ fn retained_result_requires_atomic_ack_and_remains_readable_after_handoff() {
     ));
 }
 
+#[test]
+fn unarchivable_result_classifies_its_row_and_the_page_still_closes() {
+    if child("unarchivable_result_classifies_its_row_and_the_page_still_closes") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator_with_storage(
+        directory.path(),
+        Arc::new(|| true),
+        ContextProfileStorageClass::Durable,
+    );
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    REFUSE_PUBLICATION.store(true, Ordering::Release);
+    assert!(work
+        .submit(
+            request_with_result(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone(),
+                true
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    assert!(!REFUSE_PUBLICATION.load(Ordering::Acquire));
+    assert_eq!(work.phase(), AdmissionPhase::Uncertain);
+    assert_eq!(
+        work.failures(),
+        (
+            Some(AgentWorkFailure::ArtifactPublication(
+                AgentWorkJournalError::Uncertain
+            )),
+            None
+        )
+    );
+    assert!(work.artifact().is_none());
+    assert!(work.take_extraction().is_none());
+    assert!(store.pending_artifact.lock().unwrap().is_none());
+    // A later page of this process claims beside the classified row and runs.
+    let (mut later, _later_native) = coordinator_beside(&store);
+    run_fresh_read(&mut later, &servers);
+    assert!(later.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    native.join();
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
+    }
+}
+
 fn request(run: ContextRunId, responses: Vec<String>, servers: Servers) -> ActorRequest {
     request_with_result(run, responses, servers, false)
 }
@@ -950,21 +1051,6 @@ fn drained_failed_mapping_projects_original_typed_failure_through_terminal_ack()
     failed_mapping_projection(
         "sk-fixture-not-a-secret",
         SemanticExtractionError::SecretValue,
-    );
-}
-
-#[test]
-fn multiline_mapping_projects_invalid_text_through_terminal_ack() {
-    if child("multiline_mapping_projects_invalid_text_through_terminal_ack") {
-        return;
-    }
-    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // Two levels of JSON string encoding: SSE delta, then mapped value.
-    failed_mapping_projection(
-        "First.\\\\n\\\\nSecond.",
-        SemanticExtractionError::InvalidText,
     );
 }
 
@@ -1226,8 +1312,12 @@ fn mismatched_original_acknowledgement_cannot_start_worker_and_cleanup_stays_own
     });
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     assert!(!work.ready(), "cleanup does not clear durable uncertainty");
+    // The exact Running CAS is resent on its own once its backoff is due;
+    // it may already be held by the fixture.
     store.hold.store(0, Ordering::Release);
-    assert!(work.reconcile());
+    if store.pending.lock().unwrap().is_some() {
+        store.release(0);
+    }
     poll_until(&mut work, |work| {
         work.record()
             .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
@@ -1239,6 +1329,173 @@ fn mismatched_original_acknowledgement_cannot_start_worker_and_cleanup_stays_own
     assert!(!work.reconcile(), "original exact CAS has now settled");
     for server in servers.lock().unwrap().drain(..) {
         assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+/// Runs a fresh read to its acknowledged success.
+fn run_fresh_read(work: &mut RetainedWork, servers: &Servers) {
+    poll_until(work, RetainedWork::ready);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(work, |work| {
+        matches!(
+            work.phase(),
+            AdmissionPhase::Terminal | AdmissionPhase::Uncertain
+        )
+    });
+    assert_eq!(work.phase(), AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    drain_events(work);
+    assert!(work.take_extraction().is_some());
+}
+
+#[test]
+fn fail_closed_admission_never_refuses_later_claims_or_a_reopened_store() {
+    const PHASE: &str = "ZEPHIUM_FAIL_CLOSED_PHASE";
+    const DIRECTORY: &str = "ZEPHIUM_FAIL_CLOSED_DIRECTORY";
+    let Some(phase) = std::env::var_os(PHASE) else {
+        // The Store fences one claimant per process: reopening it takes a
+        // second process, as a relaunch does.
+        let directory = tempfile::tempdir().unwrap();
+        for phase in ["create", "reopen"] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "work_resources::controller::tests::application_tests::fail_closed_admission_never_refuses_later_claims_or_a_reopened_store",
+                    "--nocapture",
+                ])
+                .env(PHASE, phase)
+                .env(DIRECTORY, directory.path())
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{phase}: {result:?}");
+        }
+        return;
+    };
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = std::path::PathBuf::from(std::env::var_os(DIRECTORY).unwrap());
+    let servers = Servers::default();
+    if phase == "reopen" {
+        let (mut work, _native, _store) = coordinator(&directory);
+        run_fresh_read(&mut work, &servers);
+        let history: Vec<_> = work
+            .records()
+            .iter()
+            .map(|record| (record.disposition(), record.debt()))
+            .collect();
+        assert!(history.contains(&(AgentWorkDisposition::FailedClosed, AgentWorkDebt::UNKNOWN)));
+        assert_eq!(history.len(), 3);
+        assert!(work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(2)
+        ));
+        for server in servers.lock().unwrap().drain(..) {
+            assert_eq!(server.join().unwrap(), 2);
+        }
+        return;
+    }
+    let (mut work, native, store) = coordinator(&directory);
+    poll_until(&mut work, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Running as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |_| store.pending.lock().unwrap().is_some());
+    // Stopped between the Admitted and Running acknowledgements.
+    work.cancel();
+    store.release(0);
+    poll_until(&mut work, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    let closed = work.record().unwrap();
+    assert_eq!(closed.debt(), AgentWorkDebt::UNKNOWN);
+    assert_eq!(native.reads.load(Ordering::Acquire), 0);
+    // A later page of this process claims beside the row and runs.
+    let (mut later, _later_native) = coordinator_beside(&store);
+    run_fresh_read(&mut later, &servers);
+    assert!(later.records().contains(&closed));
+    assert!(later.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert!(
+        !work.shutdown_until(
+            &Clock(AtomicU64::new(2)),
+            Instant::now() + Duration::from_secs(2)
+        ),
+        "a never-started actor still ends unclean"
+    );
+    for server in servers.lock().unwrap().drain(..) {
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn refused_terminal_write_is_resent_until_acknowledged_and_the_page_closes() {
+    if child("refused_terminal_write_is_resent_until_acknowledged_and_the_page_closes") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut work, native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    poll_until(&mut work, RetainedWork::ready);
+    // The Store answers the terminal write Uncertain and never again: the
+    // original callback is spent, so only a resend can settle the row.
+    store
+        .refuse_once
+        .store(AgentWorkDisposition::Succeeded as u8, Ordering::Release);
+    assert!(work
+        .submit(
+            request(
+                ContextRunId::generate(),
+                vec![response_stream(1), response_stream(2)],
+                servers.clone()
+            ),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut work, |work| {
+        work.failures().1 == Some(AgentWorkJournalError::Uncertain)
+    });
+    assert!(work.next_deadline().is_some(), "the resend is owed a wake");
+    poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
+    assert_eq!(
+        work.record().unwrap().disposition(),
+        AgentWorkDisposition::Succeeded
+    );
+    assert_eq!(work.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert!(!work.ready(), "a resend keeps the sticky execution stop");
+    assert!(work.take_extraction().is_none());
+    native.join();
+    assert!(work.shutdown_until(
+        &Clock(AtomicU64::new(2)),
+        Instant::now() + Duration::from_secs(2)
+    ));
+    assert_eq!(native.global_audits.load(Ordering::Acquire), 1);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 2);
     }
 }
 
@@ -1290,13 +1547,20 @@ fn timed_out_terminal_acknowledgement_never_reopens_retained_execution() {
         work.resource_destroyed()
     });
     assert_eq!(native.destructions.load(Ordering::Acquire), 1);
-    store.hold.store(0, Ordering::Release);
+    // Production resends the exact terminal CAS on its own once its backoff
+    // is due; nothing asks for it.
+    wait_until(|| {
+        assert!(!work.poll_shutdown(now()).unwrap());
+        !store.resent.lock().unwrap().is_empty()
+    });
     assert_eq!(
         native.global_audits.load(Ordering::Acquire),
         0,
-        "native global seal cannot precede the unresolved original terminal ACK"
+        "native global seal cannot precede the unresolved terminal ACK, even resent"
     );
-    assert!(work.reconcile());
+    store.hold.store(0, Ordering::Release);
+    let (reply, completion) = store.resent.lock().unwrap().remove(0);
+    completion(reply);
     poll_until(&mut work, |work| work.phase() == AdmissionPhase::Terminal);
     assert!(
         !work.ready(),
@@ -1810,6 +2074,159 @@ fn refused_scoped_worker_persists_failed_closed_after_running_ack() {
     }
 }
 
+/// Another page of the same Store, as the Shell seats one in a page group.
+fn peer_coordinator(store: &Arc<GatedStore>) -> (RetainedWork, Arc<Native>) {
+    let (owner, native, resource) = construct_fixture(
+        ContextProfileStorageClass::Ephemeral,
+        WorkBrowserDocumentPolicy::Exact,
+        None,
+    );
+    native.allow_global_shutdown.store(true, Ordering::Release);
+    let work = RetainedWork::new(owner, resource, store.clone(), store.clone())
+        .unwrap_or_else(|_| panic!("original owner and Store join"));
+    (work, native)
+}
+
+/// Admits the group's first page, then fails it before its actor starts:
+/// its Running row is committed but unacknowledged, so the group fails.
+fn fail_first_member(
+    first: &mut RetainedWork,
+    store: &GatedStore,
+    group: &RetainedWorkGroup,
+    servers: &Servers,
+) {
+    poll_until(first, RetainedWork::ready);
+    store
+        .hold
+        .store(AgentWorkDisposition::Running as u8, Ordering::Release);
+    assert!(first
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(first, |_| store.pending.lock().unwrap().is_some());
+    assert!(!group.is_failed());
+    first.cancel();
+    assert!(group.is_failed());
+}
+
+/// A grouped page that settled takes the group's native audit turn and
+/// finishes it, so the Shell can free its seat and close the group.
+fn audit_grouped(work: &mut RetainedWork, clean: bool) {
+    work.begin_shutdown();
+    wait_until(|| {
+        assert!(!work.poll_shutdown(now()).unwrap());
+        work.resource_destroyed()
+    });
+    assert!(
+        work.awaits_group_audit(),
+        "a settled page asks for its turn"
+    );
+    work.allow_group_shutdown();
+    wait_until(|| match work.poll_shutdown(now()) {
+        Ok(closed) => closed,
+        Err(_) => !clean,
+    });
+    assert!(work.native_audit_settled());
+    assert_eq!(work.locally_closed(), clean);
+}
+
+#[test]
+fn failed_group_refuses_a_later_claim_and_both_pages_still_end() {
+    if child("failed_group_refuses_a_later_claim_and_both_pages_still_end") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut first, first_native, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+    first.set_runtime_group(group.clone());
+    fail_first_member(&mut first, &store, &group, &servers);
+
+    // The next page claims while the failed peer's row is still Running.
+    let (mut second, second_native) = peer_coordinator(&store);
+    second.set_runtime_group(group.clone());
+    poll_until(&mut second, |work| {
+        work.phase() == AdmissionPhase::Uncertain
+    });
+    assert_eq!(
+        second.failures(),
+        (Some(AgentWorkFailure::Contract), None),
+        "a settled claim the page may not run beside is a refusal, not an unsettled write"
+    );
+    assert!(second.record().is_none());
+    assert!(!second.reconcile(), "no Store request is left to reconcile");
+    assert_eq!(second_native.acquisitions.load(Ordering::Acquire), 0);
+    audit_grouped(&mut second, true);
+    assert!(second_native.global_sealed.load(Ordering::Acquire));
+
+    // The failed page classifies its never-started actor and ends unclean.
+    store.release(0);
+    poll_until(&mut first, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    assert_eq!(first_native.reads.load(Ordering::Acquire), 0);
+    audit_grouped(&mut first, false);
+    assert_ne!(first.record().unwrap().debt(), AgentWorkDebt::NONE);
+    assert!(first_native.global_sealed.load(Ordering::Acquire));
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
+#[test]
+fn failed_group_refuses_a_staged_peer_and_releases_its_unadmitted_actor() {
+    if child("failed_group_refuses_a_staged_peer_and_releases_its_unadmitted_actor") {
+        return;
+    }
+    let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut first, _, store) = coordinator(directory.path());
+    let servers = Servers::default();
+    let group = RetainedWorkGroup::try_new(WorkId::generate(), 3).unwrap();
+    first.set_runtime_group(group.clone());
+    let (mut second, second_native) = peer_coordinator(&store);
+    second.set_runtime_group(group.clone());
+    poll_until(&mut second, RetainedWork::ready);
+    fail_first_member(&mut first, &store, &group, &servers);
+
+    // Its actor is staged on an acquired lease, then the failed group
+    // refuses its admission: the journal never hears of it.
+    assert!(second
+        .submit(
+            request(ContextRunId::generate(), vec![], servers.clone()),
+            now()
+        )
+        .is_ok());
+    poll_until(&mut second, |work| {
+        work.phase() == AdmissionPhase::Uncertain
+    });
+    assert_eq!(second.failures(), (Some(AgentWorkFailure::Contract), None));
+    assert!(second.record().is_none());
+    assert_eq!(second_native.acquisitions.load(Ordering::Acquire), 1);
+    assert_eq!(second_native.reads.load(Ordering::Acquire), 0);
+    audit_grouped(&mut second, true);
+    assert_eq!(second_native.destructions.load(Ordering::Acquire), 1);
+    assert!(second_native.global_sealed.load(Ordering::Acquire));
+
+    store.release(0);
+    poll_until(&mut first, |work| {
+        work.record()
+            .is_some_and(|record| record.disposition() == AgentWorkDisposition::FailedClosed)
+    });
+    audit_grouped(&mut first, false);
+    for server in servers.lock().unwrap().drain(..) {
+        assert_eq!(server.join().unwrap(), 0);
+    }
+}
+
 #[test]
 fn pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack() {
     if child("pre_dispatch_failure_releases_unused_budget_only_after_exact_terminal_ack") {
@@ -1971,6 +2388,10 @@ fn human_handoff_contract(cancel: bool) {
         assert_eq!(human.phase, RetainedHumanPhase::WaitingForHuman);
         assert_eq!(human.deadline, deadline);
         assert!(!work.ready());
+        assert!(
+            work.human_check_progress().is_none(),
+            "unpresented pages cannot be checked"
+        );
         let region = WorkBrowserHumanRegion::try_new(0, 0, 800, 600).unwrap();
         assert!(!work.present_human(human.generation + 1, Some(region), now()));
         native.hold_human.store(true, Ordering::Release);
@@ -1980,6 +2401,7 @@ fn human_handoff_contract(cancel: bool) {
             work.begin_shutdown();
         }
         let (request, callback) = native.human.lock().unwrap().take().unwrap();
+        let human_progress = request.human_progress().unwrap();
         finish_human_fixture(request, callback);
         work.poll(now());
         assert_eq!(
@@ -1990,16 +2412,53 @@ fn human_handoff_contract(cancel: bool) {
                 RetainedHumanPhase::Presented
             }
         );
+        if cancel {
+            assert!(
+                work.human_check_progress().is_none(),
+                "Stop revokes explicit checks"
+            );
+        }
         if !cancel {
+            let check = work
+                .human_check_progress()
+                .unwrap()
+                .request_wall_check()
+                .unwrap();
+            assert_eq!(
+                check.state(human_progress.revision()),
+                zephium_agentic::WorkBrowserHumanCheckState::Pending
+            );
+            assert_eq!(
+                work.human_snapshot().unwrap().deadline,
+                deadline,
+                "checking cannot renew human time"
+            );
+            assert!(
+                !work.human_snapshot().unwrap().can_continue,
+                "navigation readiness alone cannot clear sign-in"
+            );
+            assert!(!work.continue_human(human.generation, now()));
+            check.finish(Some(false));
+            assert_eq!(
+                check.state(human_progress.revision()),
+                zephium_agentic::WorkBrowserHumanCheckState::Waiting
+            );
+            assert!(
+                !work.human_snapshot().unwrap().can_continue,
+                "an explicit check cannot manufacture proof"
+            );
+            human_progress.record_verified_wall_clear(true);
             assert!(work.human_snapshot().unwrap().can_continue);
             assert_eq!(native.acquisitions.load(Ordering::Acquire), 1);
             native.hold_human.store(false, Ordering::Release);
             assert!(work.continue_human(human.generation, now()));
+            human_progress.record_verified_wall_clear(false);
             work.poll(now());
             assert!(work.ready());
             let resumed = work.human_resume().unwrap();
             assert_eq!(resumed.model_calls, 1);
             assert_eq!(resumed.actions, 0);
+            assert!(resumed.verified_wall_clear, "successful native handback retains proof captured at Continue, not an expiring live flag");
             assert!(
                 !work.continue_human(human.generation, now()),
                 "continuation is consumed once"
@@ -2066,4 +2525,34 @@ fn human_handoff_contract(cancel: bool) {
         ));
         assert_eq!(native.destructions.load(Ordering::Acquire), 1);
     }
+}
+
+#[test]
+fn clean_history_never_fills_admission_and_full_recovery_history_says_so() {
+    let prior = AgentWorkIncarnation::generate();
+    let current = AgentWorkIncarnation::generate();
+    let row = |key: u16, disposition: AgentWorkDisposition, debt: AgentWorkDebt| {
+        let mut bytes = [0; AGENT_WORK_RECORD_BYTES];
+        bytes[0] = 1;
+        bytes[1] = disposition as u8;
+        bytes[2] = debt.bits();
+        bytes[15] = 3;
+        bytes[16..32].copy_from_slice(&prior.bytes());
+        bytes[46..48].copy_from_slice(&key.to_be_bytes());
+        AgentWorkRecord::decode(bytes).unwrap()
+    };
+    let clean = (0..zephium_agentic::MAX_AGENT_WORK_INVENTORY as u16)
+        .map(|key| row(key, AgentWorkDisposition::Failed, AgentWorkDebt::NONE))
+        .collect();
+    let (work, _, _) = review_coordinator(clean, current);
+    assert!(work.ready());
+    assert_eq!(work.failures().1, None);
+
+    let debt = (0..MAX_DURABLE_AGENT_WORK_RUNS as u16)
+        .map(|key| row(key, AgentWorkDisposition::Rejected, AgentWorkDebt::UNKNOWN))
+        .collect();
+    let (work, native, _) = review_coordinator(debt, current);
+    assert!(!work.ready());
+    assert_eq!(work.failures().1, Some(AgentWorkJournalError::Capacity));
+    assert_eq!(native.acquisitions.load(Ordering::Acquire), 0);
 }

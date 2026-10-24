@@ -2,7 +2,7 @@
   // BoardCanvas, with the runs behind the canvas for a helper's own view of its part.
   import { SvelteMap } from "svelte/reactivity";
   import WorkCanvas from "../components/WorkCanvas.svelte";
-  import { clearOfBands, environmentStages, measureKey } from "../lib/project-environment-board";
+  import { ownPlaces, environmentStages, measureKey } from "../lib/project-environment-board";
   import {
     environmentAgents,
     environmentBoards,
@@ -15,14 +15,21 @@
   import { environmentRequests } from "../lib/project-environment-thread";
   import type { BoardActions } from "../lib/canvas-context";
   import type { BoardScene } from "./board-fixtures";
+  import type { WorkHumanPageV1 } from "$shared/ipc/bindings";
   let {
     scene,
     viewport = { x: 40, y: 40, zoom: 1 },
     asked = [],
+    held = [],
+    onaction,
   }: {
     scene: BoardScene;
     viewport?: { x: number; y: number; zoom: number };
     asked?: string[];
+    /** Pages the run holds for the person, as Rust reports them. */
+    held?: WorkHumanPageV1[];
+    /** A card's action, as the Work screen receives it. */
+    onaction?: (id: string, action?: string) => void;
   } = $props();
   const measured = new SvelteMap<string, number>();
   let open = $state<string | null>(null);
@@ -44,7 +51,7 @@
     ...environmentItems(scene.snapshot, [], [], scene.objectives),
     ...requests.items,
     ...environmentBoards(stages),
-    ...environmentParts(scene.objectives, stages, recorded),
+    ...environmentParts(scene.objectives, stages, recorded, undefined, () => held),
     ...environmentInputs(stages),
     ...environmentSources(stages),
     ...agents.items,
@@ -86,7 +93,7 @@
   authoritative={new Set()}
   initialView={{
     positions: {
-      ...clearOfBands(
+      ...ownPlaces(
         own.positions,
         own.sizes ?? {},
         stages,
@@ -103,5 +110,6 @@
   {board}
   work={(objective: string) => scene.objectives.get(objective)}
   oninspect={() => {}}
+  {onaction}
   onopen={(id) => board.toggle(id)}
 />

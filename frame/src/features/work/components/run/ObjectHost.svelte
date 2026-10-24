@@ -18,6 +18,18 @@
   const made = $derived(tasks ? tasks.tasks(id) : []);
   const view = $derived.by((): View => {
     const base = item.object!.view;
+    if (base.kind === "draft") {
+      const edit = board?.drafted?.(id);
+      return edit
+        ? {
+            ...base,
+            ...(edit.body !== undefined ? { body: edit.body } : {}),
+            ...(edit.review ? { review: edit.review } : {}),
+            ...(edit.send ? { send: edit.send } : {}),
+            ...(edit.note ? { note: edit.note } : {}),
+          }
+        : base;
+    }
     if (!made.some(Boolean)) return base;
     const done = (index: number) => !!made[index]?.completedAt;
     if (base.kind === "plan")
@@ -33,7 +45,7 @@
     return base;
   });
   const width = $derived(item.size?.width ?? 0);
-  const actions: ObjectActions = {
+  const shared: ObjectActions = {
     open: (target) => open?.(target),
     choose: (element, chosen) => board?.choose(element, chosen),
     ask: (subject) => board?.ask(subject),
@@ -42,12 +54,17 @@
     compare: (target) => board?.compare?.(target),
     send: (target) => board?.send?.(target),
     write: (target, markdown) => board?.write?.(target, markdown),
+    review: (target, review) => board?.review?.(target, review),
     // A step made into a task opens it in Tasks; its tick lives there.
     check: (_object, index) => {
       const task = made[index];
       if (task) tasks?.open(task.id);
     },
   };
+  /** What the person owns is changed in place; what the agent made is not. */
+  const actions = $derived<ObjectActions>(
+    item.owned ? { ...shared, edit: (target, change) => board?.edit?.(target, change) } : shared,
+  );
 
   let body = $state<HTMLElement>();
   // The object's height at its width, so its run makes the room it takes.
@@ -88,6 +105,12 @@
     block-size: 100%;
     border-radius: var(--radius-card);
     transition: box-shadow var(--motion-fast) var(--ease-out);
+  }
+
+  /* Only the cards of a set take the pointer: its gaps belong to the canvas. */
+  .object.picks,
+  .object.picks > div {
+    pointer-events: none;
   }
 
   .object.selected {

@@ -620,6 +620,16 @@ impl SemanticObservationAcknowledgement {
         ))
     }
 
+    /// Rust's own baseline for a step it takes on the exact observation it
+    /// read, whether that is a whole document or a scoped view such as an
+    /// open dialog. It grants no action or model authority.
+    pub fn exact_scope(observation: &SemanticObservation) -> Option<Self> {
+        observation.frames().first()?.nodes().first()?;
+        Some(Self::from_fingerprint(
+            SemanticObservationFingerprint::from_observation(observation),
+        ))
+    }
+
     pub(crate) fn matches(&self, observation: &SemanticObservation) -> bool {
         self.fingerprint == SemanticObservationFingerprint::from_observation(observation)
     }
@@ -1151,6 +1161,16 @@ fn hash_observation(hasher: &mut FingerprintHasher, observation: &SemanticObserv
         hasher.u64(frame.nodes().len() as u64);
         for node in frame.nodes() {
             hash_node(hasher, node);
+        }
+        hasher.u64(frame.media().len() as u64);
+        for media in frame.media() {
+            hasher.u16(media.reference().get());
+            hasher.byte(media.kind() as u8);
+            hasher.byte(u8::from(media.loaded()));
+            hasher.u64(media.related().len() as u64);
+            for related in media.related() {
+                hasher.u16(related.get());
+            }
         }
     }
     hasher.u64(observation.frame_boundaries().len() as u64);

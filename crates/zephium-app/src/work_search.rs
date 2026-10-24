@@ -28,6 +28,31 @@ impl WorkAttemptProbe {
         context: &[context::WorkContextBody],
         limits: WorkExecutionLimits,
     ) -> Result<WorkSearchOutcome, WorkError> {
+        self.run_search_from(provider, scope, context, Dispatch::Provider, limits)
+            .await
+    }
+
+    /// A browser search over what its results page showed, `None` when the
+    /// page could not be opened; reused and settled as any other search.
+    pub(crate) async fn run_search_on_page(
+        &self,
+        provider: &dyn WorkPublicSearchProvider,
+        scope: &WorkPublicSearchScope,
+        page: Option<WorkSearchPage>,
+        limits: WorkExecutionLimits,
+    ) -> Result<WorkSearchOutcome, WorkError> {
+        self.run_search_from(provider, scope, &[], Dispatch::Page(page), limits)
+            .await
+    }
+
+    async fn run_search_from(
+        &self,
+        provider: &dyn WorkPublicSearchProvider,
+        scope: &WorkPublicSearchScope,
+        context: &[context::WorkContextBody],
+        dispatch: Dispatch,
+        limits: WorkExecutionLimits,
+    ) -> Result<WorkSearchOutcome, WorkError> {
         // Several questions joined with ";" get one search's worth of answer
         // for the first of them: each is searched on its own instead.
         if scope
@@ -50,7 +75,9 @@ impl WorkAttemptProbe {
             || self.cancelled().await?
             || Instant::now() >= self.deadline()
         {
-            return self.run_search_once(provider, scope, context, limits).await;
+            return self
+                .run_search_once(provider, scope, context, dispatch, limits)
+                .await;
         }
         let started = Instant::now();
         let key = (self.profile(), self.work());
@@ -59,7 +86,9 @@ impl WorkAttemptProbe {
         let mut waited = false;
         let slot = loop {
             if Instant::now() >= self.deadline() {
-                return self.run_search_once(provider, scope, context, limits).await;
+                return self
+                    .run_search_once(provider, scope, context, dispatch, limits)
+                    .await;
             }
             match shared::next(key, scope, &terms, &checked, checked.len() < REUSE_CHECKS) {
                 shared::Next::Wait(mut running) => {
@@ -122,7 +151,9 @@ impl WorkAttemptProbe {
                 record: None,
             });
         };
-        let mut outcome = self.run_search_once(provider, scope, context, left).await?;
+        let mut outcome = self
+            .run_search_once(provider, scope, context, dispatch, left)
+            .await?;
         if let (Some(slot), Some(record)) = (slot, &outcome.record) {
             slot.known(record.evidence.clone());
         }
@@ -205,6 +236,7 @@ impl WorkAttemptProbe {
         provider: &dyn WorkPublicSearchProvider,
         scope: &WorkPublicSearchScope,
         context: &[context::WorkContextBody],
+        dispatch: Dispatch,
         limits: WorkExecutionLimits,
     ) -> Result<WorkSearchOutcome, WorkError> {
         if self.cancelled().await? || Instant::now() >= self.deadline() {
@@ -216,9 +248,16 @@ impl WorkAttemptProbe {
             });
         }
         self.record_activity(zephium_ipc::work::WorkActivityV1::Searching);
-        let result = self
-            .bounded_search(provider.search(scope, context, limits))
-            .await;
+        let result = match dispatch {
+            Dispatch::Provider => {
+                self.bounded_search(provider.search(scope, context, limits))
+                    .await
+            }
+            Dispatch::Page(page) => {
+                self.bounded_search(provider.search_page(scope, page, limits))
+                    .await
+            }
+        };
         // A response that arrived is a known outcome: what it lacks is a
         // failed step with a reason. Only a lost outcome stays unknown.
         let failed = |usage: WorkUsage, note: &'static str| WorkSearchOutcome {
@@ -233,8 +272,12 @@ impl WorkAttemptProbe {
                     Some("The search exceeded the step budget")
                 } else if result.evidence.validate().is_err() {
                     Some("The search results could not be admitted")
-                } else if result.evidence.provider != scope.provider
-                    || result.evidence.model != scope.model
+                } else if (result.evidence.provider, result.evidence.model.as_str())
+                    != (scope.provider, scope.model.as_str())
+                    && provider.fallback().is_none_or(|fallback| {
+                        (fallback.provider, fallback.model.as_str())
+                            != (result.evidence.provider, result.evidence.model.as_str())
+                    })
                 {
                     Some("The search came from another provider")
                 } else if u64::from(result.usage.model_tokens)
@@ -296,11 +339,11 @@ impl WorkAttemptProbe {
         &self,
         future: impl std::future::Future<Output = Result<T, WorkPublicSearchError>>,
     ) -> Result<T, WorkPublicSearchError> {
-        // Each look reads the run's whole projection: once a second keeps a
-        // run's parallel searches from crowding the store queue.
+        // Each look reads the run's whole projection: only when the work changed.
+        let mut changes = self.changes();
         let cancelled = async {
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                changes.next(crate::work_changes::FALLBACK).await;
                 if self.cancellation_requested().await.unwrap_or(false) {
                     break;
                 }
@@ -375,10 +418,17 @@ impl WorkAttemptProbe {
     }
 }
 
+/// How a search is answered: by its provider, or from a results page the
+/// run opened for it.
+enum Dispatch {
+    Provider,
+    Page(Option<WorkSearchPage>),
+}
+
 /// At most this many earlier searches are ranked against one new query.
 const REUSE_CHECKS: usize = 2;
 
-fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
+pub(crate) fn add(a: WorkUsage, b: WorkUsage) -> WorkUsage {
     WorkUsage {
         model_tokens: a.model_tokens.saturating_add(b.model_tokens),
         cost_micro_usd: a.cost_micro_usd.saturating_add(b.cost_micro_usd),
@@ -446,11 +496,56 @@ mod shared {
     static WORK_SEARCHES: Mutex<Vec<(Key, Vec<Entry>)>> = Mutex::new(Vec::new());
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+    fn same_request(first: &str, second: &str) -> bool {
+        let tokens = |query: &str| {
+            query
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let first = tokens(first);
+        let mut second = tokens(second);
+        if first == second {
+            return true;
+        }
+        // Numeric bindings, search operators, phrases and relational queries
+        // keep their order. Bare keyword order and case carry no extra scope.
+        const RELATIONS: &[&str] = &[
+            "to", "from", "for", "before", "after", "between", "under", "over", "above", "below",
+            "without", "not", "except", "until", "since", "vs", "versus", "than", "into", "by",
+            "with", "or", "and", "do", "z", "od", "bez", "przed", "po", "poniżej", "powyżej",
+            "między",
+        ];
+        if first.len() != second.len()
+            || first.iter().chain(&second).any(|token| {
+                !token.chars().all(char::is_alphabetic) || RELATIONS.contains(&token.as_str())
+            })
+        {
+            return false;
+        }
+        first.iter().all(|token| {
+            let terms = SearchQueryTerms::of(token);
+            let found = second.iter().position(|other| {
+                if terms.words() == 0 {
+                    token == other
+                } else {
+                    terms == SearchQueryTerms::of(other)
+                }
+            });
+            if let Some(index) = found {
+                second.swap_remove(index);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     pub(super) enum Next {
-        /// A search with the same terms is running: wait for its answer.
+        /// An equivalent keyword query is running: wait for its answer.
         /// Similar ones run side by side; only settled answers are checked.
         Wait(tokio::sync::watch::Receiver<bool>),
-        /// A search with the same terms answered.
+        /// An equivalent keyword query answered.
         Same(WorkProviderSearchEvidenceV1),
         /// An earlier search, its query and answer, worth checking.
         Check(u64, String, WorkProviderSearchEvidenceV1),
@@ -520,7 +615,7 @@ mod shared {
         if let Some(State::Known { evidence, .. }) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| entry.terms == *terms)
+            .find(|entry| same_request(&entry.query, &scope.query))
             .map(|entry| &entry.state)
         {
             return Next::Same(evidence.clone());
@@ -528,7 +623,9 @@ mod shared {
         if let Some(State::Running(done)) = entries
             .iter()
             .filter(comparable)
-            .find(|entry| matches!(entry.state, State::Running(_)) && entry.terms == *terms)
+            .find(|entry| {
+                matches!(entry.state, State::Running(_)) && same_request(&entry.query, &scope.query)
+            })
             .map(|entry| &entry.state)
         {
             return Next::Wait(done.clone());
@@ -570,6 +667,98 @@ mod shared {
         });
         Next::Run(Slot { key, id, done })
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn equivalent_keywords_reuse_without_erasing_request_constraints() {
+            for (first, second) in [
+                (
+                    "Hetzner cloud prices load balancer",
+                    "load balancer price HETZNER cloud",
+                ),
+                ("tanie laptopy Warszawa", "WARSZAWA   tanie laptopy"),
+                ("flights Warsaw to Paris", "FLIGHTS Warsaw TO Paris"),
+                ("library 1.2 compatibility", "LIBRARY 1.2 compatibility"),
+            ] {
+                assert!(same_request(first, second), "{first} / {second}");
+            }
+            for (first, second) in [
+                ("flights Warsaw to Paris", "flights Paris to Warsaw"),
+                ("library 1.2 compatibility", "library 2.1 compatibility"),
+                ("hotel 2 adults 3 nights", "hotel 3 adults 2 nights"),
+                ("cloud prices", "latest cloud prices"),
+                ("latest cloud prices", "best cloud prices"),
+                ("python python rust", "python rust rust"),
+                (
+                    "site:example.com cloud price",
+                    "site:other.test cloud price",
+                ),
+                ("\"Warsaw Paris\" flights", "\"Paris Warsaw\" flights"),
+                ("loty Warszawa do Paryż", "loty Paryż do Warszawa"),
+            ] {
+                assert!(!same_request(first, second), "{first} / {second}");
+            }
+        }
+
+        #[test]
+        fn reordered_terms_and_versions_do_not_bypass_semantic_reuse_checks() {
+            let _serial = crate::WORK_RUNTIME_TEST_SERIAL.lock().unwrap();
+            for (first, changed) in [
+                ("flights Warsaw to Paris", "flights Paris to Warsaw"),
+                ("library 1.2 compatibility", "library 2.1 compatibility"),
+                ("hotel 2 adults 3 nights", "hotel 3 adults 2 nights"),
+            ] {
+                let key = (ProfileId::generate(), WorkId::generate());
+                let mut scope = WorkPublicSearchScope {
+                    provider: WorkSearchProvider::OpenAi,
+                    model: "fixture".into(),
+                    query: first.into(),
+                };
+                let terms = SearchQueryTerms::of(first);
+                assert_eq!(terms, SearchQueryTerms::of(changed));
+                let Next::Run(slot) = next(key, &scope, &terms, &[], true) else {
+                    panic!("first run")
+                };
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Wait(_)
+                ));
+                scope.query = changed.into();
+                let Next::Run(other) = next(key, &scope, &terms, &[], true) else {
+                    panic!("different request must run while first is pending")
+                };
+                drop(other);
+                slot.known(WorkProviderSearchEvidenceV1 {
+                    version: 1,
+                    provider: scope.provider,
+                    model: scope.model.clone(),
+                    response_model: scope.model.clone(),
+                    response_id: "fixture".into(),
+                    search_call_id: "fixture".into(),
+                    answer: "Public evidence".into(),
+                    citations: vec![],
+                    actual_input_tokens: 0,
+                    actual_output_tokens: 0,
+                });
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Check(..)
+                ));
+                scope.query = first.into();
+                assert!(matches!(
+                    next(key, &scope, &terms, &[], true),
+                    Next::Same(_)
+                ));
+                WORK_SEARCHES
+                    .lock()
+                    .unwrap()
+                    .retain(|(known, _)| *known != key);
+            }
+        }
+    }
 }
 
 /// A charge never exceeds what the step was allowed to spend.
@@ -605,7 +794,7 @@ impl WorkNodeAttempt {
         let limits = self.specification().limits;
         let outcome = self
             .probe()
-            .run_search_once(provider, scope, context, limits)
+            .run_search_once(provider, scope, context, Dispatch::Provider, limits)
             .await?;
         let Some(record) = outcome.record else {
             return self

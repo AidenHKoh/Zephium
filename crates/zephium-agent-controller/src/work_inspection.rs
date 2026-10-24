@@ -31,9 +31,9 @@ impl AgentWorkController {
     > {
         state.check_task_contract()?;
         if !state.progressive_observation {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract!());
         }
-        let session = state.session.as_ref().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_ref().ok_or_else(|| crate::contract!())?;
         session.check_live().map_err(AgentWorkFailure::Browser)?;
         // Inspection must leave room for the next decision and terminal mapper.
         // It never renews the original model-call or wall-clock budget.
@@ -68,7 +68,7 @@ impl AgentWorkController {
                 Err(AgentWorkFailure::InspectionAnchorLost) if checkpoint.expansion().is_some() => {
                     checkpoint = checkpoint
                         .after_anchor_loss()
-                        .map_err(|_| AgentWorkFailure::Contract)?;
+                        .map_err(|_| crate::contract!())?;
                     state
                         .journal_mut()?
                         .emit(AgentWorkEventKind::InspectionAnchorLost)?;
@@ -83,12 +83,12 @@ impl AgentWorkController {
             }
         } else {
             let id =
-                SemanticObservationId::new(state.native.id()?).ok_or(AgentWorkFailure::Contract)?;
+                SemanticObservationId::new(state.native.id()?).ok_or_else(|| crate::contract!())?;
             let request = checkpoint
                 .request(previous, id)
-                .map_err(|_| AgentWorkFailure::Browser(AgentBrowserProviderError::Continuation))?;
+                .map_err(|_| AgentWorkFailure::Browser(crate::continuation!()))?;
             let [frame] = previous.frames() else {
-                return Err(AgentWorkFailure::Contract);
+                return Err(crate::contract!());
             };
             Self::capture_once(state, worker, browser, request, frame.frame().clone()).await?
         };
@@ -100,7 +100,7 @@ impl AgentWorkController {
                 .journal_mut()?
                 .clock
                 .now()
-                .map_err(|_| AgentWorkFailure::Contract)?
+                .map_err(|_| crate::contract!())?
                 .millis(),
         );
         let current = Self::fit_model_observation(current)?;
@@ -113,12 +113,12 @@ impl AgentWorkController {
         let action_authority = state
             .session
             .as_ref()
-            .ok_or(AgentWorkFailure::Contract)?
+            .ok_or_else(|| crate::contract!())?
             .config
             .permits_tool(AgentBrowserToolKind::Act)
             .then(|| state.action_authority(&current))
             .transpose()?;
-        let session = state.session.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
         let next = Self::provider(
             &mut state.native,
             worker,
@@ -160,7 +160,8 @@ impl AgentBrowserSession {
                 refusal,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     pub(super) async fn continue_after_action_refusal(
@@ -186,7 +187,8 @@ impl AgentBrowserSession {
                 refusal,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     pub(super) async fn continue_after_scope_refusal(
@@ -211,7 +213,8 @@ impl AgentBrowserSession {
             refusal,
         )
         .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 
     async fn continue_after_observation(
@@ -232,7 +235,7 @@ impl AgentBrowserSession {
         let objective = self
             .objective
             .as_ref()
-            .ok_or(AgentBrowserProviderError::Continuation)?;
+            .ok_or_else(|| crate::continuation!())?;
         let prepared = checkpoint
             .prepare_successor_with_action_authority(
                 &mut self.policy,
@@ -245,6 +248,7 @@ impl AgentBrowserSession {
                 action_authority,
             )
             .map_err(AgentBrowserProviderError::from_request)?;
-        self.drive(prepared.into_transport_input()).await
+        self.drive(prepared.into_transport_input(), Some(observation))
+            .await
     }
 }

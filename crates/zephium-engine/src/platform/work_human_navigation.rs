@@ -13,8 +13,90 @@ pub(super) struct HumanNavigation {
     finished: bool,
     revision: u64,
     deadline: Instant,
+    progress: Option<zephium_agentic::WorkBrowserHumanProgress>,
+    wall_clear_samples: u8,
+    wall_sampled: Option<Instant>,
+    /// A sign-in or check surface was sampled on the handed-over page.
+    wall_seen: bool,
     #[cfg(target_os = "windows")]
     write_navigation: Option<(wry::NavigationId, u64, ContextNavigationTarget)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkHumanDocumentStamp {
+    epoch: u64,
+    revision: u64,
+    native_id: wry::NavigationId,
+}
+
+const SIGN_IN_WORDS: &[&str] = &[
+    "login",
+    "signin",
+    "sign-in",
+    "sign_in",
+    "log-in",
+    "logon",
+    "sso",
+    "auth",
+    "oauth",
+    "authorize",
+    "2fa",
+    "mfa",
+    "2sv",
+    "otp",
+    "totp",
+    "two-factor",
+    "two_factor",
+    "twofactor",
+    "verify",
+    "verification",
+    "challenge",
+    "checkpoint",
+    "challenge-platform",
+    "accountchooser",
+    "select-account",
+    "select_account",
+];
+
+pub(super) fn fragment_move(current: &ContextNavigationTarget, raw: &str) -> bool {
+    ContextNavigationTarget::parse(raw).is_ok_and(|next| {
+        next.as_url().fragment().is_some()
+            && without_fragment(&next).as_url() == without_fragment(current).as_url()
+    })
+}
+
+/// A change to the fragment alone loads no document, whatever the fragment
+/// holds (`#inbox?compose=new`). The stricter `fragment_move` guards the human
+/// gate, where a fragment may carry a sign-in step.
+pub(super) fn same_document_move(current: &ContextNavigationTarget, raw: &str) -> bool {
+    ContextNavigationTarget::parse(raw).is_ok_and(|next| {
+        next.as_url().fragment().is_some()
+            && without_any_fragment(&next) == without_any_fragment(current)
+    })
+}
+
+pub(super) fn without_any_fragment(target: &ContextNavigationTarget) -> url::Url {
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    url
+}
+
+pub(super) fn without_fragment(target: &ContextNavigationTarget) -> ContextNavigationTarget {
+    // Only an app's route (`#inbox`, `#/projects`) is dropped; a fragment
+    // with state or a sign-in step in it stays part of the address.
+    let route = target.as_url().fragment().is_some_and(|fragment| {
+        !fragment.contains('=')
+            && zephium_agentic::plain_url_fragment(target)
+            && !fragment
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                .any(|word| SIGN_IN_WORDS.contains(&word.to_ascii_lowercase().as_str()))
+    });
+    if !route {
+        return target.clone();
+    }
+    let mut url = target.as_url().clone();
+    url.set_fragment(None);
+    ContextNavigationTarget::parse(url.as_str()).unwrap_or_else(|_| target.clone())
 }
 
 impl HumanNavigation {
@@ -22,41 +104,61 @@ impl HumanNavigation {
         ContextNavigationTarget::parse(raw).ok().filter(|target| {
             target.as_url().as_str() == raw
                 && (zephium_agentic::same_work_human_site(&self.source, target)
-                    || (self.open && target.as_url().scheme() == "https"))
+                    || (self.open && zephium_agentic::work_site_scheme(target)))
         })
     }
-    /// Settled back on the page's own site and off any sign-in path.
-    fn clear_of_sign_in(&self) -> bool {
+    /// This URL may hold the resumed task. URL checks alone never prove that
+    /// a password, account chooser or challenge disappeared from the document.
+    fn back_on_site(&self) -> bool {
         self.finished
             && self.loading.is_none()
+            // A human may navigate through credential-bearing callback URLs,
+            // but the retained actor must never resume on one of those URLs.
+            // An app that routes by its fragment (Gmail's `#inbox`) is back
+            // on its page; the fragment is the app's, not a request.
+            && zephium_agentic::WorkBrowserDocumentPolicy::SiteSession
+                .admits_request(&without_fragment(&self.current))
             && zephium_agentic::same_work_human_site(&self.source, &self.current)
-            && !self
-                .current
-                .as_url()
-                .path_segments()
-                .into_iter()
-                .flatten()
-                .any(|segment| {
-                    let segment = segment.to_ascii_lowercase();
-                    [
-                        "login",
-                        "signin",
-                        "sign-in",
-                        "sign_in",
-                        "log-in",
-                        "logon",
-                        "sso",
-                        "auth",
-                        "oauth",
-                        "authorize",
-                        "2fa",
-                        "mfa",
-                        "verify",
-                        "challenge",
-                        "checkpoint",
-                    ]
-                    .contains(&segment.as_str())
-                })
+            && !self.current.as_url().host_str().is_some_and(|host| {
+                [
+                    "accounts.",
+                    "login.",
+                    "signin.",
+                    "auth.",
+                    "sso.",
+                    "identity.",
+                    "idp.",
+                ]
+                .iter()
+                .any(|prefix| host.starts_with(prefix))
+            })
+            && (self.source.as_url().origin() == self.current.as_url().origin()
+                || !self
+                    .current
+                    .as_url()
+                    .path_segments()
+                    .into_iter()
+                    .flatten()
+                    .any(|segment| SIGN_IN_WORDS.contains(&segment.to_ascii_lowercase().as_str())))
+    }
+    fn invalidate_wall(&mut self) {
+        self.wall_clear_samples = 0;
+        self.wall_sampled = None;
+        if let Some(progress) = &self.progress {
+            progress.invalidate_wall_check();
+            progress.record_verified_wall_clear(false);
+        }
+    }
+    fn verified_wall_clear(&self) -> bool {
+        self.back_on_site()
+            && !self.requested
+            // Clear means a wall that was there is gone, or the person moved
+            // the page on: a signed-out landing page shows no wall at all.
+            && (self.wall_seen || self.revision != 0)
+            && self.wall_clear_samples >= 2
+            && self
+                .wall_sampled
+                .is_some_and(|at| at.elapsed() <= Duration::from_secs(2))
     }
     pub(super) fn allows(&mut self, raw: &str, main_frame: Option<bool>) -> bool {
         if Instant::now() >= self.deadline {
@@ -68,9 +170,16 @@ impl HumanNavigation {
         if main_frame != Some(true) || self.target(raw).is_none() {
             return false;
         }
+        // Moving to a fragment of the page itself (Gmail's `#inbox`) loads
+        // nothing, even while the page is still loading; `location_changed`
+        // records the new address.
+        if fragment_move(&self.current, raw) {
+            return true;
+        }
         if self.loading.is_some() {
             return !self.committed;
         }
+        self.invalidate_wall();
         self.requested = true;
         self.finished = false;
         true
@@ -90,6 +199,7 @@ impl HumanNavigation {
             return Err(());
         }
         let target = self.target(&event.url).ok_or(())?;
+        self.invalidate_wall();
         match event.phase {
             E::Started if self.requested => {
                 self.requested = false;
@@ -121,7 +231,8 @@ impl HumanNavigation {
                 Ok((true, true))
             }
             E::Finished if self.loading == Some(event.id) && self.committed => {
-                self.current = target;
+                // The finish names the loaded URL; the page may have routed
+                // itself to a fragment since (`location_changed` saw it).
                 self.loading = None;
                 self.finished = true;
                 Ok((false, true))
@@ -142,6 +253,7 @@ impl HumanNavigation {
         if self.current == current {
             return Ok(false);
         }
+        self.invalidate_wall();
         self.current = current;
         self.revision = self.revision.checked_add(1).ok_or(())?;
         Ok(true)
@@ -196,14 +308,84 @@ impl WorkDocumentNavigation {
                         .is_some_and(|human| human.loading.is_none() && !human.requested)
             })
     }
-    pub(crate) fn human_clear_of_sign_in(&self) -> bool {
+    /// The person's page moving to a fragment of itself loads no document,
+    /// so the page reader is not prepared for one.
+    pub(crate) fn human_fragment_move(&self, target: &str) -> bool {
+        self.0.lock().is_ok_and(|state| {
+            state.phase == Phase::Human
+                && state.human.as_ref().is_some_and(|human| {
+                    human.loading.is_none() && fragment_move(&human.current, target)
+                })
+        })
+    }
+    pub(crate) fn human_verified_wall_clear(&self) -> bool {
         self.0.lock().is_ok_and(|state| {
             state.phase == Phase::Human
                 && state
                     .human
                     .as_ref()
-                    .is_some_and(HumanNavigation::clear_of_sign_in)
+                    .is_some_and(HumanNavigation::verified_wall_clear)
         })
+    }
+    pub(crate) fn bind_human_progress(&self, progress: zephium_agentic::WorkBrowserHumanProgress) {
+        if let Ok(mut state) = self.0.lock() {
+            if let Some(human) = state.human.as_mut() {
+                progress.record_verified_wall_clear(false);
+                human.progress = Some(progress);
+            }
+        }
+    }
+    pub(crate) fn human_wall_probe(&self) -> Option<WorkHumanDocumentStamp> {
+        let state = self.0.lock().ok()?;
+        let human = state.human.as_ref()?;
+        (state.phase == Phase::Human
+            && Instant::now() < human.deadline
+            && human.back_on_site()
+            && !human.requested
+            && human
+                .wall_sampled
+                .is_none_or(|at| at.elapsed() >= Duration::from_millis(300)))
+        .then_some(WorkHumanDocumentStamp {
+            epoch: state.navigation_epoch,
+            revision: human.revision,
+            native_id: human.native_id,
+        })
+    }
+    /// A late callback from an old document/presentation cannot clear a wall.
+    pub(crate) fn record_human_wall_clear(
+        &self,
+        stamp: WorkHumanDocumentStamp,
+        clear: bool,
+        wall: bool,
+    ) -> bool {
+        let Ok(mut state) = self.0.lock() else {
+            return false;
+        };
+        if state.phase != Phase::Human || state.navigation_epoch != stamp.epoch {
+            return false;
+        }
+        let Some(human) = state.human.as_mut() else {
+            return false;
+        };
+        if Instant::now() >= human.deadline
+            || human.revision != stamp.revision
+            || human.native_id != stamp.native_id
+            || !human.back_on_site()
+            || human.requested
+        {
+            return false;
+        }
+        human.wall_seen |= wall;
+        human.wall_clear_samples = if clear {
+            human.wall_clear_samples.saturating_add(1).min(2)
+        } else {
+            0
+        };
+        human.wall_sampled = Some(Instant::now());
+        if let Some(progress) = &human.progress {
+            progress.record_verified_wall_clear(human.verified_wall_clear());
+        }
+        true
     }
     pub(crate) fn begin_human(
         &self,
@@ -238,6 +420,10 @@ impl WorkDocumentNavigation {
             finished: true,
             revision: 0,
             deadline,
+            progress: None,
+            wall_clear_samples: 0,
+            wall_sampled: None,
+            wall_seen: false,
             #[cfg(target_os = "windows")]
             write_navigation: None,
         });
@@ -273,7 +459,8 @@ impl WorkDocumentNavigation {
         {
             return Err(());
         }
-        let target = human.current.clone();
+        // The app's own fragment is not part of the page the run reads on.
+        let target = without_fragment(&human.current);
         let id = human.native_id;
         let epoch = state.navigation_epoch.checked_add(1).ok_or(())?;
         state.human = None;
@@ -500,7 +687,7 @@ mod tests {
         gate.observe(event(2, E::Started, idp)).unwrap();
         gate.observe(event(2, E::Committed, idp)).unwrap();
         gate.observe(event(2, E::Finished, idp)).unwrap();
-        assert!(!gate.human_clear_of_sign_in());
+        assert!(!gate.human_verified_wall_clear());
         let revision = gate.human_revision().unwrap();
         assert!(gate.finish_human(idp, revision).is_err());
         let back = "https://example.test/home";
@@ -508,8 +695,296 @@ mod tests {
         gate.observe(event(3, E::Started, back)).unwrap();
         gate.observe(event(3, E::Committed, back)).unwrap();
         gate.observe(event(3, E::Finished, back)).unwrap();
-        assert!(gate.human_clear_of_sign_in());
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "returning URL alone cannot clear a wall"
+        );
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "one transient clear sample is insufficient"
+        );
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.human_verified_wall_clear());
         gate.finish_human(back, gate.human_revision().unwrap())
             .unwrap();
+    }
+
+    #[test]
+    fn a_landing_page_that_never_showed_a_wall_holds_until_the_person_moves_on() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(
+            !gate.human_verified_wall_clear(),
+            "a page that looked clear from the start was never signed in to"
+        );
+        assert!(gate.record_human_wall_clear(stamp, false, true));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(
+            gate.human_verified_wall_clear(),
+            "the wall it showed is gone"
+        );
+    }
+
+    #[test]
+    fn an_app_moving_to_its_own_fragment_after_sign_in_settles_back_on_its_page() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/mail/u/0/";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let routed = "https://example.test/mail/u/0/#inbox";
+        assert!(gate.human_fragment_move(routed));
+        assert!(gate.allows_apple_action(routed, apple_action(T::Other, true)));
+        assert!(
+            gate.human_load_preparation_needed(Some(true)),
+            "no load was armed"
+        );
+        gate.location_changed(Some(routed)).unwrap();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.human_verified_wall_clear());
+        let resumed = gate
+            .finish_human(routed, gate.human_revision().unwrap())
+            .unwrap();
+        assert_eq!(resumed.as_url().as_str(), back);
+        assert!(
+            gate.ready(Some(routed)),
+            "the app's fragment stays its page"
+        );
+        assert!(!gate.human_fragment_move("https://example.test/mail/u/0/#inbox"));
+    }
+
+    #[test]
+    fn a_route_set_while_the_landing_page_loads_survives_its_finish() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/mail/u/0/";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        let routed = "https://example.test/mail/u/0/#inbox";
+        assert!(gate.allows_apple_action(routed, apple_action(T::Other, true)));
+        gate.location_changed(Some(routed)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let revision = gate.human_revision().unwrap();
+        gate.finish_human(routed, revision).unwrap();
+    }
+
+    #[test]
+    fn a_fragment_carrying_a_token_is_never_the_page_signed_in_to() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        let back = "https://example.test/home";
+        assert!(gate.allows_apple_action(back, apple_action(T::Other, true)));
+        gate.observe(event(2, E::Started, back)).unwrap();
+        gate.observe(event(2, E::Committed, back)).unwrap();
+        gate.observe(event(2, E::Finished, back)).unwrap();
+        let token = "https://example.test/home#access_token=abc123def456ghi789";
+        gate.location_changed(Some(token)).unwrap();
+        assert!(gate.human_wall_probe().is_none());
+        assert!(!gate.human_verified_wall_clear());
+    }
+
+    #[test]
+    fn a_two_factor_step_on_the_site_is_still_signing_in() {
+        let gate = ready_gate();
+        let source = ContextNavigationTarget::parse(URL).unwrap();
+        gate.begin_human(&source, Instant::now() + Duration::from_secs(30), true)
+            .unwrap();
+        for (id, path) in [
+            (2, "https://example.test/sessions/two-factor/app"),
+            (3, "https://example.test/account/otp"),
+            (4, "https://example.test/signin/verification"),
+        ] {
+            assert!(gate.allows_apple_action(path, apple_action(T::Other, true)));
+            gate.observe(event(id, E::Started, path)).unwrap();
+            gate.observe(event(id, E::Committed, path)).unwrap();
+            gate.observe(event(id, E::Finished, path)).unwrap();
+            assert!(!gate.human_verified_wall_clear(), "{path}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod wall_proof_tests {
+    use super::super::tests::{ready_gate, URL};
+    use super::*;
+
+    fn human() -> (
+        WorkDocumentNavigation,
+        zephium_agentic::WorkBrowserHumanProgress,
+    ) {
+        let gate = ready_gate();
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            true,
+        )
+        .unwrap();
+        let progress = zephium_agentic::WorkBrowserHumanProgress::default();
+        gate.bind_human_progress(progress.clone());
+        (gate, progress)
+    }
+
+    #[test]
+    fn same_document_wall_clear_requires_two_fresh_dom_samples_and_rejects_late_documents() {
+        let (gate, progress) = human();
+        let revision = gate.human_revision();
+        let stamp = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(stamp, false, true));
+        assert!(!progress.verified_wall_clear());
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(!progress.verified_wall_clear());
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(progress.verified_wall_clear());
+        assert_eq!(
+            gate.human_revision(),
+            revision,
+            "same-URL DOM proof is not a navigation"
+        );
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://example.test/next"))
+                .unwrap();
+        }
+        assert!(
+            !progress.verified_wall_clear(),
+            "native location changes revoke proof immediately"
+        );
+        assert!(!gate.record_human_wall_clear(stamp, true, false));
+        let next = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(next, true, false));
+        assert!(gate.record_human_wall_clear(next, true, false));
+        assert!(gate.human_verified_wall_clear());
+        gate.retire();
+        assert!(
+            !gate.record_human_wall_clear(next, true, false),
+            "a stopped native page cannot recover authority"
+        );
+    }
+
+    #[test]
+    fn strong_dom_clearance_can_resume_the_same_sign_in_path_without_a_navigation() {
+        let (gate, progress) = human();
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://example.test/human-fixture/signin/1"))
+                .unwrap();
+        }
+        let revision = gate.human_revision();
+        let stamp = gate
+            .human_wall_probe()
+            .expect("an unchanged sign-in route may replace its DOM in place");
+        assert!(gate.record_human_wall_clear(stamp, false, true));
+        assert!(
+            !progress.verified_wall_clear(),
+            "a credential/chooser observation is never bypassed by the URL"
+        );
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(gate.record_human_wall_clear(stamp, true, false));
+        assert!(progress.verified_wall_clear());
+        assert_eq!(gate.human_revision(), revision);
+        {
+            let mut state = gate.0.lock().unwrap();
+            state
+                .human
+                .as_mut()
+                .unwrap()
+                .location_changed(Some("https://accounts.google.com/home"))
+                .unwrap();
+        }
+        assert!(
+            gate.human_wall_probe().is_none(),
+            "identity hosts/outside sites are not task content even without a login path"
+        );
+        assert!(!progress.verified_wall_clear());
+    }
+
+    #[test]
+    fn authentication_callback_state_stays_with_the_person_until_an_admissible_document() {
+        for suffix in [
+            "?code=fixture",
+            "?state=fixture",
+            "?token=fixture",
+            "#verification",
+        ] {
+            let (gate, progress) = human();
+            let stamp = gate.human_wall_probe().unwrap();
+            assert!(gate.record_human_wall_clear(stamp, true, false));
+            assert!(gate.record_human_wall_clear(stamp, true, false));
+            {
+                let mut state = gate.0.lock().unwrap();
+                let human = state.human.as_mut().unwrap();
+                human
+                    .location_changed(Some(&format!("https://example.test/verify{suffix}")))
+                    .unwrap();
+                assert!(human.target("https://example.test/workspace").is_some());
+            }
+            assert!(!progress.verified_wall_clear());
+            assert!(gate.human_wall_probe().is_none());
+            assert!(!gate.record_human_wall_clear(stamp, true, false));
+            {
+                let mut state = gate.0.lock().unwrap();
+                state
+                    .human
+                    .as_mut()
+                    .unwrap()
+                    .location_changed(Some("https://example.test/workspace"))
+                    .unwrap();
+            }
+            let clean = gate.human_wall_probe().unwrap();
+            assert!(gate.record_human_wall_clear(clean, true, false));
+            assert!(gate.record_human_wall_clear(clean, true, false));
+            assert!(progress.verified_wall_clear());
+        }
+    }
+
+    #[test]
+    fn expired_or_prior_presentation_proof_cannot_clear_the_current_wall() {
+        let (gate, _) = human();
+        let prior = gate.human_wall_probe().unwrap();
+        assert!(gate.record_human_wall_clear(prior, true, false));
+        assert!(gate.record_human_wall_clear(prior, true, false));
+        gate.0.lock().unwrap().human.as_mut().unwrap().wall_sampled =
+            Some(Instant::now() - Duration::from_secs(3));
+        assert!(!gate.human_verified_wall_clear());
+        gate.finish_human(URL, gate.human_revision().unwrap())
+            .unwrap();
+        gate.begin_human(
+            &ContextNavigationTarget::parse(URL).unwrap(),
+            Instant::now() + Duration::from_secs(30),
+            true,
+        )
+        .unwrap();
+        assert!(
+            !gate.record_human_wall_clear(prior, true, false),
+            "same URL/native id does not reuse a prior human epoch"
+        );
+        assert!(!gate.human_verified_wall_clear());
     }
 }

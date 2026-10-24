@@ -18,6 +18,7 @@ import type {
   ProjectView,
   ReplyView,
   SheetView,
+  SubjectView,
 } from "../lib/board/types";
 import { centreSize } from "../components/objects/centre";
 
@@ -959,6 +960,112 @@ const project: ProjectView = {
   git: { branch: "editor-sync", changed: 3, ahead: 2 },
 };
 
+const pullRequest: SubjectView = {
+  id: "obj-subject",
+  kind: "subject",
+  noun: "Pull request",
+  reference: "crynta/terax#1337",
+  heading: "feat(explorer): support pasting files from OS clipboard",
+  status: { label: "Open", tone: "active" },
+  people: [{ role: "Author", name: "drunkardleo-10" }],
+  facts: [
+    { label: "Changed files", value: "6" },
+    { label: "Checks", value: "Passing" },
+    { label: "Review", value: "Changes requested" },
+  ],
+  labels: ["enhancement", "area: explorer"],
+  summary: "Adds pasting files from the **OS clipboard** into the explorer with `Cmd+V`.",
+  url: "https://github.com/crynta/terax/pull/1337",
+};
+
+const studyMonth: PlanView = {
+  id: "obj-plan-study",
+  kind: "plan",
+  title: "CS exam study plan",
+  checkable: true,
+  steps: [
+    {
+      when: "Fri 9 Oct",
+      date: "2026-10-09",
+      title: "Set up and diagnose",
+      kind: "task",
+      done: true,
+    },
+    {
+      when: "Sat 10 Oct",
+      date: "2026-10-10",
+      title: "Programming foundations",
+      kind: "task",
+      done: true,
+    },
+    { when: "Sun 11 Oct", date: "2026-10-11", title: "Control flow and functions", kind: "task" },
+    { when: "Mon 12 Oct", date: "2026-10-12", title: "Sequences and strings", kind: "task" },
+    { when: "Tue 13 Oct", date: "2026-10-13", title: "Recursion", kind: "task" },
+    { when: "Wed 14 Oct", date: "2026-10-14", title: "Core data structures", kind: "task" },
+    { when: "Thu 15 Oct", date: "2026-10-15", title: "Hash tables", kind: "task" },
+    { when: "Fri 16 Oct", date: "2026-10-16", title: "Trees and heaps", kind: "task" },
+    { when: "Sat 17 Oct", date: "2026-10-17", title: "Sorting", kind: "task" },
+    { when: "Sun 18 Oct", date: "2026-10-18", title: "Searching", kind: "task" },
+    { when: "Mon 19 Oct", date: "2026-10-19", title: "Big-O analysis", kind: "task" },
+    { when: "Tue 20 Oct", date: "2026-10-20", title: "Recurrences", kind: "task" },
+    { when: "Tue 20 Oct", date: "2026-10-20", title: "Office hours with the TA", kind: "event" },
+    { when: "Wed 21 Oct", date: "2026-10-21", title: "Divide and conquer", kind: "task" },
+    { when: "Thu 22 Oct", date: "2026-10-22", title: "Greedy algorithms", kind: "task" },
+    { when: "Fri 23 Oct", date: "2026-10-23", title: "Dynamic programming", kind: "task" },
+    { when: "Sat 24 Oct", date: "2026-10-24", title: "Graphs", kind: "task" },
+    { when: "Sun 25 Oct", date: "2026-10-25", title: "Graph algorithms", kind: "task" },
+    { when: "Mon 26 Oct", date: "2026-10-26", title: "Databases and SQL", kind: "task" },
+    { when: "Tue 27 Oct", date: "2026-10-27", title: "Computer systems", kind: "task" },
+    { when: "Wed 28 Oct", date: "2026-10-28", title: "Networking", kind: "task" },
+    { when: "Thu 29 Oct", date: "2026-10-29", title: "Operating systems", kind: "task" },
+    { when: "Fri 30 Oct", date: "2026-10-30", title: "Security basics", kind: "task" },
+    { when: "Sat 31 Oct", date: "2026-10-31", title: "Software engineering", kind: "task" },
+    { when: "Sun 1 Nov", date: "2026-11-01", title: "Mock exam 1", kind: "milestone" },
+    { when: "Mon 2 Nov", date: "2026-11-02", title: "Review mistakes", kind: "task" },
+    { when: "Tue 3 Nov", date: "2026-11-03", title: "Weak topics", kind: "task" },
+    { when: "Wed 4 Nov", date: "2026-11-04", title: "Mixed practice", kind: "task" },
+    { when: "Thu 5 Nov", date: "2026-11-05", title: "Mock exam 2", kind: "milestone" },
+    { when: "Fri 6 Nov", date: "2026-11-06", title: "Final review", kind: "task" },
+    { when: "Sat 7 Nov", date: "2026-11-07", title: "Light review", kind: "task" },
+    { when: "Sun 8 Nov", date: "2026-11-08", title: "Exam day", kind: "milestone" },
+  ],
+};
+
+const practice: ListView = {
+  id: "obj-list-questions",
+  kind: "list",
+  style: "questions",
+  title: "Practice questions",
+  items: [
+    {
+      title: "What is the time complexity of two nested loops that each run n times?",
+      detail: "O(n²), because the inner loop runs n times for each of n outer iterations.",
+    },
+    {
+      title: "When is binary search valid, and what is its time complexity?",
+      detail:
+        "The search space must be ordered and support midpoint access; it takes O(log n) comparisons.",
+    },
+    {
+      title: "How does a hash table handle two keys with the same hash index?",
+      detail: "Chaining or open addressing; performance depends on load and probing.",
+    },
+    {
+      title: "What is the difference between a stack and a queue?",
+      detail: "A stack is LIFO; a queue is FIFO.",
+    },
+    {
+      title: "What invariant does a binary search tree maintain?",
+      detail: "Each node’s left-subtree keys are smaller and right-subtree keys are larger.",
+    },
+    {
+      title: "How do BFS and DFS differ, and when does BFS find shortest paths?",
+      detail:
+        "BFS explores by distance layers and finds shortest paths in an unweighted graph; DFS follows branches deeply first.",
+    },
+  ],
+};
+
 const roadmap: PlanView = {
   kind: "plan",
   id: "roadmap",
@@ -1009,6 +1116,7 @@ export const allObjects: readonly ObjectView[] = [
   ...files,
   folder,
   project,
+  pullRequest,
 ];
 
 const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun"];
@@ -1486,6 +1594,7 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
   ],
   flights: [{ object: flights, width: 460 }],
   plans: [
+    { object: studyMonth, width: 904 },
     { object: trip, width: 720 },
     { object: roadmap, width: 560 },
   ],
@@ -1500,6 +1609,48 @@ export const looks: Record<string, { object: ObjectView; width: number }[]> = {
     { object: failedPage, width: 480 },
   ],
   notes: [{ object: note, width: 420 }],
+  questions: [{ object: practice, width: 880 }],
+  subjects: [
+    { object: pullRequest, width: 560 },
+    {
+      object: {
+        id: "obj-subject-issue",
+        kind: "subject",
+        noun: "Issue",
+        reference: "#103",
+        heading: "Rerun workflows like Playwright",
+        status: { label: "Open", tone: "active" },
+        people: [{ role: "Opened by", name: "crynta" }],
+        facts: [
+          { label: "Assignee", value: "None" },
+          { label: "Comments", value: "0" },
+        ],
+        labels: ["area: work", "enhancement"],
+        summary:
+          "Asks for an agent that learns which REST request powers an action and reuses it instead of driving the page.",
+        url: "https://github.com/zephium-browser/Zephium/issues/103",
+      },
+      width: 560,
+    },
+    {
+      object: {
+        id: "obj-subject-merged",
+        kind: "subject",
+        noun: "Pull request",
+        reference: "#48",
+        heading: "perf: tab sleeping tiers",
+        status: { label: "Merged", tone: "done" },
+        people: [
+          { role: "Author", name: "crynta" },
+          { role: "Merged by", name: "crynta" },
+        ],
+        facts: [{ label: "Changed files", value: "14" }],
+        labels: [],
+        url: "https://github.com/zephium-browser/Zephium/pull/48",
+      },
+      width: 480,
+    },
+  ],
   files: [...files.map((object) => ({ object, width: 280 })), { object: folder, width: 300 }],
   projects: [
     { object: project, width: 720 },

@@ -186,13 +186,116 @@ A run works on a site in the person's own browser session. The lead's
 `browse { start, goal, records }` becomes a page task: one Work-owned page on
 the start URL's site (its registrable domain), driven by the page agent
 (`AgentWorkDiscoveryTask` with the site-session scope and `SiteWorkPolicy`,
-at most 60 actions, 40 model calls and 8 minutes of its own time; time held
-for the person does not count). The document gate follows the site's own
+at most 60 actions, 40 model calls, 600k model tokens and 9 minutes, 8 of its
+own working time after a hold; time held for the person does not count). Its
+money is the token ceiling at the page model's highest input rate plus a
+2k-token reply per call, never under $0.60 and always inside the run's
+remaining share: about $0.60 on GPT-6 Luna, $1.16 on Haiku 4.5 and $4.64 on
+Opus 5.5 before the run and part ceilings. A decision whose money covers only
+itself and one more call of its size becomes the last one, narrowed to
+extract, so the terminal mapping call can still be reserved. The document gate follows the site's own
 redirects and same-document routes and cancels page-initiated and cross-site
 loads without losing the page. A same-site load a step starts (a search or
 filter form, a script navigation) is cancelled and followed as the page
 agent's own navigation; a same-site form POST passes only for an approved
-commitment.
+commitment. A clicked link whose click changes nothing (a new-window link, a
+covered or script-only one) is followed to its observed destination the same
+way. After any navigation the arrival gets up to four bounded looks (4 s) to
+fill in a loading shell before the next model call, and up to 8 s while a
+status or progress line says it is still loading its results. A load the page
+starts by itself on its own site is followed the same way (see
+[resources](agent-work-resources.md)). One look or page load waits at most 90 s
+before the page ends as too slow, instead of the run's whole deadline.
+
+A site task's looks use the whole-page budget (320 nodes, 32 KiB): a first
+look holds everything in view, then the main landmark's records below the fold
+(list items, rows, articles, then its prose and tables) in document order,
+then the headings below, so a results page reaches the planner with its
+records rather than its header and filters. A page with no main landmark
+gets its below-the-fold list items, rows, articles, tables and paragraphs the
+same way. Such a record that holds a landmark the look already took (named
+sections inside one article of results) is read child by child rather than
+skipped, and records in a narrow column holding several checkboxes or radios
+(a filter panel) come after the rest, with an allowance of their own. A price
+shown on screen but hidden from assistive technology (a short rendered text
+that is a figure with a currency) is read despite `aria-hidden`. A dialog the
+site lays over the page unasked with its own short close control (a sign-in,
+newsletter or app offer) is closed by Rust as a read on the first look, like a
+cookie banner, and is never read as a sign-in wall; a look taken inside a
+focused modal offer counts as one with the page behind it. A
+control a click found covered loses click and keeps press in the next looks of
+its document: the refusal tells the planner to press it with Enter, and Enter
+on a button, link, menu item or tab is judged as that control's click. The
+third identical refused proposal in a row gets a fresh look of the page
+instead of the same refusal again, and so does the third refused look in a
+row, a moment later. Six refusals in a row with nothing done, two before the
+loop would end the page, the next model call is offered extraction alone, so
+what the looks already hold becomes the result. A wait proposed while the
+planner holds a look of one section pauses for up to three seconds and is
+answered with a fresh whole look, and so is a wait on a whole look whose page
+replaced its document while it loaded. A page task's first look waits, like a
+page reached by navigation, while the page says it is loading its results,
+and an extraction asked for while it still says so is answered at most twice
+with a fresh look 2.5 s later. A request that the person sign in, on a page
+task whose page shows no sign-in form or secret field, is refused twice with a
+fresh look telling the planner that signing in is optional and to continue as
+a guest; a third request goes to the person. The first scroll proposed right after a verified fill of
+a field that commits nothing (a search, filter or place box) is refused unrun
+and the planner is told to run the search first; a second such scroll has Rust
+press Enter in that field as its own read and hand the planner the page it
+produced. A fourth scroll in a row is refused and the planner is pointed at
+extract or at the site's results address with the goal's filters. A third
+whole look in a row (the initial look, or a region or subtree of the
+document) with nothing done between is refused once per streak and the
+planner is pointed at extract, a text search, one list's subtree, a scroll or
+a control. A select on a control that takes no select (a filter checkbox, a
+place field's suggestion) is bound as a click on the option it named,
+verified as a page change, and judged like any click. A
+screenshot that cannot be taken of the current look goes back as a fresh text
+look. A load a step diverted is followed only when the site session admits
+it; a section anchor loads its page, and an anchor of the open page stays a
+scroll. A navigation to an exact address an earlier hop requested and the site
+redirected to the page now open is refused before any authority is minted. A native select offers only
+select: a click or key would open WebKit's own menu, whose modal loop holds
+the page. A locate scope the look cannot hold searches the whole look. A
+chosen page model replies within 4,096 output tokens: a browser turn keeps up
+to 512 of them back, and a reply that runs past the rest is asked once more,
+told to be brief with one tool call and with thinking off, inside the same
+reservation; both asks are charged as reported, and a lost reply at the
+ceiling. A page task on a travel site whose results address is known
+(Booking, Airbnb, Skyscanner, Rome2Rio, Expedia, Hotels.com, Kayak, on any
+country domain) carries that address's format, so the planner opens the list
+with the goal's places, dates and guests instead of driving the form. A page that ends on a stalled look with no
+model call in flight fails as too slow and is charged its settled calls, not
+the page's whole reservation.
+
+After a navigation settles, the session takes the arrival's fresh account
+sample (settled after the load, a new attestation, the same account) before
+the arrival is checked for a wall, so a bot check a page loads on arrival is
+judged under the new document's account.
+
+Well-known bot checks are read by Rust from the first look, without a typed
+decision or a model call: a small page whose short texts or embedded frame
+titles are Cloudflare's, DataDome's, hCaptcha's, reCAPTCHA's checkbox or a
+"verify you are human" line. A widget only a person can pass goes to the
+person at once, on any later look too (a look the model asked for, the page
+after a verified step), so a check met after the first look costs no model
+call; a script check ("Just a moment", "Verifying you are human",
+a DataDome device check, a page that is only a frame) is looked at again each
+second, for two seconds on a research read and six on a page task, and one
+that clears by itself is never shown. Such a page is not waited on as a page
+still loading. A site-session page whose check reloads it several times in a
+row keeps loading: a later request of the page's own made before the followed
+load started continues it, within the same load bound. A read for records
+with a link column sheds a link's address with its record's text, never
+before it, when it is over its budget.
+
+Page-agent requests keep an append-only prefix for provider prompt caches:
+instructions, tools, objective and the first observation, then the turns;
+the per-call host facts (act targets, verified-action history, decision and
+action budgets) trail the newest turn. Past 48 KiB of transcript the oldest
+captures retire to a stub in one batch down to 24 KiB, so the prefix stays
+stable for several calls instead of changing on each.
 
 Before a run first works on a site where the profile holds cookies (a
 presence fact, never their contents), Rust reads the whole start page before
@@ -201,9 +304,30 @@ asks once: Allow (this run), Always
 for the site (kept per profile, `WorkRequest::SiteAccess`), or Not now (the
 site is worked privately). Never and the closed list of sensitive sites
 (banks, password managers, health and tax portals; Ask at most) keep the
-session closed; a private run (`WorkAgentGrantV1.private`) uses the run's own
-storage everywhere. A plain `read` uses the session only on a site the run
-already works on as the person.
+session closed. A page without the person's session opens in Work's own
+website data: one persistent store per profile, apart from the profile's own,
+that remembers solved bot checks, consent choices and site preferences across
+pages and runs (see `docs/agentic-browsing.md` 4.3; Settings → Work clears
+it). A private run (`WorkAgentGrantV1.private`) uses the run's own empty
+storage everywhere instead. A plain `read` uses the session only on a site the
+run already works on as the person.
+
+A public `read` cites the exact address it read, so a redirect never moves
+it. When the page's server (a 3xx) or its own script before the page is ready
+sends the first load elsewhere, the native gate refuses that load like any
+other and keeps the destination only if a new public read could be admitted
+there (safe public HTTPS, the read's own navigation checks). The read fails
+as `Redirected` (not a lost page), its step says `The page redirects to …`,
+and nothing on it ran. On the same site (its registrable domain, as
+`same_work_site` defines it) the driver opens one fresh read of the
+destination as its own step, citing that address, within what the first read
+left of its share; the lead's hands admit it exactly as a `read` the lead
+asked for (the same address checks and, in a private run, the person's
+answer). A chain follows at most two redirects and never an address it read;
+a cross-site redirect, or one past the bound, goes back to the lead as
+`Read … if it is what you need`, with the address admitted for a later
+`read`. A lead `read` of a plain `http://` address reads its `https://`
+address: Work never loads plain HTTP.
 
 The page agent reads, navigates, searches, filters and fills drafts. A step
 Rust reads as committing (send, post, pay, book, delete, share, save, submit a
@@ -219,12 +343,65 @@ page then says it committed something stops the page task. Password and
 secret fields are never typed into. A sign-in wall (a password field or a
 sign-in form, read by Rust or raised by the page agent) holds the page for the
 person; the page continues by itself once their navigation settles back on the
-site, off any sign-in path. A page load the person finishes on the site in an
+site, off any sign-in path (two-factor, OTP and verification paths count as
+signing in). A visible one-time-code, card-number or security-code field holds
+the page the same way: as a sign-in step, or as a payment for the person when
+the page reads as a checkout. A visible challenge widget in an embedded frame
+(hCaptcha, Turnstile, reCAPTCHA's checkbox, read only by the frame's title)
+holds it as a human check, and a visible card-field frame from a payment
+provider (Stripe, Braintree, Adyen and the like, read only by the frame's
+title) holds it as a payment for the person. Rust reads these walls at the start, after every
+verified step and after every navigation or followed load, before any model
+call is spent on a page the agent cannot pass. A page load the person finishes on the site in an
 ordinary tab (a count, never its URL) wakes a held page, which starts over
 once in the fresh session. Facts from the person's pages never ride a search
 query, provider retention never applies to them, and diagnostics carry only
 the page kind and its path class. Origin grants, their page budget and the
 single-field update are retired; stored runs that used them still load.
+
+## Web search
+
+A lead run searches the way the person does: `web_search` opens the results
+page of the engine set for the address bar (`search.engine`, or the custom
+`search.custom-url`) for the query, as if it were typed there, and Rust reads
+the results off the page. The navigation policy's sensitive-input guard
+decides whether a query may leave at all; a query it refuses is sent nowhere.
+The lead's freshness becomes the engine's own parameter where one exists
+(Google `tbs`, DuckDuckGo `df`, Bing `filters`, Brave `tf`).
+
+The page opens as a step of the run, beside the batch's other searches, in
+Work's own website data: nothing from the person's tabs, but the engine's
+consent choice from earlier runs is remembered, so an EU consent wall is met
+once rather than on every search. A private run's results page opens in a
+fresh ephemeral store of its own. Typed decisions are off, and the results policy takes the
+page's whole first look, presses nothing and ends there, so no model sees it
+and nothing is charged but the step. The reader
+(`zephium_agentic::read_search_page`) keeps up to eight results in the
+engine's order, each a title link's destination with Google's `/url?q=`,
+Bing's `/ck/a?u=a1…` and DuckDuckGo's `/l/?uddg=` redirects unwrapped, its
+title and the engine's own snippet. Ads, the engine's own links, non-web
+links and repeats of the same page are left out. Built-in engines read their
+own markup (Brave's titles are text inside the link); a custom engine reads
+headed links in its main content. The evidence names the `browser` provider
+with the engine as its model, carries those results with their snippets and
+no answer, and costs no tokens; the lead sees a ranked list with source keys
+and reads the pages it picks.
+
+Before that first look the results page settles: its document policy
+(`PublicResultsPage`) follows the engine's own same-site redirects and script
+reloads (Google answers a fresh client with a page that reloads `/search`) in
+place, up to six loads, each preparing the page's semantic runtime for the
+new document; a cross-site load is refused. A results page is read by Rust
+and never cited by its own address, so its settled document stands for it.
+
+A page with no results says why: a challenge or unusual-traffic page, a
+consent page, the engine's own "no results", or a page it cannot read. Rust
+never answers a challenge or a consent page. The search then falls back to
+the provider search behind it, the chosen models' own search or else the
+OpenAI public search, at most `BROWSER_SEARCH_FALLBACKS` (three) times a run;
+past that, or with none, the step fails as a search that could not be sent.
+The run's grant records that fallback, so its evidence belongs to the run.
+Diagnostics name only the backend, the engine and the page's kind.
 
 ## Artifact kinds
 

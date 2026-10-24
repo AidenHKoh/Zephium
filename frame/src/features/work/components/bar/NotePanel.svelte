@@ -4,7 +4,7 @@
   import type { NoteSession } from "$domain/notes";
   import Icon from "$shared/ui/Icon";
   import SearchField from "$shared/ui/SearchField";
-  import { Add01Icon, Note01Icon, Tick02Icon } from "../../lib/icons";
+  import { Add01Icon, ArrowLeft01Icon, Note01Icon, Tick02Icon } from "../../lib/icons";
   import * as m from "$shared/i18n/messages";
 
   let {
@@ -13,6 +13,7 @@
     busy = false,
     oncreate,
     onpick,
+    onback,
   }: {
     notes: NoteSession;
     /** Notes already on this canvas: shown, not offered twice. */
@@ -20,6 +21,8 @@
     busy?: boolean;
     oncreate: () => void;
     onpick: (id: string) => void;
+    /** Back to the kinds of block this opened from. */
+    onback?: () => void;
   } = $props();
 
   let query = $state("");
@@ -47,10 +50,19 @@
 
 <!-- A note joins the canvas by choice: a new one, or one of the person's own. -->
 <div class="note-panel">
-  <button type="button" class="ui-menu-item create" disabled={busy} onclick={oncreate}>
-    <span class="ui-menu-icon" aria-hidden="true"><Icon icon={Add01Icon} size={15} /></span>
-    {m.work_note_new()}
-  </button>
+  <div class="head">
+    {#if onback}<button
+        type="button"
+        class="back"
+        aria-label={m.work_tool_blocks()}
+        title={m.work_tool_blocks()}
+        onclick={onback}><Icon icon={ArrowLeft01Icon} size={15} strokeWidth={1.9} /></button
+      >{/if}
+    <button type="button" class="ui-menu-item create" disabled={busy} onclick={oncreate}>
+      <span class="ui-menu-icon" aria-hidden="true"><Icon icon={Add01Icon} size={15} /></span>
+      {m.work_note_new()}
+    </button>
+  </div>
   <div class="ui-menu-separator" role="presentation"></div>
   <div class="search">
     <SearchField
@@ -99,6 +111,46 @@
     display: flex;
     flex-direction: column;
     max-block-size: min(420px, calc(100vh - 160px));
+  }
+
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .back {
+    display: grid;
+    flex: none;
+    place-items: center;
+    inline-size: 28px;
+    block-size: 28px;
+    margin-inline-start: 2px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: transparent;
+    color: var(--color-muted);
+    cursor: default;
+    transition:
+      background-color var(--motion-fast) var(--ease-out),
+      color var(--motion-fast) var(--ease-out);
+  }
+
+  .back:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .back:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: -2px;
+  }
+
+  button.create {
+    flex: 1;
+    inline-size: auto;
+    min-inline-size: 0;
   }
 
   button.ui-menu-item {

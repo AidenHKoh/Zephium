@@ -11,7 +11,10 @@ use super::*;
 
 const WIRE: &str = "gemini";
 
-pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> {
+pub(super) fn body(
+    request: &WorkModelRequest,
+    target: &LeadTarget,
+) -> Result<Value, WorkModelError> {
     // Function responses name their function; find it from the call's id.
     let mut names: HashMap<&str, &str> = HashMap::new();
     for message in &request.messages {
@@ -91,17 +94,19 @@ pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> 
             .collect();
         tools.push(json!({"functionDeclarations": declarations}));
     }
-    if request.native_search {
+    if target.native_search(request) {
         tools.push(json!({"googleSearch": {}}));
     }
     let mut generation = json!({"maxOutputTokens": request.max_output_tokens});
     if let Some(reasoning) = request.reasoning {
-        let pro = request.model.model.contains("-pro");
+        let pro = request.model.model.starts_with("gemini-3-pro");
         let level = match reasoning {
             WorkModelReasoning::Low => "low",
             WorkModelReasoning::Medium if pro => "high",
             WorkModelReasoning::Medium => "medium",
-            WorkModelReasoning::High => "high",
+            WorkModelReasoning::High | WorkModelReasoning::XHigh | WorkModelReasoning::Max => {
+                "high"
+            }
         };
         generation["thinkingConfig"] = json!({"thinkingLevel": level});
     }
@@ -118,9 +123,16 @@ pub(super) fn body(request: &WorkModelRequest) -> Result<Value, WorkModelError> 
         body.insert("tools".into(), Value::Array(tools));
     }
     if !request.tools.is_empty() {
+        let config = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!({"mode": "AUTO"}),
+            WorkModelToolChoice::Required => json!({"mode": "ANY"}),
+            WorkModelToolChoice::Named(name) => {
+                json!({"mode": "ANY", "allowedFunctionNames": [name]})
+            }
+        };
         body.insert(
             "toolConfig".into(),
-            json!({"functionCallingConfig": {"mode": "AUTO"}}),
+            json!({"functionCallingConfig": config}),
         );
     }
     body.insert("generationConfig".into(), generation);

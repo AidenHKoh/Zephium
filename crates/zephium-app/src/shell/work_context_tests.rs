@@ -182,6 +182,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
             },
         ],
         tabs: false,
+        blocks: false,
     };
 
     let admission = WorkContextAdmission::new(handle.clone());
@@ -260,6 +261,26 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
     )
     .await;
     assert_eq!(decided.decisions.len(), 1);
+    // A concrete block reference grants lazy target resolution, not disclosure
+    // of the rest of the canvas or its saved private decisions.
+    let blocks_only = WorkContextSelectionV1 {
+        environment: snapshot.id,
+        items: vec![],
+        tabs: false,
+        blocks: true,
+    };
+    let block_context = drive(
+        &mut shell,
+        &queue,
+        admission.admit(profile, WorkContextPurpose::Agent, &blocks_only),
+    )
+    .await
+    .unwrap();
+    assert!(block_context.bodies.is_empty());
+    assert!(block_context.disclosure.items.is_empty());
+    assert_eq!(block_context.disclosure.total_bytes, 0);
+    assert!(block_context.disclosure.requires_review());
+
     let with_decision = drive(
         &mut shell,
         &queue,
@@ -282,6 +303,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
         environment: snapshot.id,
         items: vec![],
         tabs: false,
+        blocks: false,
     };
     assert!(public_only.validate().is_err());
 
@@ -292,6 +314,7 @@ async fn context_admission_binds_digests_and_refuses_stale_or_private_public_rea
             revision: "x".into(),
         }],
         tabs: false,
+        blocks: false,
     };
     let not_found = drive(
         &mut shell,
@@ -370,6 +393,7 @@ async fn work_media_context_keeps_revision_privacy_and_existing_budget() {
             revision: record.revision.clone(),
         }],
         tabs: false,
+        blocks: false,
     };
     let admission = WorkContextAdmission::new(handle);
     let admitted = drive(
@@ -439,6 +463,7 @@ async fn open_tabs_join_context_only_with_consent_and_without_their_query() {
         environment: created.id,
         items: vec![],
         tabs: true,
+        blocks: false,
     };
     let admitted = drive(
         &mut shell,
@@ -469,6 +494,7 @@ async fn open_tabs_join_context_only_with_consent_and_without_their_query() {
     // Without consent no tab is listed.
     assert!(WorkContextSelectionV1 {
         tabs: false,
+        blocks: false,
         ..consent
     }
     .validate()

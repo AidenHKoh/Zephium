@@ -75,11 +75,10 @@ Never weaken security policy or disable Defender to make a check pass.
 
 ## Explicit limits
 
-- Every Windows download requires native save confirmation; Settings explains
-  this and disables automatic saving. The event has no originating-frame
-  activation/navigation ID, so neither a recent click nor a concurrent browser
-  navigation is treated as proof for that transfer. The selected download folder
-  is still used as the dialog's starting location.
+- Foreground downloads save to Downloads by default, or to a directory with a
+  picker-issued identity. Ask-first remains optional. The event has no originating-
+  frame activation/navigation ID, so this does not claim initiating-frame consent;
+  WebView2's multiple-automatic-download permission remains denied.
 - Upload selection is WebView2-owned. The pinned stable API has no equivalent
   to Zephium's macOS initiating-frame upload broker; do not claim parity for that
   interception boundary.
@@ -134,10 +133,10 @@ lifecycle, as implemented.
 - Native deferrals remain cancelled until a selected destination and durable
   staging receipt are acknowledged. Native COM file/folder dialogs, interruption
   mapping, cancellation, progress, Open and Reveal are implemented.
-- Every Windows download requires native save confirmation. The event has no
-  originating-frame activation/navigation identity; a simultaneous address-bar
-  navigation cannot safely supply that proof. Settings explains the limit and
-  disables automatic saving. A selected folder still seeds the dialog.
+- Windows honors the automatic-save preference and retains the foreground-document
+  admission checks. Native confirmation is used when requested or when a legacy
+  custom directory lacks its picker-issued identity. Canonical staging paths are
+  projected to verified ordinary Win32 spelling for WebView2's download writer.
 - Canonical ancestor handles, protected user/SYSTEM staging ACLs, reparse rejection,
   complete 128-bit file IDs, exclusive same-volume publication, Attachment Services
   and verified Internet-zone metadata protect the file boundary. A protection or

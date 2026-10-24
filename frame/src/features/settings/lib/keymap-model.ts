@@ -31,6 +31,10 @@ const TITLES: Record<string, () => string> = {
   "browser.history": m.command_browser_history,
   "tab.next": m.command_tab_next,
   "tab.previous": m.command_tab_previous,
+  "tab.above": m.command_tab_above,
+  "tab.below": m.command_tab_below,
+  "space.next": m.command_space_next,
+  "space.previous": m.command_space_previous,
   "tool.downloads": m.command_tool_downloads,
   "bookmark.add": m.command_bookmark_add,
   "tool.bookmarks": m.command_tool_bookmarks,
@@ -38,6 +42,7 @@ const TITLES: Record<string, () => string> = {
   "browser.notes": m.command_browser_notes,
   "settings.shortcuts": m.command_settings_shortcuts,
   "tab.select.last": m.command_tab_select_last,
+  "work.dictate": m.command_work_dictate,
   "theme.system": m.command_theme_system,
   "theme.light": m.command_theme_light,
   "theme.dark": m.command_theme_dark,
@@ -46,6 +51,8 @@ const TITLES: Record<string, () => string> = {
 export function commandTitle(entry: Pick<KeymapEntry, "id" | "title">): string {
   const position = /^tab\.select\.(\d)$/u.exec(entry.id)?.[1];
   if (position) return m.command_tab_select({ number: position });
+  const space = /^space\.select\.(\d)$/u.exec(entry.id)?.[1];
+  if (space) return m.command_space_select({ number: space });
   return TITLES[entry.id]?.() ?? entry.title;
 }
 
@@ -66,8 +73,10 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
     title: m.keymap_group_tabs,
     holds: (entry) => (entry.group === "window" || entry.group === "keys") && tabCommand(entry),
   },
+  { id: "spaces", title: m.keymap_group_spaces, holds: (entry) => entry.id.startsWith("space.") },
   { id: "view", title: m.keymap_group_view, holds: (entry) => entry.group === "view" },
   { id: "history", title: m.keymap_group_history, holds: (entry) => entry.group === "history" },
+  { id: "work", title: m.keymap_group_work, holds: (entry) => entry.id.startsWith("work.") },
   {
     id: "appearance",
     title: m.keymap_group_appearance,
@@ -76,11 +85,17 @@ const SECTIONS: { id: string; title: () => string; holds: (entry: KeymapEntry) =
 ];
 
 /** The rebindable commands, in the order Keyboard settings lists them. The
- *  launcher has its own recorder and Work keys are fixed to the pane. */
-export function keymapSections(entries: readonly KeymapEntry[]): KeymapSection[] {
+ *  launcher has its own recorder, Work keys are fixed to the pane, and none
+ *  of Work's are offered while Work and AI are off. */
+export function keymapSections(
+  entries: readonly KeymapEntry[],
+  offered: (command: string) => boolean = () => true,
+): KeymapSection[] {
   return SECTIONS.map((section) => ({
     id: section.id,
     title: section.title(),
-    entries: entries.filter((entry) => entry.customizable && section.holds(entry)),
+    entries: entries.filter(
+      (entry) => entry.customizable && section.holds(entry) && offered(entry.id),
+    ),
   })).filter((section) => section.entries.length > 0);
 }

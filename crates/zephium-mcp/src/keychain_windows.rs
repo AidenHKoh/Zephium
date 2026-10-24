@@ -160,7 +160,7 @@ fn write_to(store: &impl Store, prefix: &str, bytes: &[u8]) -> Result<(), VaultE
 }
 
 pub(super) fn read(service: &str, account: &str) -> Result<String, KeychainError> {
-    let _turn = zephium_credentials::turn();
+    let _turn = zephium_credentials::turn().map_err(map)?;
     let prefix = prefix(service, account);
     let loaded = match read_from(&Native, &prefix) {
         Err(VaultError::Inaccessible) => {
@@ -175,18 +175,18 @@ pub(super) fn read(service: &str, account: &str) -> Result<String, KeychainError
         .map_err(|_| KeychainError::Inaccessible)
 }
 pub(super) fn write(service: &str, account: &str, secret: &str) -> Result<(), KeychainError> {
-    let _turn = zephium_credentials::turn();
+    let _turn = zephium_credentials::turn().map_err(map)?;
     write_to(&Native, &prefix(service, account), secret.as_bytes()).map_err(map)
 }
 pub(super) fn delete(service: &str, account: &str) -> Result<(), KeychainError> {
-    let _turn = zephium_credentials::turn();
+    let _turn = zephium_credentials::turn().map_err(map)?;
     let prefix = prefix(service, account);
     // Withdraw publication before retiring chunks, so interrupted deletion fails closed.
     Native.delete(&format!("{prefix}manifest")).map_err(map)?;
     clean(&Native, &prefix, None).map_err(map)
 }
 pub(super) fn delete_server(service: &str) -> Result<(), KeychainError> {
-    let _turn = zephium_credentials::turn();
+    let _turn = zephium_credentials::turn().map_err(map)?;
     let prefix = format!("{service}/");
     let targets = Native.list(&prefix).map_err(map)?;
     for target in targets
@@ -201,7 +201,9 @@ pub(super) fn delete_server(service: &str) -> Result<(), KeychainError> {
     Ok(())
 }
 pub(super) fn present(service: &str, account: &str) -> bool {
-    let _turn = zephium_credentials::turn();
+    let Ok(_turn) = zephium_credentials::turn() else {
+        return false;
+    };
     zephium_credentials::present(&format!("{}manifest", prefix(service, account))).unwrap_or(false)
 }
 

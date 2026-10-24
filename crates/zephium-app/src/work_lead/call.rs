@@ -92,8 +92,25 @@ pub(crate) async fn call(
     run: &LeadRun,
     model: &LeadModel,
     request: WorkModelRequest,
+    role: WorkModelRole,
+    completed_tool: Option<&(dyn Fn(WorkModelToolCall) + Send + Sync)>,
 ) -> Result<(WorkModelOutcome, WorkUsage), CallFailure> {
+    let started = std::time::Instant::now();
+    let first_event = std::sync::atomic::AtomicU64::new(0);
+    let completed = std::sync::atomic::AtomicBool::new(false);
     let events = |event: WorkModelEvent| {
+        let _ = first_event.compare_exchange(
+            0,
+            (started.elapsed().as_millis() as u64).max(1),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if let WorkModelEvent::ToolCall(tool) = &event {
+            completed.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(completed_tool) = completed_tool {
+                completed_tool(tool.clone());
+            }
+        }
         if let WorkModelEvent::Search { .. } = event {
             run.activity(WorkActivityV1::Searching);
         }
@@ -107,11 +124,36 @@ pub(crate) async fn call(
             .probe
             .deadline()
             .min(std::time::Instant::now() + CALL_TIMEOUT);
-        let result =
-            tokio::time::timeout_at(deadline.into(), model.client.call(request.clone(), &events))
-                .await;
+        let result = tokio::select! {
+            biased;
+            _ = run.probe.wait_cancelled() => {
+                // A sent call may still be billed even when its answer is never
+                // received. Keep the reservation and never replay it on Stop.
+                let remaining = run.remaining();
+                run.charge(WorkUsage {
+                    model_tokens: remaining.model_tokens,
+                    cost_micro_usd: remaining.cost_micro_usd,
+                    operations: 1,
+                    accounting: WorkUsageAccounting::ConservativeReservation,
+                });
+                run.cancelled().await;
+                return Err(CallFailure::Stopped);
+            }
+            result = tokio::time::timeout_at(
+                deadline.into(), model.client.call(request.clone(), &events),
+            ) => result,
+        };
         let error = match result {
             Ok(Ok(outcome)) => {
+                let first = first_event.load(std::sync::atomic::Ordering::Relaxed);
+                run.report(super::WorkLeadDiagnostic::ModelSettled {
+                    role,
+                    stop: outcome.stop,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    first_event_ms: (first != 0).then_some(first),
+                    output_tokens: outcome.usage.output_tokens,
+                    reasoning_tokens: outcome.usage.reasoning_tokens,
+                });
                 let charged = usage(&model.entry, outcome.usage);
                 run.charge(charged);
                 return Ok((outcome, charged));
@@ -126,10 +168,17 @@ pub(crate) async fn call(
             }
         };
         run.report(super::WorkLeadDiagnostic::ModelRefused { error });
+        if completed.load(std::sync::atomic::Ordering::Relaxed)
+            && error != WorkModelError::Cancelled
+        {
+            return Err(CallFailure::Lost);
+        }
         let wait = match error {
-            WorkModelError::RateLimited { retry_after_ms } => Some(Duration::from_millis(
-                retry_after_ms.unwrap_or(4_000).clamp(1_000, 30_000),
-            )),
+            WorkModelError::RateLimited { retry_after_ms } => rate_limit_wait(retry_after_ms),
+            WorkModelError::Hosted {
+                refusal: HostedRefusal::AlreadySent,
+                ..
+            } => return Err(CallFailure::Lost),
             WorkModelError::Overloaded | WorkModelError::Network => {
                 Some(Duration::from_secs(2 + 3 * attempt as u64))
             }
@@ -140,11 +189,25 @@ pub(crate) async fn call(
         match wait {
             Some(wait) if attempt < RETRIES => {
                 attempt += 1;
-                tokio::time::sleep(wait).await;
+                tokio::select! {
+                    biased;
+                    _ = run.probe.wait_cancelled() => {
+                        run.cancelled().await;
+                        return Err(CallFailure::Stopped);
+                    }
+                    _ = tokio::time::sleep(wait) => {},
+                }
             }
             _ => return Err(CallFailure::Refused(error)),
         }
     }
+}
+
+/// How long to wait out a rate limit, or none when the server asked for more
+/// than a run holds a call for: it is never asked again sooner than it said.
+fn rate_limit_wait(retry_after_ms: Option<u64>) -> Option<Duration> {
+    let wait = retry_after_ms.unwrap_or(4_000).max(1_000);
+    (wait <= 30_000).then(|| Duration::from_millis(wait))
 }
 
 /// The text of an assistant turn, joined.
@@ -218,6 +281,15 @@ pub(crate) fn clip(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_rate_limit_is_waited_out_or_handed_back_never_cut_short() {
+        assert_eq!(rate_limit_wait(None), Some(Duration::from_secs(4)));
+        assert_eq!(rate_limit_wait(Some(250)), Some(Duration::from_secs(1)));
+        assert_eq!(rate_limit_wait(Some(30_000)), Some(Duration::from_secs(30)));
+        assert_eq!(rate_limit_wait(Some(30_001)), None);
+        assert_eq!(rate_limit_wait(Some(3_600_000)), None);
+    }
+
     fn entry(price: Option<WorkModelPrice>) -> WorkModelEntry {
         WorkModelEntry {
             id: "openai/gpt-6".into(),
@@ -254,6 +326,7 @@ mod tests {
             WorkModelUsage {
                 input_tokens: 10_000,
                 cached_input_tokens: 8_000,
+                cache_write_input_tokens: 0,
                 output_tokens: 500,
                 reasoning_tokens: 0,
                 cost_micros: None,
@@ -267,6 +340,7 @@ mod tests {
             WorkModelUsage {
                 input_tokens: 1_000,
                 cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
                 output_tokens: 100,
                 reasoning_tokens: 0,
                 cost_micros: None,

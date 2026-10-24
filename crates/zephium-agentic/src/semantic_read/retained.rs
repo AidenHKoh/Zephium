@@ -4,32 +4,6 @@ use std::sync::Arc;
 
 const MAX_CAPTURES: usize = 8;
 
-fn extraction_priority(field: SemanticReadField, role: SemanticRole) -> u8 {
-    match field {
-        SemanticReadField::TextValue
-        | SemanticReadField::BooleanValue
-        | SemanticReadField::OrdinalValue => 0,
-        SemanticReadField::VisibleText | SemanticReadField::AccessibleName
-            if matches!(
-                role,
-                SemanticRole::Heading
-                    | SemanticRole::Paragraph
-                    | SemanticRole::Document
-                    | SemanticRole::Cell
-                    | SemanticRole::CellHeader
-                    | SemanticRole::Status
-                    | SemanticRole::ListItem
-            ) =>
-        {
-            0
-        }
-        SemanticReadField::LinkDestination
-        | SemanticReadField::ImageSource
-        | SemanticReadField::DocumentAddress => 1,
-        _ => 2,
-    }
-}
-
 fn merge_omitted_stats(target: &mut SemanticReadStats, source: SemanticReadStats) {
     target.omitted_items = target.omitted_items.saturating_add(source.omitted_items);
     target.withheld_sensitive_nodes = target
@@ -87,19 +61,107 @@ impl Content {
 }
 
 struct Fragment {
+    record_root: Option<crate::semantic::SemanticNodeKey>,
     fields_complete: bool,
     node_key: crate::semantic::SemanticNodeKey,
     field: SemanticReadField,
     role: SemanticRole,
+    states: crate::SemanticStates,
     content: Content,
     frame: Arc<SemanticFrameJoin>,
     invocation: SemanticInvocationId,
     snapshot: SemanticSnapshotGeneration,
     reference: SemanticReferenceId,
     trust: SemanticTrust,
+    region: u8,
+    rank: u8,
+}
+
+/// What makes two reads the same page content: one field and value of one
+/// document, from one native node or from one record. A record root stays put
+/// while a list re-renders the nodes inside it, so within a record the value is
+/// the identity. Read-local identities never take part.
+#[derive(Clone, Copy)]
+pub(super) struct Signature<'a> {
+    node_key: crate::semantic::SemanticNodeKey,
+    record_root: Option<crate::semantic::SemanticNodeKey>,
+    region: u8,
+    fields_complete: bool,
+    field: SemanticReadField,
+    role: SemanticRole,
+    frame: &'a SemanticFrameJoin,
+    trust: SemanticTrust,
+    content: SemanticReadContent<'a>,
+}
+
+impl Signature<'_> {
+    /// Header, navigation and filters outside any record repeat in every look
+    /// and are identified by what they say; main content is by its node.
+    fn chrome(self) -> bool {
+        self.record_root.is_none() && self.region > 0
+    }
+
+    pub(super) fn same_source(self, other: Signature<'_>) -> bool {
+        (self.node_key == other.node_key
+            || self.record_root.is_some() && self.record_root == other.record_root
+            || self.chrome() && other.chrome() && self.region == other.region)
+            && self.fields_complete == other.fields_complete
+            && self.field == other.field
+            && self.role == other.role
+            && self.frame == other.frame
+            && self.trust == other.trust
+            && self.content == other.content
+    }
+}
+
+impl Fragment {
+    fn signature(&self) -> Signature<'_> {
+        Signature {
+            node_key: self.node_key,
+            record_root: self.record_root,
+            region: self.region,
+            fields_complete: self.fields_complete,
+            field: self.field,
+            role: self.role,
+            frame: &self.frame,
+            trust: self.trust,
+            content: self.content.borrow(),
+        }
+    }
+}
+
+impl SemanticReadFragment<'_> {
+    pub(super) fn signature(&self) -> Signature<'_> {
+        let source = self.provenance;
+        Signature {
+            node_key: source.node_key,
+            record_root: self.record_root,
+            region: self.region,
+            fields_complete: source.fields_complete,
+            field: self.field,
+            role: self.role,
+            frame: source.frame,
+            trust: source.trust,
+            content: self.content,
+        }
+    }
+}
+
+/// Pairs a fragment with a not yet paired equal one, so a value repeated on a
+/// page (two identical labels in one card) is kept as often as it occurs.
+fn take_match<T>(consumed: &mut [bool], pool: &[T], matches: impl Fn(&T) -> bool) -> bool {
+    let found = pool
+        .iter()
+        .enumerate()
+        .position(|(index, candidate)| !consumed[index] && matches(candidate));
+    if let Some(index) = found {
+        consumed[index] = true;
+    }
+    found.is_some()
 }
 
 struct Capture {
+    media: Vec<ReadMediaAssociation>,
     focused: bool,
     acknowledgement: SemanticObservationAcknowledgement,
     captured_at: SemanticCaptureInstant,
@@ -120,15 +182,10 @@ impl Capture {
     }
 
     fn remove_duplicates(&mut self, preferred: &Self) {
+        let mut consumed = vec![false; preferred.fragments.len()];
         self.fragments.retain(|fragment| {
-            let duplicate = preferred.fragments.iter().any(|other| {
-                fragment.node_key == other.node_key
-                    && fragment.fields_complete == other.fields_complete
-                    && fragment.field == other.field
-                    && fragment.role == other.role
-                    && fragment.frame == other.frame
-                    && fragment.trust == other.trust
-                    && fragment.content.borrow() == other.content.borrow()
+            let duplicate = take_match(&mut consumed, &preferred.fragments, |other| {
+                fragment.signature().same_source(other.signature())
             });
             if duplicate {
                 self.stats.items -= 1;
@@ -144,7 +201,7 @@ impl Capture {
 /// requires an explicit committed navigation receipt; retained references
 /// remain historical and can only contribute to terminal extraction.
 ///
-/// Holds at most eight captures and STANDARD's 128 fragments / 32 KiB content.
+/// Holds at most eight captures and the read budget's fragments and content.
 /// Under pressure, large captures yield to focused reads; age breaks ties.
 /// Omissions remain explicit. Empty reads never displace useful evidence. This object has no
 /// browser operation, codec, persistence, or provider-disclosure authority.
@@ -154,6 +211,7 @@ pub struct SemanticRetainedReadEvidence {
     context: Option<ContextJoin>,
     roles: Option<SemanticReadRoleSelection>,
     captures: Vec<Capture>,
+    budget: Option<SemanticReadBudget>,
     dropped_stats: SemanticReadStats,
     dropped_omissions: u8,
     last_seen: Option<SemanticObservationAcknowledgement>,
@@ -164,6 +222,30 @@ impl SemanticRetainedReadEvidence {
     /// Releases all private data at a navigation, task or account boundary.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Discards a prepared listing view while preserving its document owner.
+    /// A followed navigation may present this predecessor again; marking it
+    /// consumed prevents that callback from resurrecting the obsolete values.
+    pub fn discard_view_before_action(
+        &mut self,
+        predecessor: &SemanticObservationAcknowledgement,
+    ) -> Result<(), SemanticReadError> {
+        if self
+            .context
+            .is_some_and(|context| context != predecessor.context())
+        {
+            return Err(SemanticReadError::AuthorityMismatch);
+        }
+        *self = Self {
+            context: Some(predecessor.context()),
+            roles: self.roles,
+            url_sources: self.url_sources,
+            budget: self.budget,
+            last_seen: Some(predecessor.clone()),
+            ..Self::default()
+        };
+        Ok(())
     }
 
     /// Advances the read owner along one accounted native navigation. This
@@ -185,6 +267,10 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(receipt.operation().context());
         Ok(())
+    }
+
+    fn budget(&self) -> SemanticReadBudget {
+        self.budget.unwrap_or(SemanticReadBudget::EXTRACTION)
     }
 
     /// Safe primitive bytes retained, excluding bounded structural metadata.
@@ -223,8 +309,9 @@ impl SemanticRetainedReadEvidence {
                 .fragments()
                 .iter()
                 .any(|fragment| fragment.provenance().sensitivity() != SemanticSensitivity::Public)
-            || read.stats.items > SemanticReadBudget::STANDARD.max_items()
-            || read.stats.content_bytes > SemanticReadBudget::STANDARD.max_bytes()
+            || self.budget.is_some_and(|budget| budget != read.budget)
+            || read.stats.items > read.budget.max_items()
+            || read.stats.content_bytes > read.budget.max_bytes()
         {
             return Err(SemanticReadError::AuthorityMismatch);
         }
@@ -238,6 +325,7 @@ impl SemanticRetainedReadEvidence {
         }
         self.context = Some(read.context());
         self.roles = Some(read.source_roles());
+        self.budget = Some(read.budget);
         self.url_sources = Some(read.url_sources());
         if let Some(stats) = self.last_empty.take() {
             merge_omitted_stats(&mut self.dropped_stats, stats);
@@ -250,6 +338,7 @@ impl SemanticRetainedReadEvidence {
         }
         let mut frames: Vec<Arc<SemanticFrameJoin>> = Vec::new();
         let mut capture = Capture {
+            media: read.media.clone(),
             focused: read.focused,
             acknowledgement: acknowledgement.clone(),
             captured_at: read.captured_at(),
@@ -267,16 +356,20 @@ impl SemanticRetainedReadEvidence {
                         }
                     };
                     Fragment {
+                        record_root: fragment.record_root(),
                         fields_complete: source.fields_complete(),
                         node_key: source.node_key,
                         field: fragment.field(),
                         role: fragment.role(),
+                        states: fragment.states(),
                         content: Content::copy(fragment.content()),
                         frame,
                         invocation: source.invocation(),
                         snapshot: source.snapshot(),
                         reference: source.reference(),
                         trust: source.trust(),
+                        region: fragment.region,
+                        rank: fragment.rank,
                     }
                 })
                 .collect(),
@@ -306,12 +399,13 @@ impl SemanticRetainedReadEvidence {
         } else {
             self.captures.push(capture);
         }
+        let budget = self.budget();
         while self.captures.len() > MAX_CAPTURES
-            || self.retained_items() > SemanticReadBudget::STANDARD.max_items()
-            || self.retained_bytes() > SemanticReadBudget::STANDARD.max_bytes()
+            || self.retained_items() > budget.max_items()
+            || self.retained_bytes() > budget.max_bytes()
         {
-            let byte_pressure = self.retained_bytes() > SemanticReadBudget::STANDARD.max_bytes();
-            let item_pressure = self.retained_items() > SemanticReadBudget::STANDARD.max_items();
+            let byte_pressure = self.retained_bytes() > budget.max_bytes();
+            let item_pressure = self.retained_items() > budget.max_items();
             let index = if byte_pressure || item_pressure {
                 self.captures
                     .iter()
@@ -324,6 +418,31 @@ impl SemanticRetainedReadEvidence {
             } else {
                 0
             };
+            // A listing's whole look was evicted at once for a few short
+            // text searches, and the mapper got no records: under pressure
+            // the costliest look sheds its least useful fragment instead.
+            if (byte_pressure || item_pressure) && self.captures[index].fragments.len() > 1 {
+                let capture = &mut self.captures[index];
+                let shed = capture
+                    .fragments
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(at, fragment)| (fragment.region, fragment.rank, *at))
+                    .map(|(at, _)| at)
+                    .expect("nonempty capture");
+                let removed = capture.fragments.remove(shed);
+                capture.stats.items -= 1;
+                capture.stats.public_items -= 1;
+                capture.stats.content_bytes -= removed.content.borrow().retained_bytes();
+                self.dropped_stats.omitted_items =
+                    self.dropped_stats.omitted_items.saturating_add(1);
+                self.dropped_omissions |= if item_pressure {
+                    SemanticReadOmission::ItemLimit.bit()
+                } else {
+                    SemanticReadOmission::ByteLimit.bit()
+                };
+                continue;
+            }
             let removed = self.captures.remove(index);
             merge_omitted_stats(&mut self.dropped_stats, removed.stats);
             self.dropped_stats.omitted_items = self
@@ -347,6 +466,7 @@ impl SemanticRetainedReadEvidence {
         mut current: SemanticReadResult<'a>,
     ) -> Result<SemanticReadResult<'a>, SemanticReadError> {
         if current.has_retained_evidence()
+            || current.selected_target.is_some()
             || current.subtree.is_some()
             || self
                 .context
@@ -384,7 +504,8 @@ impl SemanticRetainedReadEvidence {
                     bytes + capture.stats.content_bytes,
                 )
             });
-        let budget = SemanticReadBudget::STANDARD;
+        let budget = self.budget.unwrap_or(current.budget);
+        current.budget = budget;
         let item_limit = budget.max_items() - history_items.min(budget.max_items() / 2);
         let byte_limit = budget.max_bytes() - history_bytes.min(budget.max_bytes() / 2);
         while current.stats.items > item_limit || current.stats.content_bytes > byte_limit {
@@ -400,9 +521,7 @@ impl SemanticRetainedReadEvidence {
                 .fragments
                 .iter()
                 .enumerate()
-                .max_by_key(|(index, fragment)| {
-                    (extraction_priority(fragment.field, fragment.role), *index)
-                })
+                .max_by_key(|(index, fragment)| (fragment.region, fragment.rank, *index))
                 .map(|(index, _)| index)
                 .expect("nonempty over-budget read");
             let removed = current.fragments.remove(index);
@@ -419,27 +538,37 @@ impl SemanticRetainedReadEvidence {
             fragment.id =
                 SemanticReadFragmentId::new(index as u16 + 1).expect("bounded nonzero fragment");
         }
+        // The current look wins over the same content seen earlier.
+        let current_len = current.fragments.len();
+        let mut current_taken = vec![false; current_len];
         for capture in self.captures.iter().rev() {
             if current.matches_acknowledgement(&capture.acknowledgement) {
                 continue;
             }
+            current.media.extend(capture.media.iter().cloned());
             current.historical.push(capture.acknowledgement.clone());
             current.omissions.0 |= capture.omissions.0;
             merge_omitted_stats(&mut current.stats, capture.stats);
             for source in &capture.fragments {
+                if take_match(
+                    &mut current_taken,
+                    &current.fragments[..current_len],
+                    |held| held.signature().same_source(source.signature()),
+                ) {
+                    continue;
+                }
                 let content = source.content.borrow();
                 let bytes = content.retained_bytes();
-                if current.stats.items >= SemanticReadBudget::STANDARD.max_items()
-                    || current.stats.content_bytes + bytes
-                        > SemanticReadBudget::STANDARD.max_bytes()
+                if current.stats.items >= budget.max_items()
+                    || current.stats.content_bytes + bytes > budget.max_bytes()
                 {
-                    current.omissions.insert(
-                        if current.stats.items >= SemanticReadBudget::STANDARD.max_items() {
+                    current
+                        .omissions
+                        .insert(if current.stats.items >= budget.max_items() {
                             SemanticReadOmission::ItemLimit
                         } else {
                             SemanticReadOmission::ByteLimit
-                        },
-                    );
+                        });
                     current.stats.omitted_items = current.stats.omitted_items.saturating_add(1);
                     continue;
                 }
@@ -450,8 +579,12 @@ impl SemanticRetainedReadEvidence {
                     id: SemanticReadFragmentId::new(current.stats.items)
                         .expect("bounded nonzero fragment"),
                     field: source.field,
+                    record_root: source.record_root,
                     role: source.role,
+                    states: source.states,
                     content,
+                    region: source.region,
+                    rank: source.rank,
                     provenance: SemanticReadProvenance {
                         fields_complete: source.fields_complete,
                         node_key: source.node_key,

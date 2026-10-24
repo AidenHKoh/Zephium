@@ -567,11 +567,13 @@ fn register_public_profile(
                 id: default_space,
                 profile: default,
                 name: "Public test default".into(),
+                look: Default::default(),
             },
             PersistedSpace {
                 id: SpaceId::generate(),
                 profile,
                 name: "Public Work test".into(),
+                look: Default::default(),
             },
         ],
         items: vec![],

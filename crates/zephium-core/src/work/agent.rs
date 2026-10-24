@@ -142,7 +142,10 @@ impl WorkAgentTurnDisclosure {
                 return Err(WorkError::Invalid);
             }
             validate_text(&preview.origin, 4096)?;
-            if matches!(preview.source, WorkEvidenceSourceV1::Command { .. }) {
+            if matches!(
+                preview.source,
+                WorkEvidenceSourceV1::Command { .. } | WorkEvidenceSourceV1::File { .. }
+            ) {
                 validate_local_text(&preview.text)?;
             } else {
                 validate_text(&preview.text, 8192)?;
@@ -217,6 +220,7 @@ impl WorkAgentTurnDisclosure {
                     WorkStepKindV1::Read { url, .. } => ("read", url.clone()),
                     WorkStepKindV1::Discover { query, .. } => ("discover", query.clone()),
                     WorkStepKindV1::Publish => ("publish", String::new()),
+                    WorkStepKindV1::EditBlock { resource, .. } => ("edit_block", resource.clone()),
                     WorkStepKindV1::Ask { prompt, answer, .. } => (
                         "ask",
                         match answer {
@@ -497,6 +501,7 @@ impl WorkAgentTurnDisclosure {
                         continue;
                     };
                     WorkStepKindV1::Read {
+                        verbatim: None,
                         url,
                         collection,
                         goal: None,
@@ -515,6 +520,7 @@ impl WorkAgentTurnDisclosure {
                         continue;
                     };
                     WorkStepKindV1::Read {
+                        verbatim: None,
                         url,
                         collection,
                         goal: Some(goal.trim().to_owned()),
@@ -582,6 +588,7 @@ impl WorkAgentTurnDisclosure {
                 },
             };
             let probe = WorkStepFact {
+                model_fault: None,
                 part: None,
                 id: WorkStepId::from(1),
                 turn: 1,
@@ -618,6 +625,7 @@ impl WorkAgentTurnDisclosure {
                 options.push(option);
             }
             let probe = WorkStepFact {
+                model_fault: None,
                 part: None,
                 id: WorkStepId::from(1),
                 turn: 1,
@@ -824,11 +832,15 @@ fn fit(context: &mut WorkAgentTurnContext) -> Result<(), WorkError> {
     Ok(())
 }
 
+/// Pages the objective names. A plain http address is listed at its
+/// https address: Work never loads http, and that is where its server
+/// would send the page.
 fn requested_pages(objective: &str) -> Vec<String> {
     let mut pages = Vec::new();
     let mut consumed = 0;
-    for (start, _) in objective.match_indices("https://") {
-        if start < consumed {
+    for (start, _) in objective.match_indices("http") {
+        let rest = &objective[start..];
+        if start < consumed || !(rest.starts_with("https://") || rest.starts_with("http://")) {
             continue;
         }
         let preceding = objective[..start].chars().next_back();
@@ -859,11 +871,15 @@ fn requested_pages(objective: &str) -> Vec<String> {
                 candidate = &candidate[..candidate.len() - 1];
             }
         }
+        let candidate = match candidate.strip_prefix("http://") {
+            Some(rest) => format!("https://{rest}"),
+            None => candidate.to_owned(),
+        };
         if candidate.starts_with("https://")
-            && super::runtime::validate_public_url(candidate).is_ok()
-            && !pages.iter().any(|page| page == candidate)
+            && super::runtime::validate_public_url(&candidate).is_ok()
+            && !pages.contains(&candidate)
         {
-            pages.push(candidate.to_owned());
+            pages.push(candidate);
             if pages.len() == 8 {
                 break;
             }
@@ -912,6 +928,11 @@ fn requested_page_punctuation_preserves_explicit_urls_and_query_bytes() {
         assert_eq!(requested_pages(objective), [expected], "{objective}");
     }
     assert!(requested_pages("nothttps://example.test/a").is_empty());
+    assert_eq!(
+        requested_pages("Read http://example.com/ and https://example.com/"),
+        ["https://example.com/"]
+    );
+    assert!(requested_pages("Read httpx://example.com/").is_empty());
     assert!(requested_pages("Read https://example.test/#a.b.").is_empty());
 }
 

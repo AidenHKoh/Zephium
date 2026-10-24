@@ -1,6 +1,6 @@
 const QUIET_MS = 250;
-/** A person at the canvas keeps its layer this long after their last move. */
-const HELD_MS = 12_000;
+/** A moving canvas keeps its layers this long after its last move, across a pause in a gesture. */
+const HELD_MS = 1000;
 
 /**
  * WebKit composites the canvas's transformed viewport while anything inside
@@ -10,10 +10,13 @@ const HELD_MS = 12_000;
  * layout change once the canvas is still lets WebKit take the layer back.
  * Where WebKit already does, the change costs one small layout and nothing more.
  *
- * A person at the canvas is the exception: while their pointer or a pan or
- * pinch is on it, the viewport is held as its own layer, so moving it is the
- * compositor sliding and scaling a picture, never a repaint of everything on
- * it. It is let go after a while of rest, or at once when the window hides.
+ * A moving canvas is the exception: while it pans, pinches or a card is
+ * dragged, the viewport and each card are held as layers (`data-held`,
+ * styled by the canvas), so motion is the compositor sliding and rescaling
+ * pictures rather than repainting tiles, rounded photos and all. Those layers
+ * cost hundreds of megabytes on a full canvas, so they are made only for real
+ * motion, never for a pointer resting on the canvas, and let go a moment
+ * after it stops, or at once when the window hides.
  */
 export function layerRelease(root: HTMLElement) {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -59,10 +62,13 @@ export function layerRelease(root: HTMLElement) {
     if (!holding) return;
     holding = false;
     const viewport = viewportOf();
-    if (viewport) viewport.style.willChange = "";
+    if (viewport) {
+      viewport.style.willChange = "";
+      delete viewport.dataset.held;
+    }
     moved();
   };
-  /** The person is at the canvas: its layer is held, and the hold is renewed. */
+  /** The canvas moves: its layers are held, and the hold is renewed. */
   const engage = () => {
     if (gone) return;
     if (!holding) {
@@ -70,6 +76,7 @@ export function layerRelease(root: HTMLElement) {
       if (!viewport) return;
       holding = true;
       viewport.style.willChange = "transform";
+      viewport.dataset.held = "";
     }
     clearTimeout(held);
     held = setTimeout(letGo, HELD_MS);
@@ -79,8 +86,12 @@ export function layerRelease(root: HTMLElement) {
   };
   const events = ["transitionend", "transitioncancel", "animationend", "animationcancel"];
   for (const name of events) root.addEventListener(name, moved, true);
-  const presence = ["pointermove", "wheel", "pointerdown"] as const;
-  for (const name of presence) root.addEventListener(name, engage, { passive: true });
+  // A wheel step arrives before the move it causes, so the layers exist for its first frame.
+  const dragging = (event: PointerEvent) => {
+    if (event.buttons) engage();
+  };
+  root.addEventListener("wheel", engage, { passive: true });
+  root.addEventListener("pointermove", dragging, { passive: true });
   document.addEventListener("visibilitychange", hidden);
   return {
     moved,
@@ -90,7 +101,8 @@ export function layerRelease(root: HTMLElement) {
       clearTimeout(timer);
       clearTimeout(held);
       for (const name of events) root.removeEventListener(name, moved, true);
-      for (const name of presence) root.removeEventListener(name, engage);
+      root.removeEventListener("wheel", engage);
+      root.removeEventListener("pointermove", dragging);
       document.removeEventListener("visibilitychange", hidden);
     },
   };

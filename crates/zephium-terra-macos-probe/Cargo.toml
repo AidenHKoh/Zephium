@@ -31,8 +31,10 @@ path = "src/windows_main.rs"
 required-features = ["durable-runtime"]
 
 [dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 zephium-agent-model-catalog = { workspace = true, optional = true }
 serde_json.workspace = true
+sha2 = "=0.10.9"
 zephium-ipc.workspace = true
 zephium-agent-controller.workspace = true
 zephium-agent-provider-transport.workspace = true
@@ -47,12 +49,11 @@ zephium-work-composition.workspace = true
 zephium-blocker.workspace = true
 zephium-blocker-service.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "process", "io-util"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-blocker = { workspace = true, features = ["webkit"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-image = { version = "=0.25.10", default-features = false, features = ["png"] }
 zephium-blocker = { workspace = true, features = ["runtime"] }
 zephium-private-fs = { workspace = true, optional = true, features = ["windows-work-test-fixtures"] }

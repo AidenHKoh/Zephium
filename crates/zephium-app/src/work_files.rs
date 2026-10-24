@@ -1,10 +1,24 @@
 //! Bounded file steps inside folders the person granted for one run.
-//! Every path resolves through a granted root; nothing outside is touched,
-//! and what the agent sees is capped to a short excerpt, listing or diff.
+//! Paths resolve through granted roots and protected names are excluded.
+//! Read handles refuse symlinks and hard links. Approved writes and edits are
+//! atomic. The separate qualified text Trash path keeps durable recovery; generic
+//! moves and deletes remain unavailable.
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
-use zephium_core::work::{runtime::*, WorkArtifactId};
+use zephium_core::work::runtime::*;
+#[cfg(not(unix))]
+use zephium_core::work::WorkArtifactId;
+
+pub(crate) mod git_metadata;
+pub mod trash;
+
+#[cfg(unix)]
+mod unix_write;
+#[cfg(windows)]
+mod windows_marker;
+#[cfg(unix)]
+use unix_write::write_atomic;
 
 const MAX_READ_BYTES: u64 = 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 200;
@@ -31,22 +45,26 @@ pub enum WorkFileError {
     NotAFile,
     TooLarge,
     Binary,
+    Sensitive,
     Ambiguous,
     Io,
     Changed,
     Exists,
     Pattern,
+    Unavailable,
 }
 impl WorkFileError {
     /// Closed wording for the step note and the agent.
     pub fn note(self) -> &'static str {
         match self {
-            Self::Denied => "Outside the granted folders",
+            Self::Denied => "The path is not available to Work",
+            Self::Unavailable => "File changes are unavailable until confined writes and recoverable deletion are supported",
             Self::NotFound => "No such file or folder",
             Self::NotADirectory => "Not a folder",
             Self::NotAFile => "Not a file",
             Self::TooLarge => "Larger than the read limit",
             Self::Binary => "Not a text file",
+            Self::Sensitive => "Recognizable credential content is not available to Work",
             Self::Ambiguous => "The passage to replace is missing or not unique",
             Self::Changed => "The file changed since it was read",
             Self::Exists => "The destination already exists",
@@ -98,6 +116,9 @@ impl WorkFileGrant {
     pub(crate) fn resolve(&self, path: &str, may_create: bool) -> Result<PathBuf, WorkFileError> {
         validate_file_path(path).map_err(|_| WorkFileError::Denied)?;
         let candidate = Path::new(path);
+        if protected_path(candidate) {
+            return Err(WorkFileError::Denied);
+        }
         if !candidate.is_absolute()
             || candidate
                 .components()
@@ -126,7 +147,9 @@ impl WorkFileGrant {
             }
             Err(_) => return Err(WorkFileError::NotFound),
         };
-        if self.roots.iter().any(|root| resolved.starts_with(root)) {
+        if !protected_path(&resolved)
+            && self.roots.iter().any(|root| path_contains(root, &resolved))
+        {
             Ok(resolved)
         } else {
             Err(WorkFileError::Denied)
@@ -148,7 +171,8 @@ impl WorkFileGrant {
         let mut cut = false;
         while let Some((dir, level)) = pending.pop() {
             let _directories = pin_directories(&dir)?;
-            let entries = std::fs::read_dir(&dir).map_err(|_| WorkFileError::Io)?;
+            let entries = read_directory(&dir)?;
+            cut |= entries.truncated;
             let mut entries: Vec<_> = entries
                 .take(MAX_LIST_ENTRIES + 1)
                 .filter_map(Result::ok)
@@ -159,7 +183,7 @@ impl WorkFileGrant {
             entries.sort_by_key(|e| e.file_name());
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if SKIPPED_DIRS.contains(&name.as_str()) {
+                if protected_path(&entry.path()) || SKIPPED_DIRS.contains(&name.as_str()) {
                     continue;
                 }
                 let Ok(meta) = entry.file_type() else {
@@ -307,17 +331,23 @@ impl WorkFileGrant {
         let mut cut = false;
         'walk: while let Some(dir) = pending.pop() {
             let Ok(_directories) = pin_directories(&dir) else {
+                cut = true;
                 continue;
             };
-            let Ok(entries) = std::fs::read_dir(&dir) else {
+            let Ok(entries) = read_directory(&dir) else {
+                cut = true;
                 continue;
             };
+            cut |= entries.truncated;
             for entry in entries.filter_map(Result::ok) {
                 if visited >= MAX_SEARCH_FILES || started.elapsed() >= SEARCH_BUDGET {
                     cut = true;
                     break 'walk;
                 }
                 visited += 1;
+                if protected_path(&entry.path()) {
+                    continue;
+                }
                 let Ok(meta) = entry.file_type() else {
                     continue;
                 };
@@ -389,6 +419,12 @@ impl WorkFileGrant {
         kind: &WorkStepKindV1,
         known: Option<&str>,
     ) -> Result<PreparedChange, WorkFileError> {
+        if matches!(
+            kind,
+            WorkStepKindV1::DeleteFile { .. } | WorkStepKindV1::MoveFile { .. }
+        ) {
+            ensure_removals_available()?;
+        }
         let (path, create) = match kind {
             WorkStepKindV1::WriteFile { path, .. } => (path, true),
             WorkStepKindV1::EditFile { path, .. } | WorkStepKindV1::DeleteFile { path, .. } => {
@@ -411,6 +447,9 @@ impl WorkFileGrant {
         let mut next = None;
         let proposal = match kind {
             WorkStepKindV1::WriteFile { content, .. } => {
+                if zephium_agentic::contains_recognized_secret(content) {
+                    return Err(WorkFileError::Sensitive);
+                }
                 if binary_looking(content) {
                     return Err(WorkFileError::Binary);
                 }
@@ -466,6 +505,9 @@ impl WorkFileGrant {
                 if binary_looking(&edited) {
                     return Err(WorkFileError::Binary);
                 }
+                if zephium_agentic::contains_recognized_secret(&edited) {
+                    return Err(WorkFileError::Sensitive);
+                }
                 let proposal = replacement_diff(text, &edited, &spans);
                 next = Some(edited);
                 proposal
@@ -493,6 +535,9 @@ impl WorkFileGrant {
         })
     }
     pub fn apply(&self, change: PreparedChange) -> Result<WorkFileEvidenceV1, WorkFileError> {
+        if change.next.is_none() {
+            ensure_removals_available()?;
+        }
         let file = self.resolve(&change.original, change.before.is_none())?;
         if file != change.file {
             return Err(WorkFileError::Changed);
@@ -508,8 +553,15 @@ impl WorkFileGrant {
         }
         let (path, kind, after, bytes) = if let Some(next) = change.next {
             write_atomic(&file, next.as_bytes(), change.before.as_deref())?;
-            let (bytes, digest, _) = read_text(&file)?;
-            (file, WorkFileKindV1::Written, Some(digest), bytes)
+            // Publication attests the bytes from our owned output handle. A
+            // later pathname read could observe a different, concurrently edited file.
+            let digest = format!("{:x}", Sha256::digest(next.as_bytes()));
+            (
+                file,
+                WorkFileKindV1::Written,
+                Some(digest),
+                next.len() as u32,
+            )
         } else if let Some(to) = change.destination {
             let _destination_directories =
                 pin_mutation_directory(to.parent().ok_or(WorkFileError::Denied)?)?;
@@ -597,13 +649,302 @@ impl WorkFileGrant {
     }
 }
 
+/// A capability gate, independent of approval: a file written or edited in a
+/// granted folder is the person's to approve, diff by diff; deleting or moving
+/// one waits until it goes to the Trash instead of away for good.
+pub(crate) fn ensure_removals_available() -> Result<(), WorkFileError> {
+    Err(WorkFileError::Unavailable)
+}
+
+/// Deliberately conservative name policy, applied before probing and again to
+/// resolved paths. This does not claim to detect credentials in arbitrary text.
+pub(crate) fn protected_path(path: &Path) -> bool {
+    path.components().any(|part| {
+        let Component::Normal(name) = part else {
+            return false;
+        };
+        let Some(name) = name.to_str() else {
+            return true;
+        };
+        if zephium_agentic::contains_recognized_secret(name.trim_start_matches('.')) {
+            return true;
+        }
+        // Case-insensitive filesystems also equate characters whose uppercase
+        // expands to ASCII (for example long-s ſ with s). Lowercase alone misses
+        // these aliases, and macOS realpath preserves the caller's spelling.
+        let folded = name.to_uppercase();
+        if zephium_agentic::contains_recognized_secret(folded.trim_start_matches('.')) {
+            return true;
+        }
+        let name = folded.to_lowercase();
+        name.starts_with(".env")
+            || matches!(name.as_str(),
+                ".zephium-work-recovery" | ".ssh" | ".gnupg" | ".aws" | ".azure" | ".kube" | ".config"
+                | ".git" | ".gitconfig" | ".git-credentials" | ".npmrc" | ".netrc" | "_netrc" | ".pypirc"
+                | ".docker" | ".codex" | ".claude" | ".gem" | ".bundle"
+                | "credentials" | "credentials.json" | "credentials.toml"
+                | "secrets" | "secrets.json" | "secrets.yaml" | "secrets.yml"
+                | "auth.json" | "tokens.json" | "keychains" | "appdata"
+                | "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
+                | "cookies" | "login data" | "web data" | "key4.db" | "logins.json")
+            || name.starts_with("app.zephium")
+            || [".pem", ".key", ".p12", ".pfx", ".kdbx", ".keychain", ".keychain-db"]
+                .iter().any(|extension| name.ends_with(extension))
+            // Win32 strips trailing dots/spaces and recognizes alternate streams.
+            // Refuse these spellings on every host so copied plans remain safe.
+            || name.ends_with(['.', ' ']) || name.contains(':')
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn open_unix(path: &Path, directory: bool) -> Result<std::fs::File, WorkFileError> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::ffi::OsStrExt,
+    };
+    if !path.is_absolute() {
+        return Err(WorkFileError::Denied);
+    }
+    let mut parent = std::fs::File::open("/").map_err(|_| WorkFileError::Io)?;
+    let parts: Vec<_> = path
+        .components()
+        .filter(|c| *c != Component::RootDir)
+        .collect();
+    if parts.len() > 128 {
+        return Err(WorkFileError::Denied);
+    }
+    for (index, part) in parts.iter().enumerate() {
+        let Component::Normal(name) = part else {
+            return Err(WorkFileError::Denied);
+        };
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| WorkFileError::Denied)?;
+        let is_directory = index + 1 < parts.len() || directory;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | if is_directory { libc::O_DIRECTORY } else { 0 };
+        // Each child is opened relative to its held parent. No symlink in an
+        // intermediate or final component can redirect the read after checking.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(match std::io::Error::last_os_error().kind() {
+                std::io::ErrorKind::NotFound => WorkFileError::NotFound,
+                _ => WorkFileError::Denied,
+            });
+        }
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(parent)
+}
+
+pub(crate) fn single_link(file: &std::fs::File) -> Result<bool, WorkFileError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(file.metadata().map_err(|_| WorkFileError::Io)?.nlink() == 1)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(|_| WorkFileError::Denied)?;
+        Ok(info.nNumberOfLinks == 1)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(WorkFileError::Denied)
+    }
+}
+
+pub(crate) struct DirectoryEntries {
+    entries: std::vec::IntoIter<std::io::Result<DirectoryEntry>>,
+    pub(crate) truncated: bool,
+}
+impl Iterator for DirectoryEntries {
+    type Item = std::io::Result<DirectoryEntry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next()
+    }
+}
+
+pub(crate) struct DirectoryEntry {
+    path: PathBuf,
+    metadata: std::fs::Metadata,
+}
+impl DirectoryEntry {
+    pub(crate) fn path(&self) -> PathBuf {
+        self.path.clone()
+    }
+    pub(crate) fn file_name(&self) -> std::ffi::OsString {
+        self.path.file_name().unwrap().to_owned()
+    }
+    pub(crate) fn file_type(&self) -> std::io::Result<std::fs::FileType> {
+        Ok(self.metadata.file_type())
+    }
+    pub(crate) fn metadata(&self) -> std::io::Result<std::fs::Metadata> {
+        Ok(self.metadata.clone())
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn read_directory(path: &Path) -> Result<DirectoryEntries, WorkFileError> {
+    let _directories = pin_directories(path)?;
+    let entries = std::fs::read_dir(path).map_err(|_| WorkFileError::Io)?;
+    let mut result = Vec::new();
+    let mut visited = 0;
+    for entry in entries.take(MAX_SEARCH_FILES + 1).filter_map(Result::ok) {
+        visited += 1;
+        let path = entry.path();
+        if protected_path(&path) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| WorkFileError::Io)?;
+        let mut entry = DirectoryEntry { path, metadata };
+        let kind = entry.metadata.file_type();
+        if entry_is_link(&entry, &kind) {
+            continue;
+        }
+        if kind.is_file() {
+            let Ok(checked) = open_checked_file(&entry.path, false) else {
+                continue;
+            };
+            entry.metadata = checked.metadata;
+        }
+        if kind.is_file() || kind.is_dir() {
+            result.push(Ok(entry));
+        }
+    }
+    Ok(DirectoryEntries {
+        entries: result.into_iter(),
+        truncated: visited > MAX_SEARCH_FILES,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn read_directory(path: &Path) -> Result<DirectoryEntries, WorkFileError> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd, IntoRawFd},
+        unix::ffi::OsStrExt,
+    };
+    let directory = open_unix(path, true)?;
+    let fd = directory.as_raw_fd();
+    // fdopendir owns its descriptor; retain `directory` for relative child opens.
+    let copy = directory
+        .try_clone()
+        .map_err(|_| WorkFileError::Io)?
+        .into_raw_fd();
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        unsafe {
+            libc::close(copy);
+        }
+        return Err(WorkFileError::Io);
+    }
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let stream = Stream(stream);
+    let mut entries = Vec::new();
+    let mut visited = 0;
+    while visited <= MAX_SEARCH_FILES {
+        visited += 1;
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let child_path = path.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        if protected_path(&child_path) {
+            continue;
+        }
+        let child = unsafe {
+            libc::openat(
+                fd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if child < 0 {
+            continue;
+        }
+        let child = unsafe { std::fs::File::from_raw_fd(child) };
+        let Ok(metadata) = child.metadata() else {
+            continue;
+        };
+        if !metadata.is_dir() && (!metadata.is_file() || !single_link(&child)?) {
+            continue;
+        }
+        entries.push(Ok(DirectoryEntry {
+            path: child_path,
+            metadata,
+        }));
+    }
+    Ok(DirectoryEntries {
+        entries: entries.into_iter(),
+        truncated: visited > MAX_SEARCH_FILES,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GRANT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Current-thread fixture home; never mutates HOME or changes production policy.
+#[cfg(test)]
+pub(crate) struct TestGrantHome {
+    previous: Option<PathBuf>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl TestGrantHome {
+    pub(crate) fn new(home: PathBuf) -> Self {
+        let previous = TEST_GRANT_HOME.with(|slot| slot.replace(Some(home)));
+        Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for TestGrantHome {
+    fn drop(&mut self) {
+        TEST_GRANT_HOME.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
 #[cfg(not(windows))]
 fn grant_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(home);
+    }
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[cfg(windows)]
 fn grant_home() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
+        return Some(home);
+    }
     #[cfg(test)]
     if let Some(home) = std::env::var_os("HOME") {
         return Some(home.into());
@@ -691,16 +1032,16 @@ fn admit_root(
     protected: &[PathBuf],
 ) -> Option<PathBuf> {
     validate_file_path(folder).ok()?;
-    if !Path::new(folder).is_absolute() {
+    if !Path::new(folder).is_absolute() || protected_path(Path::new(folder)) {
         return None;
     }
     let root = std::fs::canonicalize(folder).ok()?;
-    if !root.is_dir() {
+    if !root.is_dir() || protected_path(&root) {
         return None;
     }
     let home = home?;
     if same_path(&root, home)
-        || !permitted.iter().any(|folder| root.starts_with(folder))
+        || !permitted.iter().any(|folder| path_contains(folder, &root))
         // A parent such as ~/Library would expose the protected folder
         // beneath it as surely as granting that folder itself.
         || protected
@@ -756,7 +1097,7 @@ fn windows_path_part_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool
     unsafe { CompareStringOrdinal(&left, &right, true) == CSTR_EQUAL }
 }
 
-fn entry_is_link(entry: &std::fs::DirEntry, kind: &std::fs::FileType) -> bool {
+fn entry_is_link(entry: &DirectoryEntry, kind: &std::fs::FileType) -> bool {
     if kind.is_symlink() {
         return true;
     }
@@ -788,13 +1129,18 @@ fn entry_is_link(entry: &std::fs::DirEntry, kind: &std::fs::FileType) -> bool {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+    Ok(vec![open_unix(path, true)?])
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pin_directories(_path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
-    Ok(Vec::new())
+    Err(WorkFileError::Denied)
 }
 
 #[cfg(windows)]
-fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
+pub(crate) fn pin_directories(path: &Path) -> Result<Vec<std::fs::File>, WorkFileError> {
     pin_directories_with_write(path, false)
 }
 
@@ -842,7 +1188,8 @@ fn pin_mutation_directory(path: &Path) -> Result<Vec<std::fs::File>, WorkFileErr
     #[cfg(windows)]
     {
         let mut pinned = pin_directories_with_write(path, true)?;
-        pinned.push(mutation_marker(path)?);
+        let parent = pinned.last().ok_or(WorkFileError::Denied)?;
+        pinned.push(mutation_marker(parent, path)?);
         Ok(pinned)
     }
     #[cfg(not(windows))]
@@ -850,22 +1197,16 @@ fn pin_mutation_directory(path: &Path) -> Result<Vec<std::fs::File>, WorkFileErr
 }
 
 #[cfg(windows)]
-fn mutation_marker(path: &Path) -> Result<std::fs::File, WorkFileError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows::Win32::Storage::FileSystem::{
-        FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
-    };
+fn mutation_marker(parent: &std::fs::File, path: &Path) -> Result<std::fs::File, WorkFileError> {
     // A held child keeps the parent nonempty, so its reparse tag cannot change.
-    let marker = path.join(format!(".zephium-pin-{}", WorkArtifactId::generate()));
-    let marker_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .custom_flags((FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT).0)
-        .open(&marker)
-        .map_err(|_| WorkFileError::Denied)?;
-    if !opened_at(&marker_file, &marker) {
+    // Create relative to the held parent: an in-place junction raced before the
+    // marker must never cause even a temporary write through its target path.
+    if !safe_reparse(parent) || !opened_at(parent, path) {
+        return Err(WorkFileError::Denied);
+    }
+    let name = format!(".zephium-pin-{}", WorkArtifactId::generate());
+    let marker_file = windows_marker::create(parent, &name)?;
+    if !safe_reparse(parent) || !opened_at(&marker_file, &path.join(name)) {
         return Err(WorkFileError::Denied);
     }
     Ok(marker_file)
@@ -924,70 +1265,136 @@ fn file_name(path: &Path) -> String {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "/".into())
 }
-/// Bytes, digest and, for UTF-8 text without NUL, the content.
-fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError> {
-    let _directories = pin_directories(file.parent().ok_or(WorkFileError::Denied)?)?;
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
+/// A checked handle and the guards which keep its namespace stable while used.
+/// Metadata inspection never needs to open/read the payload on Windows.
+struct CheckedFile {
+    input: std::fs::File,
+    metadata: std::fs::Metadata,
+    _guards: Vec<std::fs::File>,
+}
+
+fn open_checked_file(file: &Path, payload: bool) -> Result<CheckedFile, WorkFileError> {
+    if protected_path(file) {
+        return Err(WorkFileError::Denied);
+    }
+    let guards = pin_directories(file.parent().ok_or(WorkFileError::Denied)?)?;
     #[cfg(windows)]
-    let _original = {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows::Win32::Storage::FileSystem::{
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        };
-        options.share_mode(FILE_SHARE_READ.0);
-        let original = std::fs::OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES.0)
-            .share_mode(FILE_SHARE_READ.0)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(file)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    WorkFileError::NotFound
-                } else {
-                    WorkFileError::Io
-                }
-            })?;
-        if !safe_reparse(&original) {
-            return Err(WorkFileError::Denied);
-        }
-        original
-    };
-    let input = options.open(file).map_err(|error| {
+    let mut guards = guards;
+    let open_error = |error: std::io::Error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             WorkFileError::NotFound
         } else {
             WorkFileError::Io
         }
-    })?;
+    };
+    #[cfg(windows)]
+    let input = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        };
+        let original = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .share_mode(FILE_SHARE_READ.0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(file)
+            .map_err(open_error)?;
+        if !safe_reparse(&original) || !opened_at(&original, file) {
+            return Err(WorkFileError::Denied);
+        }
+        if payload {
+            let input = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ.0)
+                .open(file)
+                .map_err(open_error)?;
+            guards.push(original);
+            input
+        } else {
+            original
+        }
+    };
+    #[cfg(unix)]
+    let input = {
+        let _ = (payload, open_error);
+        open_unix(file, false)?
+    };
+    #[cfg(not(any(unix, windows)))]
+    let input = {
+        let _ = payload;
+        std::fs::File::open(file).map_err(open_error)?
+    };
     #[cfg(windows)]
     if !opened_at(&input, file) {
         return Err(WorkFileError::Denied);
     }
-    let meta = input.metadata().map_err(|_| WorkFileError::Io)?;
-    if !meta.is_file() {
+    let metadata = input.metadata().map_err(|_| WorkFileError::Io)?;
+    if !metadata.is_file() {
         return Err(WorkFileError::NotAFile);
     }
-    if meta.len() > MAX_READ_BYTES {
+    if !single_link(&input)? {
+        return Err(WorkFileError::Denied);
+    }
+    Ok(CheckedFile {
+        input,
+        metadata,
+        _guards: guards,
+    })
+}
+
+/// Bytes, digest and, for UTF-8 text without NUL, the content.
+pub(crate) fn read_text(file: &Path) -> Result<(u32, String, Option<String>), WorkFileError> {
+    read_text_limited(file, MAX_READ_BYTES)
+}
+
+pub(crate) fn file_available(file: &Path) -> bool {
+    open_checked_file(file, false).is_ok()
+}
+
+pub(crate) fn directory_available(path: &Path) -> bool {
+    !protected_path(path) && pin_directories(path).is_ok()
+}
+
+/// Bounded payload for a private runner snapshot, under the shared path policy.
+pub(crate) fn snapshot_bytes(file: &Path, limit: u64) -> Result<Vec<u8>, WorkFileError> {
+    if limit == 0 || limit > MAX_READ_BYTES {
+        return Err(WorkFileError::Denied);
+    }
+    let mut checked = open_checked_file(file, true)?;
+    if checked.metadata.len() > limit {
         return Err(WorkFileError::TooLarge);
     }
     use std::io::Read;
     let mut bytes = Vec::new();
-    input
-        .take(MAX_READ_BYTES + 1)
+    checked
+        .input
+        .by_ref()
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| WorkFileError::Io)?;
-    if bytes.len() as u64 > MAX_READ_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(WorkFileError::TooLarge);
     }
+    Ok(bytes)
+}
+
+pub(crate) fn read_text_limited(
+    file: &Path,
+    limit: u64,
+) -> Result<(u32, String, Option<String>), WorkFileError> {
+    let bytes = snapshot_bytes(file, limit)?;
     let byte_count = bytes.len() as u32;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let text = match String::from_utf8(bytes) {
+        Ok(text) if zephium_agentic::contains_recognized_secret(&text) => {
+            return Err(WorkFileError::Sensitive);
+        }
         Ok(text) if !text.contains('\0') => Some(text),
         _ => None,
     };
     Ok((byte_count, digest, text))
 }
+#[cfg(not(unix))]
 fn write_atomic(file: &Path, bytes: &[u8], expected: Option<&str>) -> Result<(), WorkFileError> {
     use std::io::Write;
     let parent = file.parent().ok_or(WorkFileError::Denied)?;
@@ -1297,6 +1704,221 @@ mod tests {
     }
 
     #[test]
+    fn recognized_secret_content_is_refused_before_excerpt_or_edit() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let path = project.join("ordinary.txt");
+        for secret in [
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+            "ghp_inertFixtureToken",
+        ] {
+            std::fs::write(
+                &path,
+                format!("ordinary first line\n{}\n{secret}", "filler\n".repeat(500)),
+            )
+            .unwrap();
+            let error = grant.read_at(&path.to_string_lossy(), 1, 1).unwrap_err();
+            assert_eq!(error, WorkFileError::Sensitive);
+            assert!(!error.note().contains(secret));
+        }
+        std::fs::write(&path, "ordinary first line\n").unwrap();
+        let kind = WorkStepKindV1::WriteFile {
+            path: path.to_string_lossy().into_owned(),
+            content: "ghp_inertFixtureToken".into(),
+            decision: None,
+        };
+        assert!(matches!(
+            grant.prepare(&kind, None),
+            Err(WorkFileError::Sensitive)
+        ));
+        for name in [
+            "ghp_inertFixtureToken.txt",
+            ".ghp_inertFixtureToken",
+            "ſk-inertFixtureToken.txt",
+        ] {
+            std::fs::write(project.join(name), "ordinary").unwrap();
+            assert!(protected_path(&project.join(name)));
+        }
+        let listed = grant.list(&project.to_string_lossy()).unwrap();
+        assert!(!listed.text.contains("ghp_"));
+    }
+
+    #[test]
+    fn listing_checks_metadata_without_applying_payload_size_limit() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let large = project.join("large.txt");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_READ_BYTES + 1)
+            .unwrap();
+        let listed = grant.list(&project.to_string_lossy()).unwrap();
+        assert!(listed
+            .text
+            .contains(&format!("large.txt\t{}", MAX_READ_BYTES + 1)));
+        assert!(!listed.truncated);
+        assert_eq!(
+            grant.read(&large.to_string_lossy()).unwrap_err(),
+            WorkFileError::TooLarge
+        );
+        let canonical = large.canonicalize().unwrap();
+        assert_eq!(
+            open_checked_file(&canonical, false).unwrap().metadata.len(),
+            MAX_READ_BYTES + 1
+        );
+    }
+
+    #[test]
+    fn protected_names_links_and_mutation_gate_are_enforced() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_home, grant, project) = home_grant();
+        let marker = "fixture-secret-never-return";
+        for name in [
+            ".env",
+            ".env.local",
+            ".ENV.PRODUCTION",
+            "credentials.json",
+            "private.pem",
+        ] {
+            std::fs::write(project.join(name), marker).unwrap();
+            assert_eq!(
+                grant
+                    .read(&project.join(name).to_string_lossy())
+                    .unwrap_err(),
+                WorkFileError::Denied
+            );
+        }
+        let secret = project.join(".env");
+        let alias = project.join("innocent.txt");
+        std::fs::hard_link(&secret, &alias).unwrap();
+        assert_eq!(
+            grant.read(&alias.to_string_lossy()).unwrap_err(),
+            WorkFileError::Denied
+        );
+        let listing = grant.list_at(&project.to_string_lossy(), 3).unwrap();
+        assert!(
+            !listing.text.contains(".env")
+                && !listing.text.contains("credentials")
+                && !listing.text.contains("innocent")
+        );
+        assert_eq!(
+            grant
+                .search(&project.to_string_lossy(), marker)
+                .unwrap()
+                .bytes,
+            0
+        );
+        let path = project.join("README.md").to_string_lossy().into_owned();
+        // Writes and edits are the person's to approve; moving and deleting wait for the Trash.
+        for step in [
+            WorkStepKindV1::MoveFile {
+                from: path.clone(),
+                to: project.join("moved").to_string_lossy().into_owned(),
+                decision: None,
+            },
+            WorkStepKindV1::DeleteFile {
+                path: path.clone(),
+                decision: None,
+            },
+        ] {
+            assert!(matches!(
+                grant.prepare(&step, None),
+                Err(WorkFileError::Unavailable)
+            ));
+        }
+        // An already prepared/approved operation is gated again at apply.
+        let pending = PreparedChange {
+            original: path.clone(),
+            file: PathBuf::from(&path),
+            destination: None,
+            before: Some(grant.read(&path).unwrap().digest),
+            next: None,
+            proposal: "Delete".into(),
+            truncated: false,
+        };
+        assert!(matches!(
+            grant.apply(pending),
+            Err(WorkFileError::Unavailable)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "# Project\nhello world\n"
+        );
+        for name in [
+            ".env:stream",
+            ".env.",
+            ".env ",
+            ".SSH",
+            "AppData",
+            "token.PFX",
+            ".ſſh",
+            "ſecrets",
+            "credentialſ.json",
+            "id_rſa",
+            ".ßh",
+            ".confıg",
+        ] {
+            assert!(protected_path(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn unicode_case_aliases_never_open_protected_files() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        for (original, alias) in [
+            ("secrets", "ſecrets"),
+            ("credentials.json", "credentialſ.json"),
+            ("id_rsa", "id_rſa"),
+        ] {
+            std::fs::write(root.join(original), "inert protected fixture").unwrap();
+            // APFS resolves each alias to the existing protected file; on a
+            // case-sensitive volume the same policy still refuses the spelling.
+            assert_eq!(read_text(&root.join(alias)), Err(WorkFileError::Denied));
+            assert!(!file_available(&root.join(alias)));
+        }
+        std::fs::create_dir(root.join(".ssh")).unwrap();
+        std::fs::write(root.join(".ssh/note"), "inert protected fixture").unwrap();
+        assert!(!directory_available(&root.join(".ſſh")));
+        assert_eq!(
+            read_text(&root.join(".ſſh/note")),
+            Err(WorkFileError::Denied)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_reader_refuses_swapped_parent_final_links_and_fifos() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().canonicalize().unwrap();
+        let dir = root.join("granted");
+        let outside = root.join("outside");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("notes.txt"), "fixture-private").unwrap();
+        let held = pin_directories(&dir).unwrap();
+        std::fs::rename(&dir, root.join("old")).unwrap();
+        symlink(&outside, &dir).unwrap();
+        assert!(read_text(&dir.join("notes.txt")).is_err());
+        assert!(read_directory(&dir).is_err());
+        drop(held);
+        let final_link = root.join("notes.txt");
+        symlink(outside.join("notes.txt"), &final_link).unwrap();
+        assert!(read_text(&final_link).is_err());
+        let pipe = root.join("pipe");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(read_text(&pipe).unwrap_err(), WorkFileError::NotAFile);
+    }
+
+    #[test]
     fn steps_stay_inside_granted_folders_and_bounds() {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
@@ -1535,7 +2157,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn approved_mutation_guard_blocks_in_place_junctions_and_cleans_redirected_creation() {
+    fn approved_mutation_guard_refuses_in_place_junctions_before_marker_creation() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("files");
         let outside = root.path().join("outside");
@@ -1553,7 +2175,7 @@ mod tests {
         let pins = pin_directories_with_write(&folder, true).unwrap();
         set_junction(&folder, &outside).unwrap();
         assert!(matches!(
-            mutation_marker(&folder),
+            mutation_marker(pins.last().unwrap(), &folder),
             Err(WorkFileError::Denied)
         ));
         assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
@@ -1720,6 +2342,7 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "Native confined mutation and Trash gate is closed; retained for writer qualification"]
     fn work_moves_and_deletes_are_reviewed_and_exclusive() {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()

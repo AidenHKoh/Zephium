@@ -162,6 +162,12 @@ pub struct WorkSubject {
     /// copy with provenance before anything renders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_candidates: Vec<String>,
+    /// Host-only immutable native record image; never supplied by model tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_media: Option<super::media::WorkRecordMediaRefV1>,
+    /// Host withheld remote fallback for privacy/account authority; not an enrichment failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub media_attempted: bool,
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
@@ -365,6 +371,9 @@ pub enum WorkArtifactDataV1 {
         total: Option<WorkLabelledV1>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         checkable: bool,
+        /// Drawn as a calendar of its days whatever it holds.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        calendar: bool,
     },
     /// Items without time order.
     List {
@@ -444,6 +453,29 @@ pub enum WorkArtifactDataV1 {
         duration: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_secs: Option<u32>,
+    },
+    /// The one thing a request is about, in the shape of its service: a pull
+    /// request, an issue, a thread, an email, a ticket, a page.
+    Subject {
+        /// The service's own word for it: Pull request, Issue, Thread.
+        noun: String,
+        /// Its handle there: crynta/terax#1337, UBER-5671.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<WorkSubjectStateV1>,
+        /// Roles and names: Author, Assignee, From.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        people: Vec<WorkLabelledV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        facts: Vec<WorkLabelledV1>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+        /// Inline bold and code only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        url: String,
     },
 }
 
@@ -579,6 +611,7 @@ fn validate_subjects(
     budget: &mut TextBudget,
     subjects: &[WorkSubject],
     required: bool,
+    unique_names: bool,
 ) -> Result<(), WorkError> {
     if required {
         bounded(subjects.len(), MAX_ARTIFACT_SUBJECTS)?;
@@ -589,7 +622,7 @@ fn validate_subjects(
     for subject in subjects {
         validate_text(&subject.name, 256)?;
         budget.text(&subject.name)?;
-        if subject.name.trim().is_empty() || !names.insert(subject.name.trim()) {
+        if subject.name.trim().is_empty() || (unique_names && !names.insert(subject.name.trim())) {
             return Err(WorkError::Invalid);
         }
         if let Some(descriptor) = &subject.descriptor {
@@ -599,6 +632,9 @@ fn validate_subjects(
         if let Some(homepage) = &subject.homepage {
             budget.text(homepage)?;
             super::runtime::validate_public_reference_url(homepage)?;
+        }
+        if let Some(media) = &subject.record_media {
+            media.validate()?;
         }
         if subject.image_candidates.len() > 3 {
             return Err(WorkError::Invalid);
@@ -737,6 +773,7 @@ pub enum WorkArtifactField {
     PickWhen,
     PlanSteps,
     PlanStepWhen,
+    PlanStepDate,
     PlanStepTitle,
     PlanStepDetail,
     PlanStepCost,
@@ -748,6 +785,7 @@ pub enum WorkArtifactField {
     ListItemDetail,
     ListItemDue,
     ListItemFrom,
+    ListItemMedia,
     SheetColumns,
     SheetColumn,
     SheetRows,
@@ -786,6 +824,15 @@ pub enum WorkArtifactField {
     ProjectTree,
     ProjectScripts,
     ProjectGit,
+    SubjectNoun,
+    SubjectReference,
+    SubjectTitle,
+    SubjectState,
+    SubjectPeople,
+    SubjectFacts,
+    SubjectLabels,
+    SubjectSummary,
+    SubjectUrl,
     ItemSource,
     /// A kind kept so saved works open; the lead makes the current kinds.
     LegacyKind,
@@ -799,7 +846,7 @@ impl WorkArtifactField {
             Self::Evidence => "evidence lists more than 64 source keys or repeats one",
             Self::DocumentText => "document needs 1 to 128 paragraphs of non-empty text",
             Self::DocumentBlocks => "document blocks are malformed",
-            Self::Subjects => "subjects need unique non-empty names, at most 32, with at most three image candidates and public HTTPS links",
+            Self::Subjects => "subjects need non-empty names (unique outside matrices), at most 32, with at most three image candidates and public HTTPS links",
             Self::MatrixCriterion => "comparison_matrix criteria need 1 to 16 unique names; a measurement names a unit and a basis, a rating a rubric and a scale_max of 2 to 10",
             Self::MatrixShape => "comparison_matrix cells hold one row per subject in subjects order, and every subject's row has one cell per criterion, in criteria order; never one row per criterion",
             Self::CellEvidence => "cell evidence must cite listed source keys, at most eight, without repeats",
@@ -850,13 +897,13 @@ impl WorkArtifactField {
             Self::ReplyFigure => "each reply figure has a label of at most 24 characters, a value of at most 20 and an optional note of at most 40",
             Self::ReplyPoints => "reply has at most 5 points of one line and at most 140 characters each",
             Self::PicksItems => "picks has 1 to 12 items",
-            Self::PickName => "each pick's name is one line of 1 to 60 characters",
+            Self::PickName => "each pick's name is one line of 1 to 200 characters",
             Self::PickSubtitle => "a pick's subtitle is one line of at most 80 characters",
             Self::PickImages => "a pick has at most 3 image_candidates, each a public https URL of a picture of that subject from its sources",
             Self::PickLogo => "a pick's logo_host is a bare lowercase host such as airbnb.com",
             Self::PickUrl => "a pick's url is a public https URL",
-            Self::PickPrice => "a pick's price has a display of at most 24 characters, an optional plain decimal amount, an optional three-letter currency code and an optional was of at most 24 characters: the price before a reduction the source shows",
-            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 40",
+            Self::PickPrice => "a pick's price has a display of at most 64 characters, an optional plain decimal amount, an optional three-letter currency code and an optional was of at most 64 characters: the price before a reduction the source shows",
+            Self::PickFacts => "a pick has at most 4 facts, each a label of at most 20 characters and a value of at most 120",
             Self::PickRating => "a pick's rating is a plain decimal value between 0 and max, with max 5 or 10",
             Self::PickWhy => "a pick's why is one line of at most 160 characters",
             Self::PickTags => "a pick has at most 3 tags of at most 16 characters",
@@ -865,6 +912,7 @@ impl WorkArtifactField {
             Self::PickWhen => "a pick's when is at most 40 characters and its duration at most 16",
             Self::PlanSteps => "plan has 1 to 40 steps",
             Self::PlanStepWhen => "a plan step's when is one line of at most 32 characters",
+            Self::PlanStepDate => "a plan step's date is a real day written YYYY-MM-DD",
             Self::PlanStepTitle => "each plan step's title is one line of 1 to 80 characters",
             Self::PlanStepDetail => "a plan step's detail is one line of at most 280 characters",
             Self::PlanStepCost => "a plan step's cost is at most 24 characters",
@@ -875,11 +923,12 @@ impl WorkArtifactField {
             Self::ListItemTitle => "each list item's title is one line of 1 to 90 characters",
             Self::ListItemDetail => "a list item's detail is one line of at most 280 characters",
             Self::ListItemDue => "a list item's due is at most 32 characters",
+            Self::ListItemMedia => "a list item's native picture needs its exact record source and immutable custody",
             Self::ListItemFrom => "a list item's from has app of at most 24 characters, who of at most 40, when of at most 32, a quote of at most 200, host a bare host and url a public https URL",
             Self::SheetColumns => "sheet has 1 to 10 columns",
             Self::SheetColumn => "each sheet column has a unique label of at most 24 characters, a unit of at most 12, a three-letter currency (required for money) and best only on number, money, percent, rating, yes_no, duration or date columns",
             Self::SheetRows => "sheet has 1 to 200 rows, each with exactly one cell per column",
-            Self::SheetCell => "a sheet cell matches its column: text at most 60 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
+            Self::SheetCell => "a sheet cell matches its column: text at most 200 characters, number, money and percent plain decimals, yes_no one of yes, no, partial or unknown, rating like 4/5, link a public https URL, entity at most 40 characters, tag at most 16, date at most 32, duration at most 16, or empty when unknown; never sentences",
             Self::SheetEntity => "a sheet row's entity has logo_host a bare host and image a public https URL",
             Self::SheetNote => "sheet note is one line of at most 200 characters",
             Self::PlotAxis => "plot axis labels are at most 24 characters, the y unit at most 12, and money needs a three-letter currency",
@@ -914,8 +963,17 @@ impl WorkArtifactField {
             Self::ProjectTree => "project tree has 1 to 80 entries, each a relative path at most three names deep whose parent folder comes before it, listed once; only folders have more",
             Self::ProjectScripts => "project has at most 16 scripts: name at most 32 characters, command at most 160, source at most 24",
             Self::ProjectGit => "project git branch is one line of at most 80 characters",
+            Self::SubjectNoun => "subject noun is the service's word for it, at most 24 characters",
+            Self::SubjectReference => "subject reference is one line of at most 48 characters",
+            Self::SubjectTitle => "subject title is one line of 1 to 160 characters",
+            Self::SubjectState => "subject state label is at most 20 characters",
+            Self::SubjectPeople => "subject has at most 4 people: role at most 20 characters, name at most 40",
+            Self::SubjectFacts => "subject has at most 6 facts: label at most 20 characters, value at most 40",
+            Self::SubjectLabels => "subject has at most 6 labels of at most 24 characters",
+            Self::SubjectSummary => "subject summary is at most 400 characters of plain text with only bold and code",
+            Self::SubjectUrl => "subject url is its public https address",
             Self::ItemSource => "an item's source must be the 0-based index of one of the object's sources",
-            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft, media or project",
+            Self::LegacyKind => "this kind is kept only so saved works open; make reply, picks, plan, list, sheet, plot, diagram, code, diff, document, draft, media, project or subject",
         }
     }
 }
@@ -923,7 +981,22 @@ impl WorkArtifactDataV1 {
     /// `evidence_len` is the artifact's evidence array length; claim-level
     /// indices must address it.
     pub fn validate(&self, evidence_len: usize) -> Result<(), WorkError> {
-        self.check(evidence_len, &mut WorkArtifactField::Content, &mut None)
+        self.check(
+            evidence_len,
+            &mut WorkArtifactField::Content,
+            &mut None,
+            false,
+        )
+    }
+    /// `validate` for the person's own object, which may stand empty while
+    /// they fill it.
+    pub fn validate_owned(&self, evidence_len: usize) -> Result<(), WorkError> {
+        self.check(
+            evidence_len,
+            &mut WorkArtifactField::Content,
+            &mut None,
+            true,
+        )
     }
     /// The first part that fails `validate`, for a notice the model can act on.
     pub fn fault(&self, evidence_len: usize) -> Option<WorkArtifactField> {
@@ -933,7 +1006,7 @@ impl WorkArtifactDataV1 {
     pub fn fault_at(&self, evidence_len: usize) -> Option<WorkObjectFault> {
         let mut at = WorkArtifactField::Content;
         let mut detail = None;
-        match self.check(evidence_len, &mut at, &mut detail) {
+        match self.check(evidence_len, &mut at, &mut detail, false) {
             Ok(()) => None,
             Err(WorkError::Capacity) => Some(WorkObjectFault::of(WorkArtifactField::Text)),
             Err(_) => Some(detail.unwrap_or(WorkObjectFault::of(at))),
@@ -1044,6 +1117,7 @@ impl WorkArtifactDataV1 {
             Self::Draft { .. } => "draft",
             Self::Media { .. } => "media",
             Self::Project { .. } => "project",
+            Self::Subject { .. } => "subject",
         }
     }
     /// `at` names the part under check when an error returns, `index` the
@@ -1053,11 +1127,16 @@ impl WorkArtifactDataV1 {
         evidence_len: usize,
         at: &mut WorkArtifactField,
         detail: &mut Option<WorkObjectFault>,
+        owned: bool,
     ) -> Result<(), WorkError> {
         use WorkArtifactField as F;
         let mut budget = TextBudget(0);
         let subjects_ok = validate_subjects;
-        let mut object = super::objects::Budget::new();
+        let mut object = if owned {
+            super::objects::Budget::owned()
+        } else {
+            super::objects::Budget::new()
+        };
         let mut objects = |checked: Result<(), WorkObjectFault>| match checked {
             Ok(()) => Ok(()),
             Err(fault) => {
@@ -1177,6 +1256,30 @@ impl WorkArtifactDataV1 {
                 }
                 .check(&mut object),
             )?,
+            Self::Subject {
+                noun,
+                reference,
+                title,
+                state,
+                people,
+                facts,
+                labels,
+                summary,
+                url,
+            } => objects(
+                Subject {
+                    noun,
+                    reference,
+                    title,
+                    state,
+                    people,
+                    facts,
+                    labels,
+                    summary,
+                    url,
+                }
+                .check(&mut object),
+            )?,
             Self::Document {
                 paragraphs,
                 formatted,
@@ -1207,7 +1310,7 @@ impl WorkArtifactDataV1 {
                 notes,
             } => {
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, true)?;
+                subjects_ok(&mut budget, subjects, true, false)?;
                 *at = F::MatrixCriterion;
                 bounded(criteria.len(), MAX_ARTIFACT_CRITERIA)?;
                 let mut names = BTreeSet::new();
@@ -1308,7 +1411,7 @@ impl WorkArtifactDataV1 {
             }
             Self::Findings { subjects, items } => {
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, false)?;
+                subjects_ok(&mut budget, subjects, false, true)?;
                 *at = F::FindingItems;
                 bounded(items.len(), MAX_ARTIFACT_FINDINGS)?;
                 for finding in items {
@@ -1457,7 +1560,7 @@ impl WorkArtifactDataV1 {
                 *at = F::CollectionSummary;
                 budget.text(summary)?;
                 *at = F::Subjects;
-                subjects_ok(&mut budget, subjects, false)?;
+                subjects_ok(&mut budget, subjects, false, true)?;
                 *at = F::CollectionEntry;
                 if entries.len() > MAX_ARTIFACT_SOURCE_ENTRIES {
                     return Err(WorkError::Invalid);
@@ -1612,7 +1715,7 @@ impl WorkArtifactDataV1 {
             Self::Picks { items, .. } => return picks_link(items),
             Self::List { items, .. } => return list_links(items),
             Self::Sheet { columns, rows, .. } => return sheet_links(columns, rows),
-            Self::Media { .. } => return true,
+            Self::Media { .. } | Self::Subject { .. } => return true,
             _ => &[],
         };
         subjects
@@ -1790,6 +1893,21 @@ impl WorkArtifactDataV1 {
                 }
                 for script in scripts {
                     push(&format!("{}: {}", script.name, script.command));
+                }
+            }
+            Self::Subject {
+                noun,
+                reference,
+                title,
+                summary,
+                facts,
+                ..
+            } => {
+                push(format!("{noun} {}", reference.as_deref().unwrap_or_default()).trim_end());
+                push(title);
+                summary.as_deref().map(&mut push);
+                for fact in facts {
+                    push(&format!("{}: {}", fact.label, fact.value));
                 }
             }
         }
@@ -1995,6 +2113,42 @@ impl std::fmt::Debug for WorkArtifactV1 {
     }
 }
 
+impl WorkArtifactDataV1 {
+    /// Model-authored data cannot mint or copy privileged native image references.
+    /// Exact host provenance hydration happens after this boundary.
+    pub fn clear_record_media(&mut self) {
+        match self {
+            Self::Picks { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::Sheet { rows, .. } => {
+                for entity in rows.iter_mut().filter_map(|row| row.entity.as_mut()) {
+                    entity.record_media = None;
+                    entity.media_attempted = false;
+                }
+            }
+            Self::List { items, .. } => {
+                for item in items {
+                    item.record_media = None;
+                    item.media_attempted = false;
+                }
+            }
+            Self::ComparisonMatrix { subjects, .. }
+            | Self::Findings { subjects, .. }
+            | Self::EvidenceCollection { subjects, .. } => {
+                for subject in subjects {
+                    subject.record_media = None;
+                    subject.media_attempted = false;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,9 +2256,48 @@ mod tests {
             name: name.into(),
             descriptor: None,
             homepage: None,
+            record_media: None,
+            media_attempted: false,
             image_candidates: vec![],
         }
     }
+    #[test]
+    fn matrix_subjects_are_positional_and_may_share_a_display_name() {
+        let matrix = WorkArtifactDataV1::ComparisonMatrix {
+            subjects: vec![
+                subject("Apartment in Lisbon"),
+                subject("Apartment in Lisbon"),
+            ],
+            criteria: vec![WorkCriterion {
+                name: "Price".into(),
+                kind: WorkCriterionKind::Text,
+            }],
+            cells: ["€120", "€140"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    vec![WorkCell {
+                        value: WorkCellValue::Text { text: value.into() },
+                        evidence: vec![index as u16],
+                        note: None,
+                        general_knowledge: false,
+                    }]
+                })
+                .collect(),
+            notes: vec![],
+        };
+        assert_eq!(matrix.validate(2), Ok(()));
+        let subjects = vec![subject("Same"), subject("Same")];
+        assert_eq!(
+            validate_subjects(&mut TextBudget(0), &subjects, false, true),
+            Err(WorkError::Invalid)
+        );
+        assert_eq!(
+            validate_subjects(&mut TextBudget(0), &[subject(" ")], true, false),
+            Err(WorkError::Invalid)
+        );
+    }
+
     #[test]
     fn a_matrix_by_criterion_is_refused_with_the_shape_rule() {
         let text = |value: &str| WorkCell {

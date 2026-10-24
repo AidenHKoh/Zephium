@@ -13,7 +13,6 @@ pub(super) fn body(
     request: &WorkModelRequest,
     target: &LeadTarget,
 ) -> Result<Value, WorkModelError> {
-    let _ = target;
     let mut input = Vec::new();
     for message in &request.messages {
         match message {
@@ -77,6 +76,11 @@ pub(super) fn body(
             }
         }
     }
+    // Only OpenAI's own endpoints are known to hold a call to a strict schema.
+    let strict_provider = matches!(
+        request.model.provider,
+        WorkModelProvider::OpenAi | WorkModelProvider::Cloud
+    );
     let mut tools: Vec<Value> = request
         .tools
         .iter()
@@ -86,11 +90,12 @@ pub(super) fn body(
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.schema,
-                "strict": false,
+                "strict": tool.strict && strict_provider,
             })
         })
         .collect();
-    if request.native_search {
+    let native_search = target.native_search(request);
+    if native_search {
         tools.push(json!({"type": "web_search"}));
     }
     let mut body = Map::new();
@@ -99,9 +104,22 @@ pub(super) fn body(
     body.insert("input".into(), Value::Array(input));
     body.insert("stream".into(), json!(true));
     body.insert("store".into(), json!(false));
+    // OpenAI, directly or through Zephium Cloud; xAI speaks this wire without the key.
+    if matches!(
+        request.model.provider,
+        WorkModelProvider::OpenAi | WorkModelProvider::Cloud
+    ) {
+        if let Some(key) = &request.cache_key {
+            body.insert("prompt_cache_key".into(), json!(key));
+        }
+    }
     body.insert("max_output_tokens".into(), json!(request.max_output_tokens));
+    if let Some(calls) = target.search_calls.filter(|_| native_search) {
+        body.insert("max_tool_calls".into(), json!(calls));
+    }
     let mut include = vec![json!("reasoning.encrypted_content")];
-    if request.native_search {
+    // xAI's Responses API documents no search include.
+    if native_search && target.upstream() != WorkModelProvider::XAi {
         include.push(json!("web_search_call.action.sources"));
     }
     body.insert("include".into(), Value::Array(include));
@@ -110,12 +128,19 @@ pub(super) fn body(
             WorkModelReasoning::Low => "low",
             WorkModelReasoning::Medium => "medium",
             WorkModelReasoning::High => "high",
+            WorkModelReasoning::XHigh => "xhigh",
+            WorkModelReasoning::Max => "max",
         };
         body.insert("reasoning".into(), json!({"effort": effort}));
     }
     if !tools.is_empty() {
+        let choice = match tool_choice(request)? {
+            WorkModelToolChoice::Auto => json!("auto"),
+            WorkModelToolChoice::Required => json!("required"),
+            WorkModelToolChoice::Named(name) => json!({"type": "function", "name": name}),
+        };
         body.insert("tools".into(), Value::Array(tools));
-        body.insert("tool_choice".into(), json!("auto"));
+        body.insert("tool_choice".into(), choice);
         body.insert("parallel_tool_calls".into(), json!(request.parallel_tools));
     }
     Ok(Value::Object(body))

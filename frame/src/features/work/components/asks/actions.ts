@@ -1,6 +1,6 @@
 import type { WorkSession } from "$domain/work";
 import type { WorkHumanSession } from "$domain/work-human";
-import { commands, type WorkHumanPageV1 } from "$shared/ipc/bindings";
+import { commands, type WorkHumanCheckOutcomeV1, type WorkHumanPageV1 } from "$shared/ipc/bindings";
 import { askPart, asksOf, openAsks } from "./asks";
 
 export type ConfirmDecision = "approve" | "allow_run" | "decline";
@@ -11,10 +11,12 @@ export type AskActions = {
   answer(step: string, text: string): Promise<boolean>;
   /** Presents a held page for the person: sign in, or look at what will be sent. */
   openPage?(step: string): void;
+  /** Checks the same live page; only native observations may answer. */
+  checkPage?(page: WorkHumanPageV1): Promise<WorkHumanCheckOutcomeV1>;
   /** The person says they signed in: the held page carries on from where it waits. */
   signedIn?(page: WorkHumanPageV1): Promise<boolean>;
   /** The system's folder panel, opened at a folder: the admitted choice, or null. */
-  chooseFolder?(start: string): Promise<string | null>;
+  chooseFolder?(start: string | null): Promise<string | null>;
 };
 
 /** The run's own operations: Confirm steps through ApproveStep, questions through AnswerStep. */
@@ -35,12 +37,15 @@ export function runActions(
       }),
     answer: (step, text) => session.answerStep(execution, step, text),
     chooseFolder: async (start) => {
-      const chosen = await commands.workChooseFolder(session.profile, start).catch(() => null);
-      return chosen?.status === "ok" && chosen.data?.kind === "admitted" ? chosen.data.path : null;
+      const chosen = await commands.workChooseFolder(session.profile, start);
+      if (chosen.status !== "ok" || chosen.data?.kind === "refused")
+        throw new Error("Folder choice unavailable");
+      return chosen.data?.kind === "admitted" ? chosen.data.path : null;
     },
     ...(openPage ? { openPage } : {}),
     ...(human
       ? {
+          checkPage: (page: WorkHumanPageV1) => human.session.check(human.work, page.id),
           signedIn: async (page: WorkHumanPageV1) =>
             (await human.session.continue(human.work, page.id, "anonymous")) === null,
         }

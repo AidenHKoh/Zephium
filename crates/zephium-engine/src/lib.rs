@@ -1,24 +1,37 @@
 #[cfg(feature = "agentic-browser")]
 mod agent_context_port;
+#[cfg(feature = "agentic-browser")]
+pub use agent_context_port::{
+    last_action_timeout_stage, AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES,
+};
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
 ))]
 pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monotonic_now};
-#[cfg(feature = "agentic-browser")]
-pub use agent_context_port::{AgentBrowserLifetimeFactory, MAX_AGENT_BROWSER_LIFETIMES};
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
+mod haptics;
 mod host;
 mod layout_queue;
 #[cfg(any(target_os = "windows", test))]
 mod motion_curve;
 mod navigation_epoch;
+#[cfg(feature = "agentic-browser")]
+pub mod page_reader;
 mod pane_geometry;
 mod platform;
+#[cfg(target_os = "windows")]
+pub use platform::windows::{forget_window_caption_offset, set_window_caption_offset};
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+mod work_site_session;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod work_website_data;
+
+pub use haptics::{haptic, Haptic};
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 pub use platform::windows::{install_work_rendering_backing, remove_work_rendering_backing};
@@ -506,6 +519,14 @@ pub use platform::windows::{
 #[doc(hidden)]
 pub fn run_macos_principal_isolation_probe() -> Result<(), String> {
     platform::macos::run_principal_isolation_probe()
+}
+
+/// Runs the headless loopback qualification of the Ask panel's Browse
+/// reader, or with `--measure` its cost. Absent from ordinary builds.
+#[cfg(all(target_os = "macos", feature = "page-reader-probe"))]
+#[doc(hidden)]
+pub fn run_macos_page_reader_probe(arguments: &[String]) -> Result<(), String> {
+    platform::macos::run_page_reader_probe(arguments)
 }
 
 /// Runs the local-origin WKWebView page-permission denial/deferral gate.
@@ -1718,6 +1739,248 @@ impl WebviewEngine {
         ));
     }
 
+    /// Switches the Ask panel's Browse reader on with `policy`, or off with
+    /// none. Off removes every script, handler and channel from every view.
+    #[cfg(feature = "agentic-browser")]
+    pub fn set_page_reader(&self, policy: Option<page_reader::PageReaderPolicy>) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.set_page_reader(policy));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = policy;
+    }
+
+    /// Reads `tab`'s document at `epoch`. `done` runs once on the main
+    /// thread, or is dropped unrun when the engine is gone.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_read(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Result<page_reader::PageReadout, page_reader::PageReadFailure>)
+            + Send
+            + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_read(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch);
+            done(Err(page_reader::PageReadFailure::Unavailable));
+        }
+    }
+
+    /// The text selected in `tab`'s document at `epoch`, when any.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_selection(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Option<String>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_selection(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch);
+            done(None);
+        }
+    }
+
+    /// The structure and palette of `tab`'s document at `epoch`, for a
+    /// style turn. Untrusted: the caller admits it before use.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_outline(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        done: impl FnOnce(Result<page_reader::PageOutline, page_reader::PageReadFailure>)
+            + Send
+            + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_outline(tab, epoch, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch);
+            done(Err(page_reader::PageReadFailure::Unavailable));
+        }
+    }
+
+    /// Runs one step the person directed on `tab`'s document at `epoch`,
+    /// through the same fixed recipes as Work; `done` says whether it took.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_act(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        read: u64,
+        proposal: zephium_agentic::SemanticActionProposal,
+        done: impl FnOnce(Result<(), page_reader::PageActFailure>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_act(tab, epoch, read, proposal, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, read, proposal);
+            done(Err(page_reader::PageActFailure::Failed));
+        }
+    }
+
+    /// Scrolls `tab`'s document at `epoch` to `quote` and marks it, without
+    /// the find bar. `done` says whether the quote was found.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_highlight(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        quote: String,
+        done: impl FnOnce(bool) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_highlight(tab, epoch, &quote, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, quote);
+            done(false);
+        }
+    }
+
+    /// Replaces `tab`'s marks with `marks`, resolved against read `read` of
+    /// `epoch`. `done` gets the numbers that were placed.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_marks(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        read: u64,
+        marks: Vec<page_reader::PageMark>,
+        reduce_motion: bool,
+        done: impl FnOnce(Vec<u8>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| {
+                host.page_marks(tab, epoch, read, marks, reduce_motion, Box::new(done));
+            });
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, read, marks, reduce_motion);
+            done(Vec::new());
+        }
+    }
+
+    /// Emphasises mark `n` (None: none); `scroll` brings it into view.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_mark_focus(&self, tab: ItemId, epoch: u64, n: Option<u8>, scroll: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_mark_focus(tab, epoch, n, scroll));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, epoch, n, scroll);
+    }
+
+    /// Shows, holds or removes the light along `tab`'s page edges that says
+    /// the assistant is acting there. Native and composited; nothing reaches
+    /// the page.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_glow(&self, tab: ItemId, glow: page_reader::PageGlow, reduce_motion: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_glow(tab, glow, reduce_motion));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, glow, reduce_motion);
+    }
+
+    /// Removes `tab`'s marks.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_marks_clear(&self, tab: ItemId) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_marks_clear(tab));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = tab;
+    }
+
+    /// The person picks one element on `tab`. `done` runs on pick, Escape,
+    /// navigation or a 120 s idle.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        reduce_motion: bool,
+        done: impl FnOnce(Result<page_reader::PagePick, page_reader::PagePickFailure>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick(tab, epoch, reduce_motion, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, reduce_motion);
+            done(Err(page_reader::PagePickFailure::Unavailable));
+        }
+    }
+
+    /// Ends `tab`'s running pick as cancelled.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_cancel(&self, tab: ItemId) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_cancel(tab));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = tab;
+    }
+
+    /// The picked element's current text (at most 4000 characters), or none
+    /// if it is gone.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_read(
+        &self,
+        tab: ItemId,
+        epoch: u64,
+        pick: u64,
+        done: impl FnOnce(Option<page_reader::PagePick>) + Send + 'static,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_read(tab, epoch, pick, Box::new(done)));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (tab, epoch, pick);
+            done(None);
+        }
+    }
+
+    /// Removes the attached outline of `pick`.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_pick_clear(&self, tab: ItemId, pick: u64) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_pick_clear(tab, pick));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, pick);
+    }
+
     /// For each host, whether the profile's own website data holds cookies
     /// for its site: closed facts, never a cookie or an account. The receiver
     /// yields all false, or disconnects, when the answer is not available.
@@ -1730,6 +1993,70 @@ impl WebviewEngine {
         let (reply, answer) = std::sync::mpsc::channel();
         self.run(move || {
             host::try_with(move |engine| engine.work_sessions_present(profile, hosts, reply));
+        });
+        answer
+    }
+
+    /// For each host, whether Work's own store for the profile holds cookies
+    /// for its site: closed facts, as for the profile's own store.
+    #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
+    pub fn work_store_sessions_present(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        hosts: Vec<String>,
+    ) -> std::sync::mpsc::Receiver<Vec<bool>> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.work_store_sessions_present(profile, hosts, reply));
+        });
+        answer
+    }
+
+    /// Clears Work's own website data for the profile: cookies, storage and
+    /// caches of the pages Work opened without the person's session. The
+    /// profile's own store is untouched. Yields whether the store is empty.
+    #[cfg(all(
+        feature = "agentic-browser",
+        any(target_os = "macos", target_os = "windows")
+    ))]
+    pub fn clear_work_website_data(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+    ) -> std::sync::mpsc::Receiver<bool> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| engine.clear_work_website_data(profile, reply));
+        });
+        answer
+    }
+
+    /// QA only: starts visiting each address off screen in the profile's own
+    /// website data, as a person browsing normally; yields how many started.
+    /// The pages keep loading until `end_profile_visits`.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
+    #[doc(hidden)]
+    pub fn visit_in_profile(
+        &self,
+        profile: zephium_core::ids::ProfileId,
+        urls: Vec<String>,
+    ) -> std::sync::mpsc::Receiver<usize> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            host::try_with(move |engine| {
+                let _ = reply.send(engine.visit_in_profile(profile, urls));
+            });
+        });
+        answer
+    }
+
+    /// QA only: closes the pages `visit_in_profile` opened.
+    #[cfg(all(target_os = "macos", feature = "agentic-browser-qa"))]
+    #[doc(hidden)]
+    pub fn end_profile_visits(&self) -> std::sync::mpsc::Receiver<()> {
+        let (reply, answer) = std::sync::mpsc::channel();
+        self.run(move || {
+            platform::macos::profile_seed_probe::finish();
+            let _ = reply.send(());
         });
         answer
     }
@@ -1858,6 +2185,11 @@ impl Engine for WebviewEngine {
             let _ = host::try_with(move |host| {
                 completion.finish(host.set_blocker_site_preferences(profile, preferences))
             });
+        });
+    }
+    fn set_page_style(&self, profile: ProfileId, site: String, css: Arc<str>) {
+        let _ = self.run(move || {
+            let _ = host::try_with(move |host| host.set_page_style(profile, site, css));
         });
     }
     fn download_call(
@@ -2326,6 +2658,25 @@ impl Engine for WebviewEngine {
         }
     }
 
+    fn automatic_pip(&self, id: ItemId, background: bool) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |host| host.automatic_pip(id, background))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (id, background);
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn cancel_automatic_pip(&self) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.cancel_automatic_pip());
+        });
+    }
+
     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
@@ -2501,12 +2852,16 @@ impl Engine for WebviewEngine {
         NativeDispatch::Scheduled
     }
 
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch {
+    fn set_drop_indicator(
+        &self,
+        window: WindowId,
+        preview: Option<zephium_core::ports::engine::DropPreview>,
+    ) -> NativeDispatch {
         let queued_retirement = self.retirement.clone();
         let queued_delivery = self.event_delivery.clone();
         let queued_fatal = self.fatal_security_failure.clone();
         NativeDispatch::from_scheduled(self.run(move || {
-            if !host::try_with(move |h| h.set_drop_indicator(window, zone)) {
+            if !host::try_with(move |h| h.set_drop_indicator(window, preview)) {
                 fail_native_host_admission(
                     &queued_delivery,
                     &queued_retirement,
@@ -4457,4 +4812,12 @@ mod tests {
             zephium_core::session::MAX_SESSION_PROFILES
         );
     }
+}
+
+/// Enables only fixed, content-free media counters in a public development probe.
+/// Active account qualification always disables them, irrespective of environment.
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub fn configure_macos_public_media_diagnostic(public: bool, account_active: bool) {
+    platform::macos::configure_media_diagnostic(public, account_active);
 }

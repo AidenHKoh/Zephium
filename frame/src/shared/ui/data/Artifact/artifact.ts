@@ -27,6 +27,8 @@ export type EvidenceReference = {
   file?: { record: string; path: string };
 };
 export type SubjectView = {
+  recordMedia?: import("$shared/ipc/bindings").WorkRecordMediaRefV1;
+  mediaAttempted?: boolean;
   name: string;
   descriptor?: string;
   homepage?: string;

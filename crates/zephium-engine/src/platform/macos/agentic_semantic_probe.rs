@@ -3444,7 +3444,7 @@ fn run_work_host(
     ) -> Result<crate::MacosAgentWorkProbePoll, &'static str>,
 ) -> Result<(), &'static str> {
     use zephium_core::ports::engine::Engine as _;
-    if timeout.is_zero() || timeout > Duration::from_secs(900) {
+    if timeout.is_zero() || timeout > Duration::from_secs(3600) {
         return Err("actor_host_timeout");
     }
     let application_policy = events.is_some();
@@ -3673,8 +3673,22 @@ fn pump_work_application_event(
             objc2_foundation::ns_string!("NSDefaultRunLoopMode"),
             true,
         ) {
-            *count += 1;
             use objc2_app_kit::NSEventType;
+            // A person's pointer moves constantly; only other events count
+            // toward the flood cap.
+            if !matches!(
+                event.r#type(),
+                NSEventType::MouseMoved
+                    | NSEventType::MouseEntered
+                    | NSEventType::MouseExited
+                    | NSEventType::CursorUpdate
+                    | NSEventType::LeftMouseDragged
+                    | NSEventType::RightMouseDragged
+                    | NSEventType::OtherMouseDragged
+                    | NSEventType::ScrollWheel
+            ) {
+                *count += 1;
+            }
             if !work_probe_delivers_event(input, event.r#type()) {
                 return;
             }

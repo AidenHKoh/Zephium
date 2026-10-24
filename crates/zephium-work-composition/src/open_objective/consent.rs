@@ -19,7 +19,7 @@ pub(crate) enum Choice {
 }
 
 /// Earlier lists win: "Accept only necessary" refuses.
-const REFUSE: [&str; 30] = [
+const REFUSE: [&str; 32] = [
     "reject",
     "reject all",
     "reject cookies",
@@ -45,6 +45,8 @@ const REFUSE: [&str; 30] = [
     "odrzuć",
     "odrzuć wszystkie",
     "tylko niezbędne",
+    "nie zgadzam się",
+    "nie akceptuję",
     "alle ablehnen",
     "nur notwendige",
     "tout refuser",

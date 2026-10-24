@@ -58,8 +58,10 @@ read slot. One unread result applies backpressure instead of being overwritten.
 ## Bounds and privacy
 
 - One immutable result per run; at most 256 KiB canonical body.
-- At most 32 MiB of result bodies in this Store, within the existing 1,024-run
-  inventory ceiling. Pressure refuses publication; there is no silent eviction.
+- At most 32 MiB of result bodies in this Store. Results go with their clean
+  terminal runs when retention prunes them (see `agent-work-persistence.md`);
+  publication first makes room from the oldest results no Work cites, and is
+  refused only when cited or recent results fill the budget.
 - Existing field/value/citation bounds apply; only referenced source fragments
   are copied, not observations, pages, transcripts or provider payloads.
 - The existing Store worker and four shared optional Work permits serve

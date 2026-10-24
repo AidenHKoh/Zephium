@@ -1,8 +1,6 @@
-//! Handing a coding job to a coding agent the person already has: Codex
-//! (`codex exec`) or Claude Code (`claude -p`). The hand-off is one command
-//! under the command policy, so it always asks; Codex writes only inside its
-//! workspace sandbox and Claude Code may edit files but not run commands.
-//! What changed is read back from git afterwards, never from the agent's words.
+//! Retained coding-agent protocol helpers. Production hand-offs are gated
+//! before discovery or Git snapshots until a confined native runner exists.
+//! Agent CLI flags and command approval alone are not a security boundary.
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;

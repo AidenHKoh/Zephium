@@ -48,6 +48,18 @@ pub(super) fn dispatch_guarded(
     authority: Option<Box<dyn Fn() -> bool>>,
     completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
 ) {
+    dispatch_closed(semantic, request, admitted_at, authority, completion);
+}
+
+/// The closed path itself; the Ask panel's Browse reader, which holds no Wry
+/// view, enters here.
+pub(super) fn dispatch_closed(
+    semantic: &AgentSemanticRuntimeController,
+    request: SemanticActionNativeRequest,
+    admitted_at: Instant,
+    authority: Option<Box<dyn Fn() -> bool>>,
+    completion: impl FnOnce(SemanticActionNativeSettlement) + 'static,
+) {
     if !zephium_agentic::AGENT_BROWSER_SNAPSHOT_ACTION_KINDS.contains(&request.kind()) {
         let completed_at = failure_instant(
             &request,
@@ -188,6 +200,10 @@ pub(super) const fn map_runtime_fault(
         SemanticActionRuntimeFault::StaleReference => SemanticActionNativeFailure::StaleReference,
         SemanticActionRuntimeFault::TargetChanged
         | SemanticActionRuntimeFault::TargetDescriptorChanged
+        | SemanticActionRuntimeFault::TargetDescriptorIncomplete
+        | SemanticActionRuntimeFault::TargetNameChanged
+        | SemanticActionRuntimeFault::TargetStateChanged
+        | SemanticActionRuntimeFault::TargetOperationsChanged
         | SemanticActionRuntimeFault::TargetGeometryChanged => {
             SemanticActionNativeFailure::TargetChanged
         }

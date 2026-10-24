@@ -20,6 +20,7 @@
     SourceCodeIcon,
   } from "../lib/icons";
   import { artifactView } from "../lib/project-work";
+  import { searchProvider } from "../lib/search-provider";
   import { compareModel, type CompareCell, type ComparePicture } from "../lib/compare";
   import { correctedMatrix } from "../lib/correct";
   import { untrack } from "svelte";
@@ -210,8 +211,7 @@
               ...(value.source?.kind === "provider_search"
                 ? {
                     citation: {
-                      provider: "OpenAI",
-                      model: value.source.model,
+                      ...searchProvider(value.source.provider, value.source.model),
                       title: value.source.title,
                       url: value.source.url,
                     },

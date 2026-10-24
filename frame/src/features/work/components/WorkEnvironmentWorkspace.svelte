@@ -37,24 +37,33 @@
     Image01Icon,
     Pdf01Icon,
     PlusSignIcon,
-    StickyNote03Icon,
+    ShapeCollectionIcon,
     Cursor01Icon,
     HandIcon,
     CheckListIcon,
   } from "../lib/icons";
   import WorkBar from "./bar/WorkBar.svelte";
+  import { composerEdge, composerHole } from "../lib/composer-hole";
   import { centreSize, picksSheet } from "./objects/centre";
   import { partAsks } from "./asks/actions";
-  import { ASK_WORDS, asksOf, exchangeOf, openAsks, registrableSite } from "./asks/asks";
+  import {
+    ASK_WORDS,
+    asksOf,
+    exchangeOf,
+    folderChoice,
+    openAsks,
+    registrableSite,
+  } from "./asks/asks";
   import BarTool from "./bar/BarTool.svelte";
+  import { preferences } from "$domain/preferences";
   import NotePanel from "./bar/NotePanel.svelte";
   import TasksPanel from "./bar/TasksPanel.svelte";
+  import BlocksPanel, { type BlockKind } from "./bar/BlocksPanel.svelte";
   import AttachPanel, { type AttachKind } from "./bar/AttachPanel.svelte";
-  import AccountButton from "./top/AccountButton.svelte";
   import WorksMenu from "./top/WorksMenu.svelte";
   import ContextManifest from "./composer/ContextManifest.svelte";
   import OpenTabsChip from "./composer/OpenTabsChip.svelte";
-  import { contextSelection } from "../lib/context-selection";
+  import { contextSelection, referencesCanvasBlock } from "../lib/context-selection";
   import WorkTabPicker from "./WorkTabPicker.svelte";
   import WorkMediaPicker from "./WorkMediaPicker.svelte";
   import { mediaSize, mediaUrl } from "$domain/resources";
@@ -63,25 +72,28 @@
   import LiftHeader from "./LiftHeader.svelte";
   import { commandRecord } from "../lib/project-environment-stage";
   import {
-    clearOfBands,
     elementPictures,
     environmentStages,
     fetchedPictures,
     laneElement,
     measurer,
+    ownPlaces,
   } from "../lib/project-environment-board";
-  import type { BoardActions } from "../lib/canvas-context";
-  import type { ObjectActions, ObjectView } from "../lib/board/types";
-  import HostGlyph from "./cards/HostGlyph.svelte";
+  import type { BoardActions, DraftEdit } from "../lib/canvas-context";
+  import { OwnedObjects } from "$domain/resources";
+  import { ownedView } from "../lib/board/objects";
+  import { objectHeight, objectWidth } from "../lib/board/object-size";
+  import type { DraftView, ObjectActions, ObjectView, OwnedData } from "../lib/board/types";
+  import { objectIcon, objectLabel } from "../lib/object-kind";
   import { clipText, defaultSize } from "../lib/canvas-model";
   import { homePath } from "../lib/work-files";
-  import { youtubeThumbnail } from "../lib/link-media";
+  import { youtubeId } from "../lib/link-media";
   import { resultPlan } from "../lib/plan-steps";
   import { stepPlan, WorkTasks, workTasksKey, type StepPlan } from "../lib/work-tasks";
   import { documentMarkdown, resultKey, WorkNotes } from "../lib/work-notes";
   import type { LiftAction } from "./LiftHeader.svelte";
   import { isAgentExecution, isLive } from "../lib/agent-steps";
-  import { environmentPlan } from "../lib/project-environment-plan";
+  import { draftSend } from "../lib/draft-send";
   import {
     environmentAgents,
     environmentBoards,
@@ -96,14 +108,20 @@
     viewPlacements,
   } from "../lib/project-environment";
   import { canvasOpenTasks, canvasProbe } from "../lib/canvas-context";
-  import { environmentRequests, requestDress, runFolders } from "../lib/project-environment-thread";
+  import {
+    environmentRequests,
+    requestDress,
+    runFolders,
+    stageMade,
+  } from "../lib/project-environment-thread";
   import { artifactView } from "../lib/project-work";
-  import RunView from "./board/RunView.svelte";
-  import { failureLine, humanPage, regionOf, sameRegion } from "../lib/work-human";
+  import RequestLift from "./lift/RequestLift.svelte";
+  import SourcesLift from "./lift/SourcesLift.svelte";
+  import { failureLine, humanPage, regionOf, type HumanPage } from "../lib/work-human";
   import { openOver, type PaneRect } from "../lib/pane-geometry";
   import { organizeExecution, pendingOrganize, elementFor } from "../lib/organize";
   import { CanvasPlacing } from "../lib/workspace/placing.svelte";
-  import { freeSpot } from "../lib/free-space";
+  import { dropSpot, freeSpot } from "../lib/free-space";
   import { PictureQueue } from "../lib/workspace/pictures.svelte";
   import { environmentResults, type ResultReference } from "../lib/project-environment-results";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
@@ -114,7 +132,6 @@
     session,
     tabs,
     spaceName,
-    profileLabel,
     currentTabId = null,
     aiEnabled = true,
     onopen,
@@ -123,7 +140,6 @@
     session: WorkEnvironmentSession;
     tabs: readonly TabView[];
     spaceName: string;
-    profileLabel: string;
     /** The Space's current tab, so the picker reads like its tab strip. */
     currentTabId?: string | null;
     aiEnabled?: boolean;
@@ -138,6 +154,14 @@
   });
   // The pages the runs on this canvas are holding open for a person.
   const human = untrack(() => new WorkHumanSession(session.profile));
+  /** The person's own tables, checklists and calendars on this canvas. */
+  const owned = untrack(() => new OwnedObjects(session.profile));
+  onMount(() => {
+    void owned.start().catch(() => {
+      blockSaveFailed = true;
+    });
+    return () => owned.stop();
+  });
   onMount(() => {
     void human.start();
     return () => human.dispose();
@@ -191,7 +215,7 @@
     ) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string, span?: number) => void;
+    settle: (id: string, span?: number) => void;
     followAgent: () => boolean;
   }>();
   let selectedIds = $state.raw<string[]>([]);
@@ -206,8 +230,10 @@
         notes: context.notes,
         objectives: context.objectives,
         media: context.mediaRevisions,
+        objects: owned.revisions(),
       },
       openTabs,
+      referencesCanvasBlock(session.composer),
     ),
   );
   let cardHost = $state<HTMLElement>();
@@ -257,7 +283,7 @@
     }
     const reference = session.snapshot?.elements.find((element) => element.id === id)?.reference;
     if (reference?.kind === "link") {
-      if (youtubeThumbnail(reference.url)) playHere(id);
+      if (youtubeId(reference.url)) playHere(id);
       else openPane({ kind: "url", url: reference.url }, id);
       return;
     }
@@ -272,7 +298,11 @@
   function openBranchPage(page: string) {
     const entry = pageEntries.get(page);
     if (!entry) return;
-    if (entry.page.human?.phase === "waiting_for_human") {
+    if (
+      entry.page.human &&
+      entry.page.human.phase !== "reading" &&
+      entry.page.human.phase !== "released"
+    ) {
       openTakeover(page);
       return;
     }
@@ -285,7 +315,12 @@
   function openStep(step: string) {
     for (const [id, entry] of pageEntries)
       if (id.endsWith(`:${step}`)) {
-        if (entry.page.human?.phase === "waiting_for_human") openTakeover(id);
+        if (
+          entry.page.human &&
+          entry.page.human.phase !== "reading" &&
+          entry.page.human.phase !== "released"
+        )
+          openTakeover(id);
         else openPane({ kind: "url", url: entry.page.url }, entry.part, entry.page.account);
         return;
       }
@@ -455,16 +490,82 @@
     const need = part?.need;
     const current = objectiveSession;
     if (!part || !need || !current || current.projection?.work.id !== part.objective) return;
-    const again = (text = m.work_need_again_request({ part: part.title })) =>
-      void current.continueWith(text);
+    // After a check nobody solved in time, the next try names the site the person will solve it on.
+    const checked =
+      need.kind === "check" ||
+      need.kind === "sign_in" ||
+      (need.kind === "retry" && need.reason === "blocked_by_check" && !!need.target);
+    const again = (
+      text = checked
+        ? m.work_need_again_site_request({ part: part.title, site: need.target })
+        : m.work_need_again_request({ part: part.title }),
+    ) => {
+      // A closed wall requires a fresh execution; steering the blocked one
+      // cannot recreate the retained page or grant a retry.
+      if (
+        activeExecution &&
+        (need.kind === "sign_in" || need.kind === "check" || need.kind === "choose_folder")
+      )
+        void current.enqueue(text);
+      else if (activeExecution)
+        void current.steer(text).then((taken) => taken || current.enqueue(text));
+      else void current.continueWith(text);
+    };
     if (how === "again") return again();
     switch (need.kind) {
       case "sign_in":
-        if (need.address) openCitation(need.address);
+      case "check": {
+        const site = need.address ? registrableSite(host(need.address)) : null;
+        const waiting = part.pages?.find(
+          (page) =>
+            (!site || registrableSite(host(page.url)) === site) &&
+            page.human &&
+            page.human.phase !== "reading" &&
+            page.human.phase !== "released" &&
+            page.human.reason === (need.kind === "sign_in" ? "sign_in" : "challenge"),
+        );
+        if (waiting) openTakeover(waiting.id);
+        else again();
         return;
+      }
       case "allow_site":
         if (need.address) preallowed.add(registrableSite(new URL(need.address).hostname));
         return again();
+      case "choose_folder": {
+        const projection = current.projection;
+        const waiting = projection?.executions.flatMap((execution) =>
+          (execution.steps ?? [])
+            .filter(
+              (step) =>
+                step.status === "running" &&
+                step.kind.kind === "ask" &&
+                step.kind.purpose === "folder" &&
+                !!step.local &&
+                !step.local.folder,
+            )
+            .map((step) => ({ execution: execution.id, step: step.id })),
+        )[0];
+        void commands
+          .workChooseFolder(session.profile, null)
+          .then(async (picked) => {
+            if (objectiveSession !== current || current.projection?.work.id !== part.objective)
+              return;
+            if (picked.status !== "ok" || picked.data?.kind === "refused") return;
+            const choice =
+              picked.status === "ok" && picked.data?.kind === "admitted" ? picked.data.path : null;
+            if (waiting) {
+              await current.answerStep(waiting.execution, waiting.step, choice ?? ASK_WORDS.notNow);
+              return;
+            }
+            if (!choice || !(await placing.addFolder(choice))) return;
+            if (objectiveSession !== current || current.projection?.work.id !== part.objective)
+              return;
+            current.folders = [...new Set([...current.folders, choice])];
+            again();
+          })
+          .catch(() => undefined);
+        return;
+      }
       case "allow_folder":
         if (need.address) void placing.addFolder(need.address).then((added) => added && again());
         return;
@@ -483,15 +584,20 @@
     const execution = objectiveSession?.projection?.executions.at(-1);
     for (const step of execution?.steps ?? []) {
       const kind = step.kind;
-      const folder = step.local?.folder;
-      if (kind.kind !== "ask" || kind.purpose !== "folder" || !folder) continue;
+      if (kind.kind !== "ask" || kind.purpose !== "folder" || !step.local) continue;
       if (!kind.answer) {
         if (step.status === "running") folderAsks[step.id] = true;
         continue;
       }
       if (!folderAsks[step.id]) continue;
       delete folderAsks[step.id];
-      if (kind.answer !== kind.options[0]) continue;
+      if (step.status !== "succeeded") continue;
+      const folder =
+        folderChoice(kind.answer) ??
+        (kind.answer === kind.options[0] && kind.options[0] !== ASK_WORDS.chooseFolder
+          ? step.local.folder
+          : null);
+      if (!folder) continue;
       const placed = snapshot?.elements.some(
         (element) => element.reference.kind === "folder" && element.reference.path === folder,
       );
@@ -552,15 +658,9 @@
     });
     takeoverQueue = next.catch(() => undefined);
   }
-  function openTakeover(page: string) {
-    const entry = pageEntries.get(page);
-    const item = entry ? undefined : items.find((candidate) => candidate.id === page);
-    const state = entry?.page.human ?? item?.page?.human;
-    // The well stands over the part the page is in.
-    const card = entry?.part ?? page;
-    const url = entry?.page.url ?? item?.page?.url ?? "";
-    if (!state || state.phase !== "waiting_for_human") return;
-    const work = [...human.pages].find(([, pages]) =>
+  /** The work a held page belongs to, by its id. */
+  function heldWork(state: HumanPage) {
+    return [...human.pages].find(([, pages]) =>
       pages.some(
         (candidate) =>
           candidate.id.attempt === state.attempt &&
@@ -568,6 +668,37 @@
           candidate.id.generation === state.generation,
       ),
     )?.[0];
+  }
+  /** A page the run is waiting on keeps waiting a while longer, at the person's word. */
+  function extendWait(page: string) {
+    const state =
+      pageEntries.get(page)?.page.human ??
+      items.find((candidate) => candidate.id === page)?.page?.human;
+    if (!state || state.phase !== "waiting_for_human" || !state.canExtend) return;
+    const work = heldWork(state);
+    if (work)
+      void human.extend(work, {
+        attempt: state.attempt,
+        step: state.step,
+        generation: state.generation,
+      });
+  }
+  function openTakeover(page: string) {
+    const entry = pageEntries.get(page);
+    const item = entry ? undefined : items.find((candidate) => candidate.id === page);
+    const state = entry?.page.human ?? item?.page?.human;
+    // The well stands over the part the page is in.
+    const card = entry?.part ?? page;
+    const url = entry?.page.url ?? item?.page?.url ?? "";
+    if (
+      state &&
+      takeover?.page.attempt === state.attempt &&
+      takeover.page.step === state.step &&
+      takeover.page.generation === state.generation
+    )
+      return;
+    if (!state || state.phase !== "waiting_for_human") return;
+    const work = heldWork(state);
     if (!work) return;
     panel = null;
     lifted = null;
@@ -619,11 +750,15 @@
       : null;
     // A well Rust would refuse says so rather than waiting on a view forever.
     if (box && !next) takeoverError = failureLine("invalid");
-    if (sameRegion(next, takeoverSent)) return;
-    const sent = takeoverSent;
+    // The page is presented once. Releasing it ends the hand-over, so a well
+    // that moves later is left alone: Rust keeps the page fitted to the window.
+    if (!next || takeoverSent) return;
     takeoverSent = next;
-    if (sent) applyTakeover(() => human.release(current.work, current.page), false);
-    if (next) applyTakeover(() => human.present(current.work, current.page, next), true);
+    applyTakeover(async () => {
+      const failure = await human.present(current.work, current.page, next);
+      if (failure && takeover === current) takeoverSent = null;
+      return failure;
+    }, true);
   }
   /** The person hands the page back; the run goes on without their session. */
   function continueTakeover() {
@@ -657,8 +792,6 @@
       case "objective":
       case "request":
         return { width: 640, height: 600 };
-      case "responsibility":
-        return { width: 480, height: 320 };
       case "sources":
       case "part":
         return { width: 560, height: 560 };
@@ -672,7 +805,9 @@
     }
   }
   /** The bar's one open panel: a tool's, or the field's own attach. */
-  let panel = $state<"note" | "tabs" | "media" | "attach" | "tasks" | null>(null);
+  let panel = $state<"tabs" | "media" | "attach" | "tasks" | "blocks" | null>(null);
+  /** The blocks panel opens on the kinds of block, or on the person's notes (N). */
+  let blocksView = $state<"blocks" | "notes">("blocks");
   setContext(canvasOpenTasks, () => openPanel("tasks", true));
   /** Work keeps its rail compact: a tool asked for from the app's menus opens here instead. */
   function toolAsked(event: Event) {
@@ -685,7 +820,67 @@
   let attachKind = $state<AttachKind>("tabs");
   let objectivePending = $state(false);
   let composerElement = $state<HTMLElement>();
+  let composerSurface = $state<HTMLElement>();
   let composerHeight = $state(0);
+  // Over a window material the composer paints nothing, so the canvas has a hole the shape of it.
+  // The hole is read from the sheet itself on every frame it changes, so the two never part.
+  $effect(() => {
+    const card = cardHost;
+    const sheet = composerSurface;
+    if (!card || !sheet) return;
+    const root = document.documentElement;
+    // The hole follows the bar on every frame of its width change. On a card that paints with the
+    // canvas, each new clip repaints the whole card, which at a large window is the animation's
+    // whole cost. A layer of its own for the moment the hole moves turns the clip into a mask the
+    // compositor reapplies, and it is let go again once the hole has held still.
+    let settle = 0;
+    let shape = "";
+    const cut = () => {
+      const area = card.getBoundingClientRect();
+      const bar = sheet.getBoundingClientRect();
+      if (!bar.width || !area.width) return;
+      const style = getComputedStyle(sheet);
+      const radius = parseFloat(style.borderTopLeftRadius) || 0;
+      const flare = parseFloat(style.getPropertyValue("--flare")) || 0;
+      // The fillets land on the card's own foot, whole and tangent to it, as the new tab's
+      // notch does at its page's edge; below it the window's material simply continues.
+      const reach = { width: area.width, height: Math.min(area.height, bar.bottom - area.top) };
+      const place = { left: bar.left - area.left, top: bar.top - area.top, width: bar.width };
+      const edge = sheet.querySelector<SVGSVGElement>(".edge");
+      if (edge) {
+        edge.setAttribute("viewBox", `${place.left} ${place.top} ${bar.width} ${bar.height}`);
+        const d = composerEdge(reach, place, radius, flare);
+        for (const path of edge.querySelectorAll("path")) path.setAttribute("d", d);
+      }
+      const material = root.dataset.material;
+      const clip =
+        !material || material === "none" ? "" : composerHole(reach, place, radius, flare);
+      if (clip === shape) return;
+      shape = clip;
+      if (clip) {
+        card.style.willChange = "transform";
+        clearTimeout(settle);
+        settle = window.setTimeout(() => (card.style.willChange = ""), 180);
+      }
+      card.style.clipPath = clip;
+    };
+    const observer = new ResizeObserver(cut);
+    observer.observe(card);
+    observer.observe(sheet);
+    observer.observe(sheet.parentElement ?? sheet);
+    const materials = new MutationObserver(cut);
+    materials.observe(root, { attributes: true, attributeFilter: ["data-material"] });
+    window.addEventListener("resize", cut);
+    cut();
+    return () => {
+      observer.disconnect();
+      materials.disconnect();
+      window.removeEventListener("resize", cut);
+      clearTimeout(settle);
+      card.style.clipPath = "";
+      card.style.willChange = "";
+    };
+  });
   $effect(() => {
     const element = composerElement;
     if (!element) {
@@ -708,7 +903,15 @@
   const placing = new CanvasPlacing({
     session: () => session,
     busy: () => busy,
-    centre: placingCentre,
+    spot: (at, size, id) => {
+      if (!at) return clearSpot(id, size);
+      const corner = dropPlace(null, {
+        x: at.x - size.width / 2,
+        y: at.y - size.height / 2,
+        ...size,
+      });
+      return corner ? { x: corner.x + size.width / 2, y: corner.y + size.height / 2 } : at;
+    },
     at: (x, y) => canvasRef?.flowPosition(x, y) ?? null,
     file: (path) => {
       const draft = session.composer.trimEnd();
@@ -724,30 +927,37 @@
       return "";
     }
   }
-  /** Accounts arrive after this release: the button waits, and its corner stays clean. */
-  const ACCOUNTS = false;
   const snapshot = $derived(session.snapshot);
   provideLeadLook(() => session.snapshot?.id);
+  // A resource that is neither a note nor a file is one of the person's objects: read it.
+  $effect(() => {
+    const current = snapshot;
+    if (!current) return;
+    const notesHeld = new Set(context.notes.map((note) => note.id));
+    void owned.load(
+      current.elements.flatMap((element) =>
+        element.reference.kind === "resource" &&
+        !notesHeld.has(element.reference.resource) &&
+        !context.media.has(element.reference.resource)
+          ? [element.reference.resource]
+          : [],
+      ),
+    );
+  });
   const baseItems = $derived(
     snapshot
-      ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media)
+      ? environmentItems(snapshot, tabs, context.notes, context.objectives, context.media, owned)
       : [],
   );
-  let expanded = $state<string | null>(null);
   let planGeometry = $state.raw<CanvasView>({
     positions: {},
     sizes: {},
     viewport: { x: 0, y: 0, zoom: 1 },
   });
-  const scene = $derived(
-    snapshot
-      ? environmentPlan(snapshot, baseItems, context.objectives, context.plans, expanded)
-      : { items: [], links: [], targets: new Map(), positions: {} },
-  );
   const results = $derived(
     snapshot
-      ? environmentResults(snapshot, scene.items, objectiveSession?.projection ?? null)
-      : { items: scene.items, references: new Map<string, ResultReference>(), remaining: null },
+      ? environmentResults(snapshot, baseItems, objectiveSession?.projection ?? null)
+      : { items: baseItems, references: new Map<string, ResultReference>(), remaining: null },
   );
   /** What the run this canvas is watching is doing right now. */
   const signalOf = (objective: string) =>
@@ -794,10 +1004,50 @@
   );
   /** Requests the person opened to read whole. */
   const openRequests = new SvelteSet<string>();
+  /**
+   * The person's own arrangement as it stands now: the unsaved one while a
+   * save is pending, so a save that lands late never puts a card back.
+   */
+  const ownView = $derived(
+    snapshot
+      ? environmentView(
+          session.viewDraft?.id === snapshot.id
+            ? { ...snapshot, view: session.viewDraft.view }
+            : snapshot,
+        )
+      : undefined,
+  );
+  /** What the person placed and the canvas draws, as the runs must leave it: their cards and areas. */
+  let ownRectsKey = "";
+  let ownRectsLast: Record<string, CanvasPosition & { width: number; height: number }> = {};
+  const ownRects = $derived.by(() => {
+    const next = ownView
+      ? {
+          ...Object.fromEntries(
+            results.items.flatMap((item) => {
+              const at = ownView.positions[item.id];
+              if (!at || item.type === "objective" || item.type === "request") return [];
+              return [[item.id, { ...at, ...(ownView.sizes?.[item.id] ?? defaultSize(item)) }]];
+            }),
+          ),
+          ...Object.fromEntries(
+            Object.entries(ownView.areas ?? {}).map(([id, rect]) => [`area:${id}`, rect]),
+          ),
+        }
+      : {};
+    // A live run re-derives its items many times a second; the runs re-lay only when these move.
+    const key = JSON.stringify(next);
+    if (key !== ownRectsKey) {
+      ownRectsKey = key;
+      ownRectsLast = next;
+    }
+    return ownRectsLast;
+  });
   /** Every request of the canvas as a band: its words, its branches, its result. */
   const stages = $derived(
     snapshot
       ? environmentStages(snapshot, context.objectives, {
+          around: ownRects,
           recorded: recordedPages,
           pictures: elementPictures(snapshot, context.media),
           fetched: fetchedPictures(snapshot, context.media),
@@ -810,6 +1060,8 @@
               : [],
           requests: openRequests,
           exchange: exchangeOf,
+          held: (objective: string) =>
+            (human.pages.get(objective) ?? []).some((page) => page.phase === "waiting_for_human"),
         })
       : [],
   );
@@ -876,7 +1128,7 @@
     const box = stages.at(-1)?.lane.box;
     return box ? { x: box.x, y: box.y, width: box.width } : undefined;
   });
-  // A run that ends while the person follows it hands them its result, at reading size.
+  // A run that ends while the person follows it shows them its result's top if it is out of view.
   let wasLive = new Set<string>();
   $effect(() => {
     const now = new Set(stages.filter((stage) => stage.live).map((stage) => stage.card));
@@ -885,7 +1137,7 @@
         if (now.has(card)) continue;
         const stage = stages.find((entry) => entry.card === card);
         if (stage && canvasRef?.followAgent())
-          canvasRef.reveal(stage.reply?.id ?? stage.column.head ?? card, resultSpan(stage));
+          canvasRef.settle(stage.reply?.id ?? stage.column.head ?? card, resultSpan(stage));
       }
       wasLive = now;
     });
@@ -949,6 +1201,7 @@
         host: host(page.url),
         reason: state.reason,
         remaining: state.remaining,
+        canExtend: state.canExtend,
       };
     }
     return null;
@@ -982,7 +1235,7 @@
     const need = item?.part?.need;
     if (!item || !need) return null;
     const said = needWords(need, item.part!.title, "island");
-    const how = need.kind === "retry" ? "again" : "meet";
+    const how = need.kind === "retry" || need.past ? "again" : "meet";
     return { text: said.text, action: said.action, onact: () => meetNeed(item.id, how) };
   });
   const dressOf = $derived(requestDress(stages));
@@ -1031,11 +1284,7 @@
     ...environmentSources(stages),
     ...agents.items,
   ]);
-  const links = $derived([
-    ...scene.links,
-    ...(snapshot ? environmentLinks(snapshot) : []),
-    ...requests.links,
-  ]);
+  const links = $derived([...(snapshot ? environmentLinks(snapshot) : []), ...requests.links]);
   const organizing = new SvelteSet<string>();
   /** A run whose placing was refused, by the revision it was refused at: tried again only after a change. */
   const stalled: Record<string, string> = {};
@@ -1345,7 +1594,77 @@
     const artifact = execution?.artifacts.find((entry) => entry.id === reference.artifact);
     return execution && artifact ? artifactView(artifact, execution) : undefined;
   }
+  /** What the person made of each draft before it went: kept while the work is open. */
+  const drafts = new SvelteMap<string, DraftEdit>();
+  const editDraft = (id: string, edit: DraftEdit) => drafts.set(id, { ...drafts.get(id), ...edit });
+  /** The draft's artifact and the run that made it, from the element that shows it. */
+  function draftArtifact(id: string) {
+    const reference = snapshot?.elements.find((element) => element.id === id)?.reference;
+    return reference?.kind === "artifact" ? reference : undefined;
+  }
+  /** What the person made of a draft, with where its send stands read from the run it started. */
+  function drafted(id: string): DraftEdit | undefined {
+    const edit = drafts.get(id);
+    const projection = objectiveSession?.projection;
+    if (!edit?.run || !projection) return edit;
+    const run = projection.executions.find((entry) => entry.id === edit.run);
+    return { ...edit, ...draftSend(projection, run) };
+  }
+  /** The words that ask the run to send a draft, so the app's Confirm stands before it goes. */
+  function draftRequest(view: DraftView): string {
+    const target = view.targetUrl ?? view.to ?? "";
+    const review = drafts.get(view.id)?.review ?? view.review ?? "comment";
+    const lead =
+      view.destination === "github"
+        ? review === "approve"
+          ? m.work_draft_ask_approve({ target })
+          : review === "request_changes"
+            ? m.work_draft_ask_changes({ target })
+            : m.work_draft_ask_comment({ target })
+        : view.destination === "email"
+          ? view.subject
+            ? m.work_draft_ask_email_subject({ target, subject: view.subject })
+            : m.work_draft_ask_email({ target })
+          : view.destination === "linkedin" || view.destination === "x"
+            ? m.work_draft_ask_post({ target: view.destination === "x" ? "X" : "LinkedIn" })
+            : m.work_draft_ask_message({ target });
+    return lead;
+  }
+  /** Send binds a request to the draft object; its words reach the page from the object itself. */
+  async function sendDraft(id: string) {
+    const view = items.find((item) => item.id === id)?.object?.view;
+    const reference = draftArtifact(id);
+    const current = objectiveSession;
+    const projection = current?.projection;
+    if (view?.kind !== "draft" || !reference || !current || !projection) return;
+    if (busy || activeExecution || drafted(id)?.send === "sending") return;
+    const body = (drafts.get(id)?.body ?? view.body).trim();
+    if (!body) return;
+    const original = projection.executions
+      .find((entry) => entry.id === reference.execution)
+      ?.artifacts.find((entry) => entry.id === reference.artifact);
+    if (original?.data.kind !== "draft") return;
+    if (body !== view.body) {
+      current.editArtifact(reference.execution, reference.artifact, { ...original.data, body });
+      if (!(await current.saveArtifact(reference.artifact))) return;
+    }
+    const before = new Set(current.projection?.executions.map((entry) => entry.id));
+    const started = await current.continueWith(draftRequest(view), null, {
+      draft: reference.artifact,
+    });
+    const run = current.projection?.executions.find((entry) => !before.has(entry.id));
+    if (started && run) editDraft(id, { run: run.id });
+  }
   const boardActions: BoardActions = {
+    send: (id) => void sendDraft(id),
+    write: (id, text) => editDraft(id, { body: text }),
+    review: (id, review) => editDraft(id, { review }),
+    drafted,
+    edit(id, change) {
+      const resource = items.find((item) => item.id === id)?.owned;
+      const current = resource ? owned.get(resource) : undefined;
+      if (resource && current) owned.update(resource, change(current.data as OwnedData));
+    },
     measure: takeMeasure,
     toggle: toggleBlock,
     ask: (name) => askAbout(name),
@@ -1381,6 +1700,9 @@
   };
   /** What an object opened in the centre asks of the canvas. */
   const centreActions: ObjectActions = {
+    send: (id) => void sendDraft(id),
+    write: (id, text) => editDraft(id, { body: text }),
+    review: (id, review) => editDraft(id, { review }),
     choose: (element, chosen) => boardActions.choose(element, chosen),
     compare: (id) => boardActions.compare?.(id),
     ask: (subject) => askAbout(subject),
@@ -1395,29 +1717,34 @@
   const liftedObject = $derived.by((): ObjectView | undefined => {
     const view = liftedItem?.object?.view;
     if (!view) return undefined;
+    if (view.kind === "draft") {
+      const edit = drafted(view.id);
+      return edit
+        ? {
+            ...view,
+            ...(edit.body !== undefined ? { body: edit.body } : {}),
+            ...(edit.review ? { review: edit.review } : {}),
+            ...(edit.send ? { send: edit.send } : {}),
+            ...(edit.note ? { note: edit.note } : {}),
+          }
+        : view;
+    }
     return lifted?.compare && view.kind === "picks" ? picksSheet(view) : view;
   });
   const liftedElement = $derived(snapshot?.elements.find((element) => element.id === lifted?.id));
   /** A request opens its run: what it did, its steps, its sources. */
   const liftedStage = $derived(stages.find((stage) => stage.card === lifted?.id));
-  /** A reviewed plan's objective keeps its plan view; an agent's request opens its run. */
-  const liftedAgent = $derived.by(() => {
-    const stage = liftedStage;
-    if (!stage) return false;
-    // The run the canvas is watching is the freshest word on what this request is.
-    const projection =
-      objectiveSession?.projection?.work.id === stage.objective
-        ? objectiveSession.projection
-        : context.objectives.get(stage.objective);
-    return !!projection?.executions.some(
-      (run) => stage.executions.includes(run.id) && isAgentExecution(run),
-    );
-  });
 
   /** Every admitted picture of one subject element, in the order it admitted them. */
   function picturesOf(element: string) {
     const current = snapshot;
     if (!current) return [];
+    const subject = baseItems.find((item) => item.id === element)?.subject;
+    if (subject?.recordMedia) {
+      const record = subject.recordMedia;
+      return [{ profile: record.profile, digest: record.digest, record, name: subject.name }];
+    }
+    if (subject?.mediaAttempted) return [];
     const resources = new Map(
       current.elements.flatMap((entry) =>
         entry.reference.kind === "resource" ? [[entry.id, entry.reference.resource]] : [],
@@ -1435,6 +1762,13 @@
   const liftedPictures = $derived(
     liftedElement?.reference.kind === "subject" ? picturesOf(liftedElement.id) : [],
   );
+  /** An opened object's line beside its kind: how many sources it rests on, when it changed. */
+  function objectMeta(view: ObjectView) {
+    const sources = Object.keys(view.sources ?? {}).length;
+    return [sources ? m.work_env_sources_count({ count: sources }) : "", view.updated ?? ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
   /** The one meta line of a media lift: what it is, how large, where it came from. */
   function mediaMeta(asset: NonNullable<CanvasItem["media"]>["asset"]) {
     const origin = asset.origin.kind === "fetched" ? host(asset.origin.url) : "";
@@ -1449,7 +1783,6 @@
   const loadCentre = () => import("./objects/ObjectCentre.svelte");
   const loadModels = () => import("./bar/ModelPicker.svelte");
   const loadSubject = () => import("./WorkSubjectInspector.svelte");
-  const loadDetail = () => import("./WorkObjectiveInspector.svelte");
   /** The file a source row opened, shown as the run recorded it. */
   let liftFile = $state.raw<WorkFileEvidenceV1 | null>(null);
   /** One surface: a result opens in the lift, on the run that produced it. */
@@ -1489,27 +1822,26 @@
     ),
   );
   const canvasView = $derived.by(() => {
-    if (!snapshot) return undefined;
-    const own = environmentView(snapshot);
+    if (!snapshot || !ownView) return undefined;
+    const own = ownView;
     const placed = {
-      ...scene.positions,
       ...plannedGeometry.positions,
       ...planGeometry.positions,
       ...savedResultPositions,
       ...own.positions,
     };
-    // Something of the person's with no place yet stands clear of the runs, not on them.
+    // Something of the person's with no place yet stands in free room in view, clear of the runs.
     const loose = results.items.flatMap((item) =>
       item.type === "objective" || item.type === "request" || placed[item.id] ? [] : [item.id],
     );
+    const near = loose.length ? untrack(placingCentre) : null;
     return {
       ...own,
       positions: {
-        ...scene.positions,
         ...plannedGeometry.positions,
         ...planGeometry.positions,
         ...savedResultPositions,
-        ...clearOfBands(
+        ...ownPlaces(
           own.positions,
           {
             ...Object.fromEntries(results.items.map((item) => [item.id, defaultSize(item)])),
@@ -1517,6 +1849,7 @@
           },
           stages,
           loose,
+          near,
         ),
         ...requests.positions,
         ...agents.positions,
@@ -1667,6 +2000,38 @@
     if (element) lift(element.id);
   }
   const NOTE_SIZE = { width: 360, height: 304 } as const;
+  /** A block the person puts down: an empty table, checklist or calendar of their own, ready to fill. */
+  async function createBlock(kind: BlockKind) {
+    panel = null;
+    if (kind === "note") return void createNote();
+    if (busy || !session.snapshot) return;
+    const environment = session.snapshot.id;
+    const [title, data]: [string, OwnedData] =
+      kind === "checklist"
+        ? [m.work_block_checklist(), { kind: "list", style: "todo", items: [] }]
+        : kind === "table"
+          ? [
+              m.work_block_table(),
+              {
+                kind: "sheet",
+                columns: [
+                  { label: m.work_block_name_column(), kind: "text" },
+                  { label: m.work_block_notes_column(), kind: "text" },
+                ],
+                rows: [],
+              },
+            ]
+          : [
+              m.work_block_calendar(),
+              { kind: "plan", steps: [], checkable: false, calendar: true },
+            ];
+    const id = await owned.create(title, data);
+    if (!id || environment !== session.snapshot?.id) return;
+    const view = ownedView(id, title, data);
+    const width = view ? objectWidth(view).ideal : 400;
+    const size = { width, height: view ? Math.round(objectHeight(view, width)) + 48 : 240 };
+    await placing.place({ kind: "resource", resource: id }, "object", clearSpot(null, size), size);
+  }
   /** What stands on the canvas now, one thing left out: the runs and every placed item. */
   function taken(except: string | null) {
     const view = canvasView;
@@ -1679,6 +2044,30 @@
       rects.push({ ...at, ...(view.sizes[item.id] ?? defaultSize(item)) });
     }
     return rects;
+  }
+  /** A drop the canvas put clear of a run says so, briefly. */
+  let putClear = $state(false);
+  let putClearTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(putClearTimer));
+  /**
+   * Where something of the person's dropped at `rect` must stand instead:
+   * only on or against a run's card is a drop refused, and then it goes to
+   * the nearest free spot. Null, and it stays exactly where it was put. A
+   * run's own cards are the run's to place.
+   */
+  function dropPlace(id: string | null, rect: CanvasPosition & { width: number; height: number }) {
+    const current = snapshot;
+    const element = id ? current?.elements.find((entry) => entry.id === id) : undefined;
+    if (!current || (id && (!element || laneElement(current, element)))) return null;
+    const spot = dropSpot(
+      rect,
+      stages.flatMap((stage) => Object.values(stage.lane.rects)),
+    );
+    if (!spot) return null;
+    putClear = true;
+    clearTimeout(putClearTimer);
+    putClearTimer = setTimeout(() => (putClear = false), 4000);
+    return spot;
   }
   /** The centre of the nearest free room to the view's middle, or to where a thing already stands. */
   function clearSpot(except: string | null, size: { width: number; height: number }) {
@@ -1716,9 +2105,14 @@
     if (!snapshot || pane || lifted || takeover) return;
     const key = event.key.toLowerCase();
     if (key === "v" || key === "h") setPointerTool(key === "v" ? "select" : "hand");
-    else if (key === "n") openPanel("note", true);
-    else if (key === "a") openPanel("media", true);
-    else if (key === "t") openPanel("tasks", true);
+    else if (key === "n" && preferences.enabled("notes")) {
+      blocksView = "notes";
+      openPanel("blocks", true);
+    } else if (key === "a") openPanel("media", true);
+    else if (key === "b") {
+      blocksView = "blocks";
+      openPanel("blocks", true);
+    } else if (key === "t" && preferences.enabled("tasks")) openPanel("tasks", true);
     else if (key === "/" && aiEnabled)
       composerElement?.querySelector<HTMLElement>("textarea")?.focus();
     else return;
@@ -1738,18 +2132,13 @@
           element.reference.objective === objectiveSession?.selected,
       ),
   );
-  /**
-   * A read that met a sign-in wall: the page opens over the canvas for the
-   * person to sign in; the run notices and goes on by itself.
-   */
-  function signIn(card: string) {
-    const url = pageEntries.get(card)?.page.url;
-    if (url) openPane({ kind: "url", url }, card);
-  }
   /** One field, one meaning: the first message starts the work, the rest continue it. */
+  let blockSaveFailed = $state(false);
   async function send() {
     const text = session.composer.trim();
     if (!text || busy) return;
+    blockSaveFailed = !(await owned.flushAll());
+    if (blockSaveFailed) return;
     const current = objectiveSession;
     if (runningObjective && current) {
       const context = contextSel;
@@ -1857,9 +2246,7 @@
     camera = view.viewport ?? camera;
     if (!snapshot || session.loading) return;
     const ids = Object.keys(view.positions).filter(
-      (id) =>
-        scene.targets.has(id) ||
-        (results.references.has(id) && !snapshot.elements.some((element) => element.id === id)),
+      (id) => results.references.has(id) && !snapshot.elements.some((element) => element.id === id),
     );
     const positions = Object.fromEntries(
       [
@@ -2044,6 +2431,19 @@
         onattach={(ids) => void attachResources(ids)}
       />{/snippet}</AttachPanel
   >{/snippet}
+{#snippet notesList(back: () => void)}{#if notes}<NotePanel
+      {notes}
+      placed={snapshot?.elements.flatMap((element) =>
+        element.reference.kind === "resource" ? [element.reference.resource] : [],
+      ) ?? []}
+      {busy}
+      oncreate={() => {
+        panel = null;
+        void createNote();
+      }}
+      onpick={(id) => void placeNote(id)}
+      onback={back}
+    />{/if}{/snippet}
 {#snippet barTools()}
   {@const hand = pointerTool() === "hand"}
   <BarTool
@@ -2055,35 +2455,32 @@
   />
   <span class="tool-rule" aria-hidden="true"></span>
   <BarTool
-    icon={StickyNote03Icon}
-    label={m.work_tool_note()}
-    keys={["N"]}
+    icon={ShapeCollectionIcon}
+    label={m.work_tool_blocks()}
+    keys={["B"]}
     disabled={!snapshot}
-    open={panel === "note"}
-    onopenchange={(open) => openPanel("note", open)}
-    >{#snippet content()}{#if notes}<NotePanel
-          {notes}
-          placed={snapshot?.elements.flatMap((element) =>
-            element.reference.kind === "resource" ? [element.reference.resource] : [],
-          ) ?? []}
-          {busy}
-          oncreate={() => {
-            panel = null;
-            void createNote();
-          }}
-          onpick={(id) => void placeNote(id)}
-        />{/if}{/snippet}</BarTool
+    open={panel === "blocks"}
+    onopenchange={(open) => {
+      if (open && panel !== "blocks") blocksView = "blocks";
+      openPanel("blocks", open);
+    }}
+    >{#snippet content()}<BlocksPanel
+        {busy}
+        bind:view={blocksView}
+        notes={preferences.enabled("notes") && notes ? notesList : undefined}
+        onpick={(kind) => void createBlock(kind)}
+      />{/snippet}</BarTool
   >
-  <BarTool
-    icon={CheckListIcon}
-    label={m.panel_tasks()}
-    keys={["T"]}
-    disabled={!snapshot}
-    wide
-    open={panel === "tasks"}
-    onopenchange={(open) => openPanel("tasks", open)}
-    >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
-  >
+  {#if preferences.enabled("tasks")}<BarTool
+      icon={CheckListIcon}
+      label={m.panel_tasks()}
+      keys={["T"]}
+      disabled={!snapshot}
+      wide
+      open={panel === "tasks"}
+      onopenchange={(open) => openPanel("tasks", open)}
+      >{#snippet content()}<TasksPanel profile={session.profile} />{/snippet}</BarTool
+    >{/if}
   <BarTool
     icon={PlusSignIcon}
     label={m.work_tool_attach()}
@@ -2142,7 +2539,6 @@
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
         onsteered={() => (session.composer = "")}
-        onsignin={(card: string) => signIn(card)}
         {human}
         onopenstep={openStep}
       />{/snippet}</LazyView
@@ -2183,6 +2579,7 @@
               onmoved={(ids: string[]) => {
                 for (const id of ids) moved.add(id);
               }}
+              placeDrop={dropPlace}
               onprobe={(origin: string) =>
                 void commands.faviconProbe(session.profile, [origin]).catch(() => false)}
               fitBottomInset={composerHeight}
@@ -2239,6 +2636,10 @@
                   openTakeover(id);
                   return;
                 }
+                if (action === "wait" || action?.startsWith("wait:")) {
+                  extendWait(action === "wait" ? id : action.slice("wait:".length));
+                  return;
+                }
                 if (action === "expand-request") {
                   if (openRequests.has(id)) openRequests.delete(id);
                   else openRequests.add(id);
@@ -2260,15 +2661,7 @@
                   composerElement?.querySelector<HTMLElement>("textarea")?.focus();
                   return;
                 }
-                const reference = results.references.get(id);
-                if (reference) {
-                  void saveResult(id);
-                  return;
-                }
-                expanded =
-                  items.find((item) => item.id === id)?.actionLabel === m.work_env_collapse_plan()
-                    ? null
-                    : id;
+                if (results.references.has(id)) void saveResult(id);
               }}
               onviewchange={checkpoint}
             />{/snippet}</LazyView
@@ -2298,8 +2691,11 @@
     <div class="canvas-top">
       <WorksMenu {session} untitled={m.work_env_default_title()} live={!!runStatus} />
       <span class="canvas-top-gap"></span>
-      {#if runningObjective && objectiveSession}<div class="island">
-          {@render agentLine()}
+      <div class="island" class:gone={!(runningObjective && objectiveSession)}>
+        {#if runningObjective && objectiveSession}{@render agentLine()}{/if}
+      </div>
+      {#if putClear && !troubled}<div class="status" role="status">
+          <span>{m.work_env_put_clear()}</span>
         </div>{/if}
       {#if troubled}<div class="status" role="status">
           <span
@@ -2318,7 +2714,6 @@
               >{m.work_env_reload()}</Button
             >{/if}
         </div>{/if}
-      {#if ACCOUNTS}<AccountButton name={profileLabel} />{/if}
       <!-- The zoom level reads in the top-right corner, a quiet counterpart to the work's name. -->
       <div class="zoom-slot" data-work-zoom-slot></div>
     </div>
@@ -2330,6 +2725,7 @@
       source={lifted.id || null}
       bounds={cardBounds}
       preferred={liftSize(liftedItem)}
+      hug={!lifted.proposal && !liftFile && liftedElement?.reference.kind !== "resource"}
       title={lifted.proposal ? m.work_line_review() : (liftedItem?.title ?? "")}
       onclose={() => {
         const closing = lifted?.id;
@@ -2374,49 +2770,44 @@
             <module.default record={liftedCommand} />
           {/await}
         </div>
-      {:else if liftedItem?.sources}
-        <div class="lift-body">
-          <LiftHeader
-            kind={liftedItem.type === "part" ? m.work_part() : m.work_sources()}
-            title={liftedItem.title}
-            meta={liftedItem.type === "part" && liftedItem.part?.helper === "browser"
-              ? m.work_part_pages({ count: liftedItem.sources.length })
-              : m.work_env_sources_count({ count: liftedItem.sources.length })}
-            icon={GlobalIcon}
-          />
-          {#if liftedItem.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
-              <div class="lift-notes">
+      {:else if liftedItem?.sources || liftedItem?.drawn}
+        {@const part = liftedItem.type === "part"}
+        <SourcesLift
+          kind={part ? m.work_part() : m.work_sources()}
+          title={part ? liftedItem.title : undefined}
+          rows={liftedItem.sources
+            ? liftedItem.sources.map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.where,
+                url: row.url,
+                ...(row.note ? { note: row.note } : {}),
+                ...(row.file ? { file: row.file.record } : {}),
+              }))
+            : (liftedItem.drawn?.rows ?? []).map((row) => ({
+                key: row.key,
+                title: row.title,
+                host: row.host,
+                url: row.url,
+                ...(row.file ? { file: row.file.record } : {}),
+              }))}
+          unread={liftedItem.drawn?.unread ?? []}
+          onopen={(row) => {
+            if (row.file) {
+              liftFile = fileEvidence(context.objectives, row.file) ?? null;
+              return;
+            }
+            lifted = null;
+            openPane({ kind: "url", url: row.url }, null);
+          }}
+        >
+          {#snippet notes()}{#if liftedItem?.part?.notes?.length}{#await import("./objects/ObjectView.svelte") then module}
                 {#each liftedItem.part.notes as note (note.id)}<module.default
                     object={note}
                     centre
                   />{/each}
-              </div>
-            {/await}{/if}
-          <ul class="lift-sources">
-            {#each liftedItem.sources as row (row.key)}
-              <li>
-                <button
-                  type="button"
-                  onclick={() => {
-                    if (row.file) {
-                      liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
-                      return;
-                    }
-                    const url = row.url;
-                    lifted = null;
-                    openPane({ kind: "url", url }, null);
-                  }}
-                >
-                  <HostGlyph host={row.where} file={!!row.file} size={22} />
-                  <span class="source-text">
-                    <strong>{row.title}</strong>
-                    <span>{row.note || row.where}</span>
-                  </span>
-                </button>
-              </li>
-            {/each}
-          </ul>
-        </div>
+              {/await}{/if}{/snippet}
+        </SourcesLift>
       {:else if liftedElement?.reference.kind === "resource" && liftedItem?.media}
         {@const asset = liftedItem.media.asset}
         {@const image =
@@ -2493,29 +2884,15 @@
                 (liftFile = fileEvidence(context.objectives, record) ?? null)}
             />{/snippet}</LazyView
         >
-      {:else if !liftedAgent && liftedElement?.reference.kind === "objective" && objectiveSession}
-        <LazyView
-          loader={loadDetail}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Detail)}<Detail
-              session={objectiveSession!}
-              attached={snapshot?.elements.map((element) => element.reference) ?? []}
-              onopencitation={openCitation}
-              onattach={(reference) => void session.edit({ kind: "add", reference, area: null })}
-            />{/snippet}</LazyView
-        >
       {:else if liftedStage}
-        <RunView
+        <RequestLift
           request={liftedStage.request}
           trail={liftedStage.trail}
           runs={context.objectives
             .get(liftedStage.objective)
             ?.executions.filter((run) => liftedStage.executions.includes(run.id)) ?? []}
-          made={liftedStage.board.blocks.flatMap((block) =>
-            block.title ? [{ id: block.id, title: block.title }] : [],
-          )}
+          made={stageMade(liftedStage)}
+          oncommand={(record) => boardActions.command(record)}
           onsource={(row) => {
             if (row.file) {
               liftFile = fileEvidence(context.objectives, row.file.record) ?? null;
@@ -2530,16 +2907,29 @@
           }}
         />
       {:else if liftedObject && !(liftedItem && results.references.has(liftedItem.id) && !agentBlock(liftedItem.id))}
-        <LazyView
-          loader={loadCentre}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(Centre)}<Centre
-              object={liftedObject!}
-              actions={centreActions}
-            />{/snippet}</LazyView
-        >
+        {@const named = liftedObject.kind === "reply" ? liftedObject.headline : liftedObject.title}
+        <div class="lift-body">
+          <LiftHeader
+            kind={objectLabel(liftedObject.kind)}
+            meta={objectMeta(liftedObject)}
+            icon={objectIcon(liftedObject.kind)}
+            primary={liftedItem ? resultAction(liftedItem.id) : undefined}
+          >
+            {#snippet actions()}{#if named}<Button size="compact" onclick={() => askAbout(named)}
+                  >{m.work_lift_ask()}</Button
+                >{/if}{/snippet}
+          </LiftHeader>
+          <LazyView
+            loader={loadCentre}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(Centre)}<Centre
+                object={liftedObject!}
+                actions={centreActions}
+              />{/snippet}</LazyView
+          >
+        </div>
       {:else if liftedItem?.artifact}
         <div class="lift-result">
           {#if results.references.get(liftedItem.id) && objectiveSession}
@@ -2629,8 +3019,10 @@
     >
   {/if}
   <div class="bar-dock" bind:clientHeight={dockHeight}>
+    {#if blockSaveFailed}<p role="alert">{m.resource_conflict()}</p>{/if}
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
+        bind:surface={composerSurface}
         bind:value={session.composer}
         placeholder={lineRunning
           ? m.work_composer_steer()
@@ -2692,30 +3084,29 @@
     pointer-events: none;
   }
 
-  /* Solid behind the title and the island, then easing out: nothing reads through them. */
+  /* Solid only behind the title and the island, then a short, soft ease out. */
   .edge-scrim.top {
     inset-block-start: 0;
-    block-size: 112px;
+    block-size: 72px;
     background: linear-gradient(
       to bottom,
-      var(--color-canvas) 0 44px,
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) 64px,
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) 88px,
-      transparent 112px
+      var(--color-canvas) 0 34px,
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) 46px,
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) 60px,
+      transparent 72px
     );
   }
 
-  /* Under the bar, however tall its context makes it: solid where the bar stands,
-     then easing out, so nothing reads through or ends in a hard line above it. */
+  /* Under the bar, however tall its context makes it: solid where the bar stands, then a short ease out. */
   .edge-scrim.bottom {
     inset-block-end: 0;
-    block-size: calc(var(--dock, 64px) + 72px);
+    block-size: calc(var(--dock, 64px) + 40px);
     background: linear-gradient(
       to top,
-      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.6),
-      color-mix(in srgb, var(--color-canvas) 72%, transparent) calc(var(--dock, 64px) + 16px),
-      color-mix(in srgb, var(--color-canvas) 28%, transparent) calc(var(--dock, 64px) + 44px),
-      transparent calc(var(--dock, 64px) + 72px)
+      var(--color-canvas) 0 calc(var(--dock, 64px) * 0.5),
+      color-mix(in srgb, var(--color-canvas) 62%, transparent) calc(var(--dock, 64px) + 8px),
+      color-mix(in srgb, var(--color-canvas) 20%, transparent) calc(var(--dock, 64px) + 24px),
+      transparent calc(var(--dock, 64px) + 40px)
     );
   }
 
@@ -2754,19 +3145,22 @@
     max-inline-size: min(520px, calc(100% - 560px));
     translate: -50% 0;
     pointer-events: auto;
-    animation: island-in var(--motion-slow) var(--ease-spring) backwards;
+    transition:
+      opacity var(--motion-base) var(--ease-out),
+      visibility var(--motion-base);
   }
 
-  @keyframes island-in {
-    from {
-      opacity: 0;
-      scale: 0.9;
-    }
+  /* The island stays mounted across a run's waits and resumes, so it fades
+     rather than replaying an entrance each time its contents return. */
+  .island.gone {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
   }
 
   @media (prefers-reduced-motion: reduce) {
     .island {
-      animation: none;
+      transition: none;
     }
   }
 
@@ -2824,68 +3218,6 @@
     flex-direction: column;
     gap: 16px;
     min-block-size: 0;
-  }
-
-  /* What a research part handed the lead, read before the pages it came from. */
-  .lift-notes {
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
-    margin-block-end: 28px;
-  }
-
-  .lift-sources {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 0;
-  }
-
-  .lift-sources button {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    inline-size: 100%;
-    box-sizing: border-box;
-    padding: 8px 10px;
-    border: 0;
-    border-radius: var(--radius-control-compact);
-    background: transparent;
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
-    transition: background-color var(--motion-instant) ease;
-  }
-
-  .lift-sources button:focus-visible {
-    outline: 2px solid var(--color-ring);
-    outline-offset: -2px;
-  }
-
-  .lift-sources button:hover {
-    background: var(--color-fill-hover);
-  }
-
-  .source-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-inline-size: 0;
-  }
-
-  .source-text strong {
-    font-weight: 550;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .source-text span {
-    color: var(--color-muted);
-    font-size: var(--text-caption);
   }
 
   .lift-media {

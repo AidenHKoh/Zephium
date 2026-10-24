@@ -4,6 +4,7 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import ObjectsSheet from "./ObjectsSheet.svelte";
 import { centred, looks } from "./object-fixtures";
+import { ownedView } from "../lib/board/objects";
 import type { DiagramView, ObjectView } from "../lib/board/types";
 
 // The QA profile's cached site icons, so marks draw as they do in the app.
@@ -27,6 +28,45 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ faviconProbe: async () => true });
 });
+
+vi.mock("$domain/resources", async (original) => {
+  const actual = await original<typeof import("$domain/resources")>();
+  const { default: picture } = await import("./fixtures/record-product.svg?url");
+  return {
+    ...actual,
+    recordMediaUrl: (media: import("$shared/ipc/bindings").WorkRecordMediaRefV1) =>
+      media.profile === "01K7SEEDEDPR0F1E0000000000" ? picture : actual.recordMediaUrl(media),
+  };
+});
+
+const recordSheet = ownedView("stored-record-images", "Stored product images", {
+  kind: "sheet",
+  columns: [
+    { kind: "entity", label: "Product" },
+    { kind: "text", label: "Price" },
+    { kind: "text", label: "Warranty" },
+  ],
+  rows: ["Compact drive", "Portable drive", "Travel drive"].map((name, record) => ({
+    cells: [name, `${129 + record * 20},99 zł`, "3 years"],
+    entity: {
+      media_attempted: true,
+      record_media: {
+        profile: "01K7SEEDEDPR0F1E0000000000",
+        work: "fixture-work",
+        execution: "fixture-execution",
+        attempt: "fixture-attempt",
+        step: "fixture-step",
+        extraction: "fixture-extraction",
+        record,
+        source: "a".repeat(64),
+        digest: String(record + 1).repeat(64),
+        width: 320,
+        height: 200,
+        origin: "public_fetch" as const,
+      },
+    },
+  })),
+})!;
 
 const shots = "../../../../../target/work-objects";
 const settle = (ms = 700) => new Promise((done) => setTimeout(done, ms));
@@ -71,6 +111,7 @@ async function drawn(): Promise<{ object: ObjectView; width: number }[]> {
 
 const scenes: Record<string, () => Promise<{ object: ObjectView; width: number }[]>> = {
   ...Object.fromEntries(Object.entries(looks).map(([name, rows]) => [name, async () => rows])),
+  "record-images": async () => [{ object: recordSheet, width: 880 }],
   diagrams: drawn,
   centre: async () => centred,
 };
@@ -94,6 +135,7 @@ test.each(Object.keys(scenes))(
         check: noop,
         send: noop,
         write: noop,
+        review: noop,
       },
     });
     const sheet = screen.container.querySelector<HTMLElement>(".sheet")!;

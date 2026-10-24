@@ -32,9 +32,10 @@ describe("interface language", () => {
     expect(runtime.getLocale()).toBe(runtime.baseLocale);
   });
 
-  it("offers every translated locale among its languages", async () => {
-    const { locale, runtime } = await load(["en"]);
-    for (const translated of runtime.locales) expect(locale.languages()).toContain(translated);
+  it("offers only translated languages for the interface, English first, all of them settable", async () => {
+    const { locale } = await load(["en"]);
+    expect(locale.interfaceLanguages()[0]).toBe("en");
+    for (const tag of locale.interfaceLanguages()) expect(locale.languages()).toContain(tag);
   });
 
   it("shows an untranslated language as English, left to right", async () => {
@@ -43,4 +44,22 @@ describe("interface language", () => {
     expect(runtime.getLocale()).toBe(runtime.baseLocale);
     expect(root).toMatchObject({ lang: "en", dir: "ltr" });
   });
+
+  it(
+    "loads a translated language on demand and shows its messages in place",
+    { timeout: 30_000 },
+    async () => {
+      const { locale, runtime, root } = await load(["fr-CA", "en"]);
+      // Exercise translation of one message without transforming the entire
+      // generated message graph in this unbundled test runtime.
+      const m = await import("$shared/i18n/messages/new_tab.js");
+      expect(locale.interfaceLanguages()).toContain("fr");
+      await locale.applyLanguage("system");
+      expect(runtime.getLocale()).toBe("fr");
+      expect(root.lang).toBe("fr");
+      expect(m.new_tab()).toBe("Nouvel onglet");
+      await locale.applyLanguage("en");
+      expect(m.new_tab()).toBe("New tab");
+    },
+  );
 });

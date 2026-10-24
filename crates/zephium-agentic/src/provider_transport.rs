@@ -16,16 +16,24 @@
 
 /// Bounded objective/context planning over the shared fixed-endpoint transport.
 pub mod agent;
+/// Public search on the person's own engine's results page, with no model.
+pub mod browser_search;
 /// Typed decisions over admitted, enumerated questions.
 pub mod decision;
 /// General tool-calling transports for the lead agent.
 pub mod lead;
+/// Page-agent turns on the person's chosen model.
+pub mod model_client;
+/// Public search through the chosen model's own provider search.
+pub mod model_search;
 pub mod planning;
 mod rig;
 /// Bounded non-reasoning provider-native public search.
 pub mod search;
 /// Bounded semantic artifacts from admitted dependency context.
 pub mod synthesis;
+/// A pasted YouTube link's title and channel from YouTube's oEmbed endpoint.
+pub mod youtube_oembed;
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -243,6 +251,10 @@ pub enum AgentProviderVaultError {
     /// A bounded zeroizing credential copy could not be allocated.
     #[error("agent provider credential memory is unavailable")]
     Capacity,
+    /// An earlier vault call is waiting on an OS prompt the person has not
+    /// answered; this load never reached the vault.
+    #[error("the OS vault is waiting for the person's approval of an earlier request")]
+    AwaitingApproval,
 }
 
 /// Compatibility name for the macOS credential loader's closed errors.
@@ -294,7 +306,7 @@ fn load_windows_credential<P: AgentCredentialBinding>(
     provider: P,
     target: &str,
 ) -> Result<AgentProviderCredential<P>, AgentProviderVaultError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     let read = || zephium_credentials::read(target);
     let loaded = match read() {
         Err(zephium_credentials::VaultError::Inaccessible) => {
@@ -303,12 +315,7 @@ fn load_windows_credential<P: AgentCredentialBinding>(
         }
         loaded => loaded,
     };
-    let secret = loaded.map_err(|error| match error {
-        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
-        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
-        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
-        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
-    })?;
+    let secret = loaded.map_err(vault_error)?;
     AgentProviderCredential::try_from_zeroizing(provider, secret).map_err(|error| match error {
         AgentProviderCredentialError::Content => AgentProviderVaultError::Invalid,
         AgentProviderCredentialError::Capacity => AgentProviderVaultError::Capacity,
@@ -319,11 +326,10 @@ fn load_windows_credential<P: AgentCredentialBinding>(
 #[cfg(feature = "probe-harness")]
 pub fn load_probe_openai_credential() -> Result<AgentProviderCredential, AgentProviderVaultError> {
     #[cfg(target_os = "macos")]
-    {
-        return load_macos_probe_openai_credential();
-    }
+    let loaded = load_macos_probe_openai_credential();
     #[cfg(not(target_os = "macos"))]
-    load_development_openai_credential()
+    let loaded = load_development_openai_credential();
+    loaded
 }
 
 /// Loads the exact development OpenAI key into a move-only zeroizing credential.
@@ -376,17 +382,26 @@ pub fn load_macos_development_typesafe_credential(
 }
 
 /// One Keychain call at a time across the process: concurrent reads of the
-/// login keychain fail transiently, so every caller takes a turn.
-#[cfg(target_os = "macos")]
-pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// login keychain fail transiently, so every caller, including the account
+/// session, takes the same turn. A call stuck behind an unanswered OS prompt
+/// fails the ones after it fast instead of queueing them forever.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn keychain_turn() -> Result<zephium_credentials::Turn, zephium_credentials::VaultError>
+{
+    zephium_credentials::turn()
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn keychain_turn() -> std::sync::MutexGuard<'static, ()> {
-    zephium_credentials::turn()
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const fn vault_error(error: zephium_credentials::VaultError) -> AgentProviderVaultError {
+    match error {
+        zephium_credentials::VaultError::Missing => AgentProviderVaultError::Missing,
+        zephium_credentials::VaultError::Inaccessible => AgentProviderVaultError::Inaccessible,
+        zephium_credentials::VaultError::Invalid => AgentProviderVaultError::Invalid,
+        zephium_credentials::VaultError::Capacity => AgentProviderVaultError::Capacity,
+        zephium_credentials::VaultError::AwaitingApproval => {
+            AgentProviderVaultError::AwaitingApproval
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -395,7 +410,7 @@ fn load_keychain_login_credential<P: AgentCredentialBinding>(
     service: &'static str,
     account: &'static str,
 ) -> Result<AgentProviderCredential<P>, MacosAgentProviderCredentialError> {
-    let _turn = keychain_turn();
+    let _turn = keychain_turn().map_err(vault_error)?;
     match read_keychain_login_credential(provider, service, account) {
         Err(MacosAgentProviderCredentialError::Inaccessible) => {
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -1082,7 +1097,6 @@ impl AgentProviderTransport {
         credential: &AgentProviderCredential,
         cancellation: AgentProviderCancellation,
     ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
-        let call = input.request().call();
         let provider = input.request().config().provider();
         let endpoint = input.request().endpoint();
         let Some(deadline) = Instant::now().checked_add(self.config.request_timeout) else {
@@ -1097,7 +1111,11 @@ impl AgentProviderTransport {
                 .map_err(AgentProviderAdmissionError::Settlement)?;
             return Err(AgentProviderAdmissionError::CredentialProvider);
         }
-        if !provider_endpoint_matches(provider, endpoint) {
+        // A chosen model's request is never sent to a fixed endpoint.
+        if !provider_endpoint_matches(provider, endpoint)
+            || input.request().config().response_route()
+                == crate::AgentProviderResponseRoute::ModelReported
+        {
             let _outcome = input
                 .refuse(policy)
                 .map_err(AgentProviderAdmissionError::Settlement)?;
@@ -1112,6 +1130,93 @@ impl AgentProviderTransport {
                 return Err(AgentProviderAdmissionError::Credential);
             }
         };
+        self.commit_admitted(
+            input,
+            policy,
+            cancellation,
+            deadline,
+            Some(credential),
+            None,
+        )
+    }
+
+    /// Admits one turn on the person's chosen model without starting a call.
+    ///
+    /// The request must carry the provider-reported accounting mode bound to
+    /// exactly this model's pricing schedule. Every capacity, duplicate,
+    /// cancellation and shutdown check, and the disclosure commit, are the
+    /// fixed-endpoint path's own.
+    pub fn try_admit_model(
+        &self,
+        input: AgentProviderTransportInput,
+        policy: &mut AgentRunPolicy,
+        model: &model_client::AgentProviderModelClient,
+        cancellation: AgentProviderCancellation,
+    ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
+        let Some(deadline) = Instant::now().checked_add(self.config.request_timeout) else {
+            let _outcome = input
+                .refuse(policy)
+                .map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::State);
+        };
+        let config = input.request().config();
+        if input.request().endpoint() != AgentProviderEndpoint::OpenAiResponses
+            || config.input_accounting_mode()
+                != crate::AgentProviderInputAccountingMode::ProviderReportedAfterConservativeReservation
+            || !model.binds(config)
+        {
+            let _outcome = input
+                .refuse(policy)
+                .map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::ModelBinding);
+        }
+        self.commit_admitted(
+            input,
+            policy,
+            cancellation,
+            deadline,
+            None,
+            Some(model.clone()),
+        )
+    }
+
+    fn commit_admitted(
+        &self,
+        input: AgentProviderTransportInput,
+        policy: &mut AgentRunPolicy,
+        cancellation: AgentProviderCancellation,
+        deadline: Instant,
+        credential: Option<AgentProviderAttemptCredential>,
+        model: Option<model_client::AgentProviderModelClient>,
+    ) -> Result<AgentProviderAttempt, AgentProviderAdmissionError> {
+        let has_images = lead::image_fence::provider_body_has_image(input.request().body())
+            || policy.has_model_image_history();
+        // An optional caller fence can only restrict ordinary requests. Every
+        // image (including retained replay and exact counting) requires the
+        // original policy's exact native+consent fence; it cannot be replaced.
+        let optional = input.image_fence();
+        let image_fence = if has_images {
+            policy.model_image_fence().filter(|required| {
+                optional
+                    .as_ref()
+                    .is_none_or(|extra| std::sync::Arc::ptr_eq(required, extra))
+            })
+        } else {
+            optional
+        };
+        if (has_images && image_fence.is_none())
+            || image_fence
+                .as_ref()
+                .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            let _ = input
+                .cancel(policy)
+                .map_err(AgentProviderAdmissionError::Settlement)?;
+            return Err(AgentProviderAdmissionError::Cancelled);
+        }
+        let call = input.request().call();
+        let provider = input.request().config().provider();
+        let endpoint = input.request().endpoint();
         let mut slot = match self.reserve(call) {
             Ok(slot) => slot,
             Err(error) => {
@@ -1159,7 +1264,27 @@ impl AgentProviderTransport {
             drop(slot);
             return Err(AgentProviderAdmissionError::Cancelled);
         }
-        let committed = match input.commit(policy) {
+        let committed = if let Some(fence) = &image_fence {
+            let mut owned = Some(input);
+            let mut committed = None;
+            let current = fence.while_current(&mut || {
+                if let Some(input) = owned.take() {
+                    committed = Some(input.commit(policy));
+                }
+            });
+            if !current || committed.is_none() {
+                if let Some(input) = owned.take() {
+                    let _ = input
+                        .cancel(policy)
+                        .map_err(AgentProviderAdmissionError::Settlement)?;
+                }
+                return Err(AgentProviderAdmissionError::Cancelled);
+            }
+            committed.ok_or(AgentProviderAdmissionError::Cancelled)?
+        } else {
+            input.commit(policy)
+        };
+        let committed = match committed {
             Ok(committed) => committed,
             Err(error) => {
                 drop(shutdown_gate);
@@ -1172,13 +1297,16 @@ impl AgentProviderTransport {
         drop(shutdown_gate);
         drop(cancellation_gate);
         Ok(AgentProviderAttempt {
+            image_fence,
             client: self.client.clone(),
             endpoint: self.endpoints.endpoint(endpoint).clone(),
             input_token_endpoint: (provider == AgentProviderKind::OpenAiResponses)
                 .then(|| self.endpoints.openai_input_tokens.clone()),
             provider,
             prior_disclosure_stage: AgentProviderDisclosureStage::NotDispatched,
-            credential: Some(credential),
+            credential,
+            model,
+            model_reply: None,
             core: Some(AgentProviderAttemptCore::PreDispatch {
                 committed: Box::new(committed),
                 slot: Some(slot),
@@ -1350,6 +1478,9 @@ pub enum AgentProviderAdmissionError {
     /// Exact cancellation won before semantic disclosure committed.
     #[error("agent provider request was cancelled before commitment")]
     Cancelled,
+    /// The request was not bound to the chosen model it was admitted for.
+    #[error("agent provider request is not bound to the chosen model")]
+    ModelBinding,
     /// Bounded transport admission state became unavailable.
     #[error("agent provider transport state is unavailable")]
     State,
@@ -1418,9 +1549,15 @@ pub struct AgentProviderTransportResult {
     outcome: AgentProviderTransportOutcomeOwned,
     disclosure_stage: AgentProviderDisclosureStage,
     continuation: Option<Box<AgentProviderContinuationSeed>>,
+    model_reply: Option<crate::AgentProviderModelReplyFacts>,
 }
 
 impl AgentProviderTransportResult {
+    /// Closed facts about a chosen model's reply, when one was decoded.
+    pub const fn model_reply(&self) -> Option<crate::AgentProviderModelReplyFacts> {
+        self.model_reply
+    }
+
     /// Exact non-authorizing correlation for this result.
     pub fn call(&self) -> AgentProviderCallIdentity {
         AgentProviderCallIdentity::from_active(&self.active)
@@ -1500,6 +1637,7 @@ impl AgentProviderTransportResult {
             outcome,
             disclosure_stage,
             continuation,
+            model_reply: _,
         } = self;
         match outcome {
             AgentProviderTransportOutcomeOwned::Stream(finished) => {
@@ -1761,12 +1899,15 @@ impl AgentProviderImmediateSettlementError {
 /// still let the borrowed drive finish and return its normal terminal.
 #[must_use]
 pub struct AgentProviderAttempt {
+    image_fence: Option<Arc<dyn zephium_core::work::model::WorkModelImageFence>>,
     client: Client,
     endpoint: Url,
     input_token_endpoint: Option<Url>,
     provider: AgentProviderKind,
     prior_disclosure_stage: AgentProviderDisclosureStage,
     credential: Option<AgentProviderAttemptCredential>,
+    model: Option<model_client::AgentProviderModelClient>,
+    model_reply: Option<crate::AgentProviderModelReplyFacts>,
     core: Option<AgentProviderAttemptCore>,
     phase: AgentProviderAttemptPhase,
     cancellation: AgentProviderCancellation,
@@ -2085,8 +2226,9 @@ impl AgentProviderAttempt {
             .take()
             .ok_or(AgentProviderAttemptStateError::Terminal)?;
         drop(self.credential.take());
+        drop(self.model.take());
         self.phase = AgentProviderAttemptPhase::Terminal;
-        let result = match core {
+        let mut result = match core {
             AgentProviderAttemptCore::PreDispatch { committed, slot } => {
                 let input_metric_receipt = committed.sealed_input_metric_receipt();
                 let (request, input, continuation) = (*committed).into_parts();
@@ -2116,6 +2258,7 @@ impl AgentProviderAttempt {
                 )
             }
         };
+        result.model_reply = self.model_reply.take();
         Ok(result)
     }
 
@@ -2268,6 +2411,13 @@ impl AgentProviderAttempt {
         if self.mark_count_drive_started().is_err() {
             return AgentProviderExactCountOutcome::Unavailable(self.state_error());
         }
+        let image_fence = self.image_fence.clone();
+        if image_fence
+            .as_ref()
+            .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            return self.counted_failure(cancelled_failure());
+        }
         // This is immediately before the first possible request.send() poll.
         // Count disclosure is monotonic but still proves zero model dispatch.
         self.mark_input_count_disclosed();
@@ -2282,8 +2432,9 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
-                response = send.send() => response,
+                response = lead::image_fence::fenced(image_fence.as_ref(), send.send()) => match response { Ok(response) => response, Err(()) => return self.counted_failure(cancelled_failure()) },
             };
             let response = match response {
                 Ok(response) => response,
@@ -2332,6 +2483,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
                 () = tokio::time::sleep(delay) => {},
             }
@@ -2352,6 +2504,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.counted_failure(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.counted_failure(cancelled_failure()),
+                () = lead::image_fence::revoked(image_fence.as_ref()) => return self.counted_failure(cancelled_failure()),
                 () = &mut deadline => return self.counted_failure(timeout_failure()),
                 next = stream.try_next() => next,
             };
@@ -2539,6 +2692,13 @@ impl AgentProviderAttempt {
         if Instant::now() >= self.deadline {
             return self.finish_terminal(timeout_failure());
         }
+        let image_fence = self.image_fence.clone();
+        if image_fence
+            .as_ref()
+            .is_some_and(|fence| !fence.while_current(&mut || {}))
+        {
+            return self.finish_terminal(cancelled_failure());
+        }
         // This is immediately before the first possible generation send poll.
         self.mark_model_may_have_dispatched();
         let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline));
@@ -2547,8 +2707,9 @@ impl AgentProviderAttempt {
             biased;
             () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
             () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = lead::image_fence::revoked(image_fence.as_ref()) => return self.finish_terminal(cancelled_failure()),
             () = &mut deadline => return self.finish_terminal(timeout_failure()),
-            response = request.send() => response,
+            response = lead::image_fence::fenced(image_fence.as_ref(), request.send()) => match response { Ok(response) => response, Err(()) => return self.finish_terminal(cancelled_failure()) },
         };
         let response = match response {
             Ok(response) => response,
@@ -2575,6 +2736,7 @@ impl AgentProviderAttempt {
                 biased;
                 () = self.cancellation.cancelled() => return self.finish_terminal(cancelled_failure()),
                 () = self.shutdown.cancelled() => return self.finish_terminal(cancelled_failure()),
+            () = lead::image_fence::revoked(image_fence.as_ref()) => return self.finish_terminal(cancelled_failure()),
                 () = &mut deadline => return self.finish_terminal(timeout_failure()),
                 next = stream.try_next() => next,
             };
@@ -2637,6 +2799,7 @@ impl fmt::Debug for AgentProviderAttempt {
             .field("provider", &self.provider)
             .field("endpoint", &"[fixed]")
             .field("credential", &"[redacted]")
+            .field("model", &self.model.is_some())
             .field("phase", &self.phase_label())
             .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
@@ -2793,6 +2956,7 @@ fn finish_attempt(
         outcome,
         disclosure_stage,
         continuation: continuation.map(Box::new),
+        model_reply: None,
     }
 }
 
@@ -3180,7 +3344,7 @@ mod tests {
         (fixture.policy, fixture.input)
     }
 
-    fn provider_exact_fixture() -> (AgentRunPolicy, AgentProviderTransportInput) {
+    pub(super) fn provider_exact_fixture() -> (AgentRunPolicy, AgentProviderTransportInput) {
         let fixture = stateful_provider_fixture_with_accounting(
             AgentProviderKind::OpenAiResponses,
             AgentProviderPricingProfile::try_new(
@@ -3237,6 +3401,32 @@ mod tests {
         provider: AgentProviderKind,
         pricing_profile: AgentProviderPricingProfile,
         provider_exact: bool,
+    ) -> StatefulProviderFixture {
+        stateful_provider_fixture_for(provider, pricing_profile, provider_exact, None)
+    }
+
+    /// The provider-exact fixture's run, admitted for a chosen model instead.
+    pub(super) fn model_reported_fixture(
+        model: &model_client::AgentProviderModelClient,
+    ) -> (AgentRunPolicy, AgentProviderTransportInput) {
+        let fixture = stateful_provider_fixture_for(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).expect("pricing revision"),
+                crate::MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS,
+            )
+            .expect("pricing profile"),
+            true,
+            Some(model),
+        );
+        (fixture.policy, fixture.input)
+    }
+
+    fn stateful_provider_fixture_for(
+        provider: AgentProviderKind,
+        pricing_profile: AgentProviderPricingProfile,
+        provider_exact: bool,
+        chosen: Option<&model_client::AgentProviderModelClient>,
     ) -> StatefulProviderFixture {
         assert!(
             !provider_exact || provider == AgentProviderKind::OpenAiResponses,
@@ -3304,8 +3494,15 @@ mod tests {
         .expect("observation assembler")
         .finish()
         .expect("observation");
-        let tokenizer =
-            SemanticTokenizerRevision::try_new("transport-test-v1".to_owned()).expect("tokenizer");
+        let tokenizer = match chosen {
+            Some(model) => model
+                .try_call_config(20)
+                .expect("chosen model config")
+                .tokenizer()
+                .clone(),
+            None => SemanticTokenizerRevision::try_new("transport-test-v1".to_owned())
+                .expect("tokenizer"),
+        };
         let payload = if provider_exact {
             encode_semantic_observation(
                 &observation,
@@ -3438,7 +3635,9 @@ mod tests {
         let schedule =
             fixture_pricing_schedule(provider, model, reasoning, tokenizer, pricing_profile)
                 .expect("provider schedule");
-        let config = if provider_exact {
+        let config = if let Some(model) = chosen {
+            model.try_call_config(20).expect("chosen model config")
+        } else if provider_exact {
             schedule
                 .try_provider_exact_call_config(20, AgentProviderStreamBudget::STANDARD)
                 .expect("provider-exact config")
@@ -4776,6 +4975,86 @@ mod tests {
                 .unwrap()
                 .starts_with("POST /v1/responses/input_tokens "));
         }
+    }
+
+    #[test]
+    fn image_fence_revoked_before_admission_never_commits_or_reserves_a_transport_slot() {
+        let transport =
+            AgentProviderTransport::try_new(AgentProviderTransportConfig::STANDARD).unwrap();
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".into(),
+        )
+        .unwrap();
+        let (mut policy, input) = provider_exact_fixture();
+        let gate = lead::ModelImageGate::new(Some(true));
+        let input = input.with_image_fence(gate.fence().unwrap());
+        gate.begin_change().unwrap();
+        assert!(matches!(
+            transport.try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new()
+            ),
+            Err(AgentProviderAdmissionError::Cancelled)
+        ));
+        assert_eq!(policy.pending_model_calls(), 0);
+        assert!(policy.taints().is_empty());
+        assert!(transport.snapshot().unwrap().is_idle());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn image_fence_revocation_stops_exact_count_backoff_without_retry_or_generation() {
+        let server = OneShotServer::spawn(
+            "503 Service Unavailable",
+            &[("Retry-After", "1")],
+            vec![b"{}".to_vec()],
+        );
+        let transport = test_transport(&server);
+        let credential = AgentProviderCredential::try_new(
+            AgentProviderKind::OpenAiResponses,
+            "synthetic-openai-key".into(),
+        )
+        .unwrap();
+        let (mut policy, input) = provider_exact_fixture();
+        let gate = lead::ModelImageGate::new(Some(true));
+        // A retained visual-history fence remains mandatory even when this
+        // particular fixture's current continuation body contains only text.
+        let input = input.with_image_fence(gate.fence().unwrap());
+        let mut attempt = transport
+            .try_admit(
+                input,
+                &mut policy,
+                &credential,
+                AgentProviderCancellation::new(),
+            )
+            .unwrap();
+        let revoke = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let epoch = gate.begin_change().unwrap();
+            assert!(gate.confirm(epoch, true)); // Re-enable cannot revive it.
+        });
+        let AgentProviderExactCountOutcome::Failed(result) =
+            attempt.count_openai_input_tokens().await
+        else {
+            panic!("revoked image count must stop");
+        };
+        assert_eq!(
+            result.usage_knowledge(),
+            AgentProviderUsageKnowledge::ExactZeroBeforeModelDispatch
+        );
+        let AgentProviderPolicySettlement::Immediate(settlement) = result.into_policy_settlement()
+        else {
+            panic!("no generation");
+        };
+        settlement.settle(&mut policy).unwrap();
+        revoke.await.unwrap();
+        let request = server.finish();
+        assert!(std::str::from_utf8(&request.head)
+            .unwrap()
+            .starts_with("POST /v1/responses/input_tokens "));
+        assert!(transport.snapshot().unwrap().is_idle());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

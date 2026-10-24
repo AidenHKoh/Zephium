@@ -221,7 +221,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "browser.history",
         "Show All History",
-        split("CmdOrCtrl+Y", "Ctrl+H"),
+        split("CmdOrCtrl+Shift+Y", "Ctrl+Shift+H"),
         Group::History,
     ),
     command(
@@ -233,7 +233,7 @@ pub const REGISTRY: &[CommandSpec] = &[
     command(
         "tool.bookmarks",
         "Show Bookmarks",
-        split("CmdOrCtrl+Alt+B", "Ctrl+Shift+O"),
+        split("CmdOrCtrl+Shift+B", "Ctrl+Shift+O"),
         Group::Bookmarks,
     ),
     command(
@@ -246,6 +246,54 @@ pub const REGISTRY: &[CommandSpec] = &[
         "tab.previous",
         "Previous Tab",
         Keys::same("Ctrl+Shift+Tab"),
+        Group::Window,
+    ),
+    // The same walk down the sidebar as Ctrl+Tab, on the arrows that point
+    // along it. Ctrl+Alt stays clear of text: only letters and digits are
+    // AltGr's.
+    command(
+        "tab.above",
+        "Select Tab Above",
+        Keys::same("CmdOrCtrl+Alt+Up"),
+        Group::Window,
+    ),
+    command(
+        "tab.below",
+        "Select Tab Below",
+        Keys::same("CmdOrCtrl+Alt+Down"),
+        Group::Window,
+    ),
+    // The tool panels, each on Shift and its own letter, as Bookmarks is.
+    // Never Alt on Windows: Ctrl+Alt is AltGr on many layouts. History takes
+    // the browser's own key; its full page moves to Shift.
+    command(
+        "tool.notes",
+        "Notes",
+        split("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
+        Group::Window,
+    ),
+    command(
+        "tool.ai",
+        "Ask Zephium",
+        Keys::same("CmdOrCtrl+E"),
+        Group::Window,
+    ),
+    command(
+        "tool.tasks",
+        "Tasks",
+        split("CmdOrCtrl+Shift+K", "Ctrl+Shift+K"),
+        Group::Window,
+    ),
+    command(
+        "tool.time",
+        "Time",
+        split("CmdOrCtrl+Shift+U", "Ctrl+Shift+F"),
+        Group::Window,
+    ),
+    command(
+        "tool.history",
+        "History",
+        split("CmdOrCtrl+Y", "Ctrl+H"),
         Group::Window,
     ),
     command(
@@ -318,6 +366,72 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::Keys,
     ),
     command(
+        "space.select.1",
+        "Switch to Space 1",
+        split("Ctrl+1", "Ctrl+Shift+1"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.2",
+        "Switch to Space 2",
+        split("Ctrl+2", "Ctrl+Shift+2"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.3",
+        "Switch to Space 3",
+        split("Ctrl+3", "Ctrl+Shift+3"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.4",
+        "Switch to Space 4",
+        split("Ctrl+4", "Ctrl+Shift+4"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.5",
+        "Switch to Space 5",
+        split("Ctrl+5", "Ctrl+Shift+5"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.6",
+        "Switch to Space 6",
+        split("Ctrl+6", "Ctrl+Shift+6"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.7",
+        "Switch to Space 7",
+        split("Ctrl+7", "Ctrl+Shift+7"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.8",
+        "Switch to Space 8",
+        split("Ctrl+8", "Ctrl+Shift+8"),
+        Group::Keys,
+    ),
+    command(
+        "space.select.9",
+        "Switch to Space 9",
+        split("Ctrl+9", "Ctrl+Shift+9"),
+        Group::Keys,
+    ),
+    command(
+        "space.next",
+        "Next Space",
+        Keys::same("CmdOrCtrl+Alt+Right"),
+        Group::Keys,
+    ),
+    command(
+        "space.previous",
+        "Previous Space",
+        Keys::same("CmdOrCtrl+Alt+Left"),
+        Group::Keys,
+    ),
+    command(
         "work.pane.close",
         "Close Pane",
         Keys::same("Escape"),
@@ -328,6 +442,13 @@ pub const REGISTRY: &[CommandSpec] = &[
         "Open Pane in Browse",
         Keys::same("CmdOrCtrl+Shift+Return"),
         Group::Work,
+    ),
+    // Starts and stops dictation in the Work bar; elsewhere it does nothing.
+    command(
+        "work.dictate",
+        "Dictate",
+        Keys::same("CmdOrCtrl+Shift+D"),
+        Group::Keys,
     ),
     command(
         "launcher.toggle",
@@ -371,6 +492,22 @@ pub fn get(id: &str) -> Option<&'static CommandSpec> {
 /// Applies keymap overrides onto the defaults. An override with an empty
 /// string removes the shortcut; unknown ids, fixed commands and overrides
 /// that no longer validate fall back to the default.
+/// The feature switch a command belongs to (`ai`, `work`, `notes`, `tasks`,
+/// `time`), so a command whose feature is off is neither offered nor run.
+/// Mirrored by `commandOffered` in the frame's preferences domain.
+pub fn feature_of(id: &str) -> Option<&'static str> {
+    match id {
+        "work.dictate" | "tool.ai" | "mode.choose" => Some("ai"),
+        "browser.work" | "mode.work" => Some("work"),
+        "tool.notes" | "browser.notes" | "note.new" => Some("notes"),
+        "tool.tasks" | "browser.tasks" => Some("tasks"),
+        "tool.time" | "browser.time" | "settings.focus" => Some("time"),
+        id if id.starts_with("work.") => Some("work"),
+        id if id.starts_with("focus.") => Some("time"),
+        _ => None,
+    }
+}
+
 pub fn resolve(overrides: &HashMap<String, String>) -> Vec<ResolvedCommand> {
     resolve_on(overrides, Platform::CURRENT)
 }
@@ -558,9 +695,22 @@ mod tests {
 
     #[test]
     fn history_follows_each_platform_convention() {
-        let history = get("browser.history").expect("history command");
+        // The platform's history key opens the quick panel; the full page is
+        // the same key with Shift.
+        let history = get("tool.history").expect("history panel command");
         assert_eq!(history.keys.on(Platform::Mac), Some("CmdOrCtrl+Y"));
         assert_eq!(history.keys.on(Platform::Other), Some("Ctrl+H"));
+        let page = get("browser.history").expect("history page command");
+        assert_eq!(page.keys.on(Platform::Mac), Some("CmdOrCtrl+Shift+Y"));
+        assert_eq!(page.keys.on(Platform::Other), Some("Ctrl+Shift+H"));
+    }
+
+    #[test]
+    fn ask_panel_takes_the_bare_e_and_stays_rebindable() {
+        let ask = get("tool.ai").expect("ask command");
+        assert_eq!(ask.keys.on(Platform::Mac), Some("CmdOrCtrl+E"));
+        assert_eq!(ask.keys.on(Platform::Other), Some("CmdOrCtrl+E"));
+        assert!(ask.customizable());
     }
 
     #[test]
@@ -576,5 +726,24 @@ mod tests {
         assert_eq!(command.title, "Split View…");
         assert_eq!(command.keys, Keys::NONE);
         assert_eq!(command.group, Group::File);
+    }
+
+    #[test]
+    fn every_feature_command_names_its_switch() {
+        assert_eq!(feature_of("work.dictate"), Some("ai"));
+        assert_eq!(feature_of("tool.ai"), Some("ai"));
+        assert_eq!(feature_of("work.pane.close"), Some("work"));
+        assert_eq!(feature_of("browser.work"), Some("work"));
+        for id in ["tool.notes", "browser.notes", "note.new"] {
+            assert_eq!(feature_of(id), Some("notes"));
+        }
+        for id in ["tool.tasks", "browser.tasks"] {
+            assert_eq!(feature_of(id), Some("tasks"));
+        }
+        for id in ["tool.time", "browser.time"] {
+            assert_eq!(feature_of(id), Some("time"));
+        }
+        assert_eq!(feature_of("tab.new"), None);
+        assert_eq!(feature_of("tool.bookmarks"), None);
     }
 }

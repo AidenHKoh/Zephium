@@ -5,6 +5,10 @@
   import { SvelteFlow, Background, type Edge, type useSvelteFlow } from "@xyflow/svelte";
   import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
+  import { fade } from "svelte/transition";
+  import Icon from "$shared/ui/Icon";
+  import { Navigation03Icon } from "../lib/icons";
+  import type { OwnedData } from "../lib/board/types";
   import {
     canvasInspection,
     canvasResize,
@@ -23,12 +27,20 @@
     canvasFar,
     canvasWork,
     type BoardActions,
+    type DraftReview,
   } from "../lib/canvas-context";
   import CanvasNode from "./CanvasNode.svelte";
   import AreaNode from "./AreaNode.svelte";
   import AgentMark from "./AgentMark.svelte";
   import WorkEdge from "./WorkEdge.svelte";
   import { arrivals } from "../lib/arrival";
+  import {
+    followMove,
+    glideMs,
+    settleMove,
+    type CameraMove,
+    type CameraView,
+  } from "../lib/camera-follow";
   import { duration, easing, reducedMotion } from "$shared/lib/motion";
   import { IS_MAC } from "$shared/platform";
   import CanvasControls from "./CanvasControls.svelte";
@@ -48,6 +60,7 @@
     applyRemoteView,
     absolutePosition,
     containingArea,
+    defaultSize,
     isAgentNode,
     isAreaNode,
     isItemNode,
@@ -93,6 +106,7 @@
     onselectionaction,
     onareaedit,
     onmoved,
+    placeDrop,
     board,
     work,
     onprobe,
@@ -131,6 +145,11 @@
     ) => void;
     /** The person dragged these cards to where they stand now. */
     onmoved?: (ids: string[]) => void;
+    /**
+     * Where a card the person dropped must stand instead, as its top-left, when
+     * it landed somewhere it cannot stay; null, and it stays exactly where it was put.
+     */
+    placeDrop?: (id: string, rect: CanvasPosition & CanvasSize) => CanvasPosition | null;
     /** What a board's blocks ask of the canvas's owner. */
     board?: BoardActions;
     /** The runs behind the canvas, by objective, for a helper's own view of its part. */
@@ -154,6 +173,9 @@
     compare: (id: string) => board?.compare?.(id),
     send: (id: string) => board?.send?.(id),
     write: (id: string, markdown: string) => board?.write?.(id, markdown),
+    drafted: (id: string) => board?.drafted?.(id),
+    review: (id: string, review: DraftReview) => board?.review?.(id, review),
+    edit: (id: string, change: (data: OwnedData) => OwnedData) => board?.edit?.(id, change),
   } satisfies BoardActions);
   /** Each origin is asked for once per canvas. */
   const probed: Record<string, true> = {};
@@ -234,22 +256,34 @@
     const over = Math.max(0, rect.width * zoom - room);
     return { x: AIR - rect.x * zoom - over, y: fitTopInset + 40 - rect.y * zoom, zoom };
   }
-  /** Brings a card to the reading place: its corner near the top left, as large as its span lets it read whole. */
-  function reveal(id: string, span?: number, tries = 30) {
+  /**
+   * A run that ends while the person follows it: the result's top comes into
+   * view if it is not, with one pan at the zoom they have. Never a re-fit.
+   */
+  function settle(id: string, span?: number, tries = 30) {
     const node = nodeFor(id);
     // The answer lands a frame or two after its run ends: wait for it rather than for nothing.
     if (!node && tries > 0) {
-      requestAnimationFrame(() => reveal(id, span, tries - 1));
+      requestAnimationFrame(() => settle(id, span, tries - 1));
       return;
     }
     if (!node || !flow) return;
     homed = false;
     const position = absolutePosition(node, nodes);
-    void flow.setViewport(framing({ ...position, width: span ?? node.width ?? 480 }), {
-      duration: reducedMotion() ? 0 : duration("page"),
-      ease: curve(easing("emphasized")),
-      interpolate: "linear",
+    const move = settleMove({
+      view: cameraView(),
+      room: cameraRoom(),
+      result: {
+        left: position.x,
+        top: position.y,
+        right: position.x + (span ?? node.width ?? 480),
+        bottom: position.y + (node.height ?? node.measured?.height ?? 320),
+      },
+      following,
+      reduced: reducedMotion(),
+      base: duration("page"),
     });
+    if (move) glide(move);
   }
   const restoredViewport = untrack(() => validViewport(initialView?.viewport));
   let viewport = $state(restoredViewport ?? { x: 0, y: 0, zoom: 1 });
@@ -412,6 +446,43 @@
       ? (previous as WorkNode[])
       : kept;
   }
+  /** Cards the canvas moved itself glide there, then lose the class that let them. */
+  const GLIDE = "settling";
+  let glideTimer: ReturnType<typeof setTimeout> | undefined;
+  const classes = (node: WorkNode) =>
+    typeof node.class === "string" ? node.class.split(" ").filter(Boolean) : [];
+  function glideCards(previous: readonly WorkNode[], next: WorkNode[]): WorkNode[] {
+    const before = new Map(previous.map((node) => [node.id, node]));
+    let moved = false;
+    const glided = next.map((node) => {
+      const was = before.get(node.id);
+      if (
+        !was ||
+        !isItemNode(node) ||
+        node.dragging ||
+        classes(node).includes(GLIDE) ||
+        (was.position.x === node.position.x && was.position.y === node.position.y)
+      )
+        return node;
+      moved = true;
+      return { ...node, class: [...classes(node), GLIDE].join(" ") };
+    });
+    if (!moved) return next;
+    clearTimeout(glideTimer);
+    glideTimer = setTimeout(
+      () => {
+        nodes = nodes.map((node) => {
+          const names = classes(node);
+          if (!names.includes(GLIDE)) return node;
+          const kept = names.filter((name) => name !== GLIDE);
+          return { ...node, class: kept.length ? kept.join(" ") : undefined };
+        });
+      },
+      duration("slow") + 40,
+    );
+    return glided;
+  }
+  $effect(() => () => clearTimeout(glideTimer));
   $effect(() => {
     const next = scene.items;
     const grouping = areas;
@@ -430,7 +501,7 @@
         lastPositions,
       );
       lastPositions = placed;
-      return rest(nodes, reconciled);
+      return rest(nodes, glideCards(nodes, reconciled));
     });
   });
   let publishedPositions = "";
@@ -518,7 +589,7 @@
     placeArea: (area: string, rect: CanvasPosition & CanvasSize) => void;
     center: (id: string) => void;
     focusCard: (id: string) => void;
-    reveal: (id: string, span?: number) => void;
+    settle: (id: string, span?: number) => void;
     followAgent: () => boolean;
     resumeFollow: () => void;
   };
@@ -567,26 +638,46 @@
       placeArea,
       center,
       focusCard: (id: string) => void focusCard(id),
-      reveal,
+      settle,
       followAgent: () => following,
       resumeFollow,
     });
   });
 
-  // Camera follow. While a run is live and its mark walks to a stand out of
-  // sight, the view pans (never zooms) so the mark lands in the lower-right
-  // third. A manual pan, zoom or drag pauses it until a new lane or a new run.
-  const FOLLOW_AIR = 24;
+  // Camera follow. While a run is live and the mark walks out of sight, the
+  // view pans (never zooms) just far enough to bring it back. A manual pan,
+  // zoom or drag ends it: it resumes on a new request, from the Follow pill
+  // or the fit control, never on its own.
   /** The orb and the widest caption it usually carries. */
   const MARK_REACH = { width: 220, height: 24 };
   let flow: ReturnType<typeof useSvelteFlow> | undefined;
   let following = $state(true);
+  /** Where the camera is bound while a glide runs, so a second move starts from it, not from mid-flight. */
+  let aim: CameraView | undefined;
+  const cameraView = () => aim ?? viewport;
+  const cameraRoom = () => ({
+    width: canvasWidth,
+    top: fitTopInset,
+    bottom: canvasHeight - fitBottomInset,
+  });
+  /** The only way the follow moves the camera: one eased glide, which replaces any still running. */
+  function glide(move: CameraMove) {
+    if (!flow) return;
+    aim = move.view;
+    void flow.setViewport(move.view, {
+      duration: move.ms,
+      ease: curve(easing("smooth")),
+      interpolate: "linear",
+    });
+  }
   let fitted = false;
   let requestsSeen = false;
   let stands: Record<string, string> = {};
   const requests: Record<string, true> = {};
   function resumeFollow() {
     following = true;
+    const marks = nodes.filter(isAgentNode).filter((node) => !node.class);
+    if (marks.length) followMarks(marks.map((node) => node.position));
   }
   /** A `cubic-bezier()` token as a function of time, for the flow's own tween. */
   function curve(token: string): (t: number) => number {
@@ -617,53 +708,41 @@
       return;
     }
     homed = false;
-    const zoom = viewport.zoom;
+    const zoom = cameraView().zoom;
     const position = absolutePosition(node, nodes);
     const width = (node.width ?? node.measured?.width ?? 320) * zoom;
     const height = (node.height ?? node.measured?.height ?? 80) * zoom;
     const top = fitTopInset;
     const bottom = canvasHeight - fitBottomInset;
-    void flow.setViewport(
-      {
+    glide({
+      view: {
         x: (canvasWidth - width) / 2 - position.x * zoom,
         y: top + (bottom - top - height) / 2 - position.y * zoom,
         zoom,
       },
-      {
-        duration: reducedMotion() ? 0 : duration("page"),
-        ease: curve(easing("emphasized")),
-        interpolate: "linear",
-      },
-    );
+      ms: glideMs(reducedMotion(), duration("page")),
+    });
   }
-  function followTo(position: CanvasPosition, size: CanvasSize) {
-    const zoom = viewport.zoom;
-    const top = fitTopInset;
-    const bottom = canvasHeight - fitBottomInset;
-    const width = canvasWidth;
-    const air = FOLLOW_AIR * zoom;
-    const box = {
-      left: position.x * zoom + viewport.x - air,
-      top: position.y * zoom + viewport.y - air,
-      right: (position.x + size.width) * zoom + viewport.x + air,
-      bottom: (position.y + size.height) * zoom + viewport.y + air,
-    };
-    if (box.left >= 0 && box.top >= top && box.right <= width && box.bottom <= bottom) return;
-    const w = size.width * zoom;
-    const h = size.height * zoom;
-    const clamp = (value: number, min: number, max: number) =>
-      Math.max(min, Math.min(value, Math.max(min, max)));
-    const x = clamp((width * 2) / 3 - w / 2, air, width - air - w);
-    const y = clamp(top + (bottom - top) / 2 - h / 2, top + air, bottom - air - h);
-    void flow?.setViewport(
-      { x: x - position.x * zoom, y: y - position.y * zoom, zoom },
-      {
-        duration: reducedMotion() ? 0 : duration("page"),
-        ease: curve(easing("smooth")),
-        interpolate: "linear",
+  /** Brings the mark that moved into view, by the shortest pan, when it has left it. */
+  function followMarks(positions: readonly CanvasPosition[], lead?: CanvasPosition) {
+    const at = lead ?? positions.at(-1);
+    if (!at || !flow) return;
+    const move = followMove({
+      view: cameraView(),
+      room: cameraRoom(),
+      newest: {
+        left: at.x,
+        top: at.y,
+        right: at.x + MARK_REACH.width,
+        bottom: at.y + MARK_REACH.height,
       },
-    );
+      following,
+      reduced: reducedMotion(),
+      base: duration("page"),
+    });
+    if (move) glide(move);
   }
+  const live = $derived(nodes.some((node) => isAgentNode(node) && !node.class));
   $effect(() => {
     const agents = nodes.filter(isAgentNode).filter((node) => !node.class);
     const cards = scene.items.flatMap((item) =>
@@ -683,18 +762,21 @@
         following = true;
         requestAnimationFrame(() => centreRequest(sent));
       }
-      if (!agents.length && Object.keys(stands).length) {
-        stands = {};
-        following = true;
-      }
+      // A run's end keeps whether the person was following: its result is
+      // handed to them only then, and a new request resumes it anyway.
+      if (!agents.length && Object.keys(stands).length) stands = {};
+      let moved: CanvasPosition | undefined;
       for (const node of agents) {
         const position = node.position;
         const key = `${position.x},${position.y}`;
-        const moved = stands[node.id] !== key;
+        if (stands[node.id] !== key) moved = position;
         stands[node.id] = key;
-        if (!moved || !fitted || !following || paused) continue;
-        followTo(position, MARK_REACH);
       }
+      if (moved && fitted && following && !paused)
+        followMarks(
+          agents.map((node) => node.position),
+          moved,
+        );
     });
   });
   let lastClick = { id: "", at: 0 };
@@ -724,6 +806,40 @@
     nodes = next;
     publishedPositions = positionKey(next);
     publishView();
+  }
+  /**
+   * A dropped card stays where it was put. One that landed where it cannot
+   * stay glides to the nearest spot it can, and the owner says why.
+   */
+  function settleDrop(ids: readonly string[]) {
+    if (!placeDrop) return;
+    const spots: Record<string, CanvasPosition> = {};
+    for (const id of ids) {
+      const node = nodes.find((candidate) => candidate.id === id);
+      if (!node || !isItemNode(node)) continue;
+      const at = absolutePosition(node, nodes);
+      const spot = placeDrop(id, {
+        ...at,
+        width: node.width ?? defaultSize(node.data).width,
+        height: node.height ?? defaultSize(node.data).height,
+      });
+      if (spot && (spot.x !== at.x || spot.y !== at.y)) spots[id] = spot;
+    }
+    if (!Object.keys(spots).length) return;
+    nodes = glideCards(
+      nodes,
+      nodes.map((node) => {
+        const spot = spots[node.id];
+        if (!spot) return node;
+        const parent = node.parentId
+          ? nodes.find((candidate) => candidate.id === node.parentId)
+          : undefined;
+        const position = parent
+          ? { x: spot.x - parent.position.x, y: spot.y - parent.position.y }
+          : spot;
+        return { ...node, dragging: false, position };
+      }),
+    );
   }
   const arrangeSelection = (how: Arrangement) =>
     place(moveTo(nodes, arrange(selectedPlacements(selectedItems, nodes), how)));
@@ -848,6 +964,7 @@
       }}
       onnodedragstop={({ targetNode, nodes: carried }) => {
         onmoved?.(carried.map((node) => node.id));
+        settleDrop(carried.map((node) => node.id));
         if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
         const node = nodes.find((candidate) => candidate.id === targetNode.id);
         if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
@@ -855,21 +972,27 @@
         const current = node.parentId ? node.parentId.slice("area:".length) : null;
         if (area !== current) onareachange?.(node.id, area);
       }}
-      onmoveend={publishView}
+      onmoveend={() => {
+        aim = undefined;
+        publishView();
+      }}
       oninit={() => requestAnimationFrame(() => requestAnimationFrame(() => (fitted = true)))}
       onmovestart={(event) => {
         if (!event) return;
         following = false;
         homed = false;
+        aim = undefined;
       }}
+      onmove={() => layers?.engage()}
       onnodedragstart={() => {
         following = false;
         homed = false;
+        aim = undefined;
       }}
     >
       <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
-      <CanvasControls bottomInset={fitBottomInset} />
+      <CanvasControls bottomInset={fitBottomInset} onfit={() => (following = true)} />
       <NodeToolbar
         nodeId={selectedItems}
         isVisible={selectedItems.length > 1 && !dragging && !marquee}
@@ -887,6 +1010,13 @@
         />
       </NodeToolbar>
     </SvelteFlow>
+    {#if live && !following && !still}<button
+        type="button"
+        class="follow"
+        style:inset-block-end={`${fitBottomInset + 14}px`}
+        transition:fade={{ duration: duration("fast") }}
+        onclick={resumeFollow}><Icon icon={Navigation03Icon} size={13} />{m.work_follow()}</button
+      >{/if}
   {:else}<div class="canvas-empty" role="status">
       {valid ? m.work_canvas_empty() : m.work_canvas_unavailable()}
     </div>{/if}
@@ -894,6 +1024,7 @@
 
 <style>
   .work-canvas {
+    position: relative;
     width: 100%;
     height: 100%;
     min-height: 240px;
@@ -918,6 +1049,12 @@
     transition: none;
   }
 
+  /* While a person is at the canvas each card is a layer (see layers.ts). */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__viewport[data-held] .svelte-flow__node) {
+    will-change: transform;
+  }
+
   /* A handle is where a line meets a card, never a thing to see. */
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__handle) {
@@ -927,6 +1064,12 @@
   /* A board's block glides where its board makes room; a dragged one follows the pointer. */
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node.board-block:not(.dragging)) {
+    transition: transform var(--motion-slow) var(--ease-emphasized);
+  }
+
+  /* A card the canvas moved itself (a drop put clear, a run making room) glides there. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node.settling:not(.dragging)) {
     transition: transform var(--motion-slow) var(--ease-emphasized);
   }
 
@@ -967,6 +1110,55 @@
     pointer-events: auto;
   }
   /* stylelint-enable selector-class-pattern */
+
+  /* A part's row is taken by its name, its windows and its work; the rest of its box lets the pane pan. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node:has(.part[data-part])) {
+    pointer-events: none;
+  }
+
+  /* A set of cards is taken by its cards and title; the gaps between them let the pane pan. */
+  /* stylelint-disable selector-class-pattern */
+  .work-canvas :global(.svelte-flow__node:has(.object.picks)) {
+    pointer-events: none;
+  }
+
+  .work-canvas :global(.svelte-flow__node:has(.object.picks) .work-resize-handle) {
+    pointer-events: auto;
+  }
+  /* stylelint-enable selector-class-pattern */
+
+  /* While the person looks elsewhere during a run: one quiet way back to the work. */
+  .follow {
+    position: absolute;
+    inset-inline-start: 50%;
+    z-index: 4;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    block-size: 28px;
+    padding: 0 12px 0 10px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: var(--color-float);
+    box-shadow: var(--shadow-popover);
+    color: var(--color-label-secondary);
+    font: inherit;
+    font-size: var(--text-label);
+    font-weight: 550;
+    translate: -50% 0;
+    cursor: default;
+    transition: color var(--motion-fast) var(--ease-out);
+  }
+
+  .follow:hover {
+    color: var(--color-text);
+  }
+
+  .follow:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
 
   .canvas-empty {
     height: 100%;

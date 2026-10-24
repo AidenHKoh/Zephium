@@ -83,3 +83,47 @@ fn fractional_125_percent_area_preserves_a_centered_impulse() {
 fn high_entropy_square_cannot_escape_the_encoded_byte_budget() {
     assert!(thumbnail(png(640, 640, true), (640, 640)).is_none());
 }
+
+#[test]
+fn admitted_roi_keeps_native_card_resolution_and_excludes_neighbor_pixels() {
+    use crate::platform::{record_media::Crop, semantic_pixel_privacy::PixelPrivacyProof};
+    let proof =
+        PixelPrivacyProof::decode(br#"{"v":1,"r":1,"c":true,"w":1280,"h":800,"x":0,"y":0}"#)
+            .unwrap();
+    let crop = Crop {
+        proof,
+        rect: [13.0, 45.0, 128.0, 96.0],
+    };
+    let geometry = region_geometry((2560, 1600), crop).unwrap();
+    assert_eq!(geometry.raster_rect, [26, 90, 256, 192]);
+    let mut image = image::RgbaImage::from_pixel(2560, 1600, image::Rgba([200, 0, 0, 255]));
+    for y in 90..282 {
+        for x in 26..282 {
+            image.put_pixel(x, y, image::Rgba([0, 120, 0, 255]));
+        }
+    }
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let (w, h, bytes) = region(png, (2560, 1600), crop).unwrap();
+    assert_eq!((w, h), (128, 96));
+    let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+    assert!(decoded.pixels().all(|pixel| pixel.0 == [0, 120, 0, 255]));
+    assert!(region_geometry(
+        (2560, 1600),
+        Crop {
+            rect: [1270.0, 0.0, 128.0, 96.0],
+            ..crop
+        }
+    )
+    .is_none());
+    assert!(region_geometry(
+        (2560, 1600),
+        Crop {
+            rect: [0.0, 0.0, f64::NAN, 96.0],
+            ..crop
+        }
+    )
+    .is_none());
+}

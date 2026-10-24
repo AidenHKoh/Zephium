@@ -982,6 +982,16 @@ fn trusted_finalization_preserves_requested_progress_and_binds_effective_documen
             .unwrap();
         assert_eq!(checkpoint.current_document(), Some(&effective));
         assert_eq!(checkpoint.current_requested_document(), Some(&destination));
+        // The site answered this address with another document: asking for
+        // it again is refused before authority, the landed one stays open.
+        assert_eq!(
+            f.policy.navigation_ledger_refusal(f.lease, &destination),
+            Some(AgentNavigationLedgerRefusal::Redirected)
+        );
+        assert_eq!(
+            f.policy.navigation_ledger_refusal(f.lease, &effective),
+            Some(AgentNavigationLedgerRefusal::AlreadyHere)
+        );
         f.policy.navigation_effective_destinations[0] = Some(destination.clone());
         assert!(
             f.policy
@@ -1738,6 +1748,147 @@ fn route_locate_replay_revalidates_progress_before_new_policy_reservation() {
         assert_eq!(f.policy.pending_model_calls(), 0);
         assert_eq!(f.policy.accounting().reserved_operations(), 0);
         assert_eq!(f.policy.pending_navigations(), 0);
+    }
+}
+
+#[test]
+fn route_screenshot_reuses_only_its_delivered_baseline_and_current_checkpoint() {
+    for stale in [false, true] {
+        let (mut f, mut registry, observed) =
+            route_fixture_with_targets(6, 100_000, vec![target(), final_target()]);
+        let selected = tokenizer();
+        let config = provider_exact_config(selected.clone(), 128, 64_000);
+        let binding = account(observed.request().context(), NOW);
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the visual chart on this page".to_owned(),
+            &selected,
+        )
+        .unwrap();
+        let payload = encode_semantic_observation(
+            &observed,
+            SemanticModelEncodingBudget::INITIAL_CONSERVATIVE,
+        )
+        .unwrap()
+        .admit_conservative_utf8(&selected)
+        .unwrap();
+        let initial = AgentPreparedObservationRequest::try_openai_for_provider_exact_count(
+            &mut f.policy,
+            call_request(2, f.lease, binding, 64_000, 128, 1_000, NOW),
+            &observed,
+            payload,
+            &objective,
+            config.clone(),
+        )
+        .unwrap()
+        .into_transport_input()
+        .commit(&mut f.policy)
+        .unwrap();
+        let (initial_request, input, seed) = initial.into_parts();
+        let (active, evidence) = input.into_parts();
+        let baseline = evidence.observation_acknowledgement().unwrap().clone();
+        f.policy
+            .settle_model_call(active, AgentModelCallSettlement::Completed, 65, 4, 80)
+            .unwrap();
+        let tool = crate::AgentBrowserToolCall::decode_openai(
+            initial_request.call(),
+            "fc_visual_2".into(),
+            "call_visual_2".into(),
+            "screenshot",
+            "{}".into(),
+        )
+        .unwrap();
+        let completion = crate::AgentProviderCompletion::new(
+            initial_request.call(),
+            crate::AgentProviderStopReason::ToolCalls,
+            crate::AgentProviderUsage::try_new(65, 4, 0, 0, 0).unwrap(),
+            crate::AgentProviderStreamStats::new(200, 8, 0, 1, 2),
+            true,
+        );
+        let continuation = seed
+            .unwrap()
+            .join_terminal_tool_for_test(completion, tool.into_continuation_parts_for_test().0)
+            .unwrap();
+        let request = call_request(3, f.lease, binding, 64_000, 128, 1_000, NOW);
+        let screenshot = admitted_test_screenshot(&observed, &baseline, 71, 0x5a);
+        let draft = crate::AgentProviderScreenshotRequestDraft::try_new(
+            continuation
+                .bind_screenshot_request(request, &config, screenshot)
+                .unwrap(),
+        )
+        .unwrap();
+        let wire: Value = serde_json::from_slice(draft.request().body()).unwrap();
+        assert!(wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["role"] == "developer"
+                && item["content"][0]["text"].as_str().is_some_and(
+                    |text| text.starts_with("ZEPHIUM_HOST_NAVIGATION_CHECKPOINT_V1\n")
+                )));
+        if stale {
+            let auth = route_request(&f, &registry, &observed, binding);
+            let permit = f
+                .policy
+                .authorize_navigation(auth, &observed, &baseline, &target())
+                .unwrap();
+            let operation = registry
+                .begin_navigation(
+                    observed.request().context().identity().id(),
+                    ContextOperationId::new(2).unwrap(),
+                )
+                .unwrap();
+            let active = f
+                .policy
+                .dispatch_navigation(permit, operation, AgentPolicyInstant::from_millis(NOW))
+                .unwrap();
+            f.policy
+                .settle_navigation(
+                    &active,
+                    &ContextNavigationSettlement::try_new(operation, Ok(target())).unwrap(),
+                    AgentPolicyInstant::from_millis(NOW),
+                )
+                .unwrap();
+        }
+        let result = draft.try_prepare_for_provider_exact_count(&mut f.policy, request, &observed);
+        if stale {
+            assert!(matches!(
+                result,
+                Err(crate::AgentProviderRequestError::Policy(
+                    AgentPolicyError::Navigation
+                ))
+            ));
+        } else {
+            let committed = result
+                .unwrap()
+                .into_transport_input()
+                .commit(&mut f.policy)
+                .unwrap();
+            let receipt = committed.input_evidence().screenshot_receipt().unwrap();
+            assert!(receipt.matches_baseline(&baseline));
+            let changed = super::observation(
+                observed.request().context(),
+                origin("source"),
+                1,
+                vec![
+                    json!({"k":1,"r":"link","n":"Different page","u":"https://source.example.test/other"}),
+                ],
+            );
+            assert!(!receipt.matches_baseline(&self::baseline(&changed)));
+            assert!(
+                committed
+                    .input_evidence()
+                    .observation_acknowledgement()
+                    .is_none(),
+                "pixels mint no refs"
+            );
+            let (_, input, next) = committed.into_parts();
+            assert!(next.is_some(), "only the prior semantic baseline continues");
+            let (active, _) = input.into_parts();
+            f.policy
+                .settle_model_call(active, AgentModelCallSettlement::Completed, 120, 4, 80)
+                .unwrap();
+        }
+        assert_eq!(f.policy.pending_model_calls(), 0);
     }
 }
 

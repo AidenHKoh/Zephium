@@ -21,6 +21,11 @@ pub enum WorkModelProvider {
     Google,
     DeepSeek,
     OpenRouter,
+    #[serde(rename = "xai")]
+    XAi,
+    Mistral,
+    Groq,
+    Cerebras,
     /// Any OpenAI-compatible chat endpoint the person configured.
     Compatible,
     /// Zephium Cloud: the upstream's native body, our base URL and bearer.
@@ -38,12 +43,15 @@ pub enum WorkModelRole {
 }
 
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkModelReasoning {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 /// The wire family a model speaks; Cloud models name their upstream's.
@@ -79,6 +87,9 @@ pub struct WorkModelTool {
     pub description: String,
     /// JSON Schema of the arguments object.
     pub schema: Value,
+    /// The schema is closed and complete: a provider that can hold a call to
+    /// it exactly (OpenAI's strict function calling) is asked to.
+    pub strict: bool,
 }
 
 #[derive(Clone)]
@@ -116,8 +127,37 @@ pub enum WorkModelMessage {
     ToolResults(Vec<WorkModelToolResult>),
 }
 
+/// Whether the model must call a tool, and which.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum WorkModelToolChoice {
+    /// Text or any offered tool.
+    #[default]
+    Auto,
+    /// One of the offered tools.
+    Required,
+    /// This offered tool. A wire that would refuse it with reasoning on sends
+    /// the call without reasoning.
+    Named(String),
+}
+
+/// Additional process-local revocation fence for model-bound page images.
+/// This does not authorize pixels: native source and consent admission remain
+/// separate. It is never serialized into provider requests, IPC or artifacts.
+pub trait WorkModelImageFence: Send + Sync {
+    /// Runs one synchronous future poll only while the original permission is
+    /// current. Revocation must serialize with this callback; no await occurs
+    /// inside it. False means the callback was not run.
+    fn while_current(&self, operation: &mut dyn FnMut()) -> bool;
+    /// Wakes when this original permission is permanently invalid. Enabling a
+    /// setting again must never revive a fence created before revocation.
+    fn revoked(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
+
 #[derive(Clone)]
 pub struct WorkModelRequest {
+    /// Native-validated image history's additional live permission fence.
+    /// Image requests without one fail closed at transport dispatch.
+    pub image_fence: Option<std::sync::Arc<dyn WorkModelImageFence>>,
     pub model: WorkModelRef,
     pub system: Vec<WorkModelSystemBlock>,
     pub tools: Vec<WorkModelTool>,
@@ -127,6 +167,13 @@ pub struct WorkModelRequest {
     /// Offer the provider's own web search tool when it has one.
     pub native_search: bool,
     pub parallel_tools: bool,
+    pub tool_choice: WorkModelToolChoice,
+    /// Parts closing the last message that change on every call, such as the
+    /// host's running facts; a prompt cache breakpoint goes before them.
+    pub volatile_tail: usize,
+    /// Stable across one conversation's calls and free of its content, so a
+    /// provider that routes caches by key keeps them on one cache.
+    pub cache_key: Option<String>,
 }
 
 #[derive(Clone)]
@@ -160,6 +207,8 @@ pub enum WorkModelStop {
 pub struct WorkModelUsage {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    /// Of `input_tokens`, those written to the provider's prompt cache.
+    pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
     /// Cost in millionths of a US dollar, including provider tool fees, when
@@ -179,14 +228,69 @@ pub struct WorkModelOutcome {
 pub enum WorkModelError {
     MissingKey,
     Unauthorized,
-    RateLimited { retry_after_ms: Option<u64> },
+    RateLimited {
+        retry_after_ms: Option<u64>,
+    },
     Overloaded,
     ContextTooLong,
     BadRequest,
     Network,
     Protocol,
     Cancelled,
+    /// The person's own provider account is out of credit.
     OverBudget,
+    /// Zephium Cloud's own refusal. `retry_after_ms` is the server's word on
+    /// when to ask again, never a guess.
+    Hosted {
+        refusal: HostedRefusal,
+        retry_after_ms: Option<u64>,
+    },
+}
+
+/// Why Zephium Cloud refused, by its stable error codes. None of these is
+/// retried on its own: each needs the person, or the clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostedRefusal {
+    /// The selected model needs another plan.
+    PlanRequired,
+    /// The account is under billing review.
+    BillingReview,
+    /// Included and purchased usage are spent.
+    OutOfCredits,
+    /// The account's daily limit is reached; it resets at 00:00 UTC.
+    DailyLimit,
+    /// The free usage pool is exhausted for now.
+    FreeUsagePaused,
+    /// Too many earlier requests are still being confirmed.
+    ConfirmationLimited,
+    /// The hosted service is stopped for spending protection.
+    Paused,
+    /// The same logical call already reached the server.
+    AlreadySent,
+    /// A recording the server could not read.
+    InvalidAudio,
+    /// A recording in an encoding the server does not take.
+    UnsupportedAudio,
+    /// A recording longer than the server takes.
+    AudioTooLong,
+}
+
+/// A cache key for one conversation, from what stays fixed across its calls:
+/// the system text and the tools' names. A hash, so no text leaves in it.
+pub fn work_model_cache_key(system: &[WorkModelSystemBlock], tools: &[WorkModelTool]) -> String {
+    // FNV-1a: the same key on every build, unlike the standard hasher.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let parts = system
+        .iter()
+        .map(|block| block.text.as_str())
+        .chain(tools.iter().map(|tool| tool.name.as_str()));
+    for part in parts {
+        for byte in part.bytes().chain([0]) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("zk_{hash:016x}")
 }
 
 impl fmt::Display for WorkModelError {

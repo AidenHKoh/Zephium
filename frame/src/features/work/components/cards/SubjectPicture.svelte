@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { pictureUrl } from "$domain/resources";
   import { getContext, onMount, untrack } from "svelte";
-  import { mediaUrl } from "$domain/resources";
+
   import HostGlyph, { siteMark, siteOrigin } from "./HostGlyph.svelte";
   import { canvasProbe } from "../../lib/canvas-context";
   import type { ComparePicture } from "../../lib/compare";
@@ -28,7 +29,7 @@
     const origin = siteOrigin(homepage);
     if (origin) probe(origin);
   });
-  const source = $derived(picture ? mediaUrl(picture.profile, picture.digest) : null);
+  const source = $derived(picture ? pictureUrl(picture) : null);
   // A picture that will not load leaves a quiet plate: never a broken glyph, never an initial.
   let failed = $state<string | null>(null);
   $effect(() => {

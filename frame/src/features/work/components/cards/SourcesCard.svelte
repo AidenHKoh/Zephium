@@ -2,17 +2,22 @@
   import { getContext, untrack } from "svelte";
   import Icon from "$shared/ui/Icon";
   import HostGlyph from "./HostGlyph.svelte";
+  import Popover from "../board/Popover.svelte";
   import { ArrowDown01Icon } from "../../lib/icons";
   import type { CanvasItem } from "../../lib/canvas-model";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import { SOURCE_ROWS } from "../../lib/project-environment-board";
   import { thumbnail } from "../../lib/frame-thumbs";
   import type { RunSource } from "../../lib/run/sources";
+  import { pageLabel, sharedSite } from "../../lib/run/result-label";
   import * as m from "$shared/i18n/messages";
 
   let { item, selected }: { item: CanvasItem; selected: boolean } = $props();
   const board = getContext<BoardActions | undefined>(canvasBoard);
-  const rows = $derived(item.drawn?.rows ?? []);
+  const all = $derived(item.drawn?.rows ?? []);
+  /** Only what the run read or cites is listed; search results it only looked at fold into one line. */
+  const rows = $derived(all.filter((row) => row.used));
+  const looked = $derived(all.filter((row) => !row.used));
   const unread = $derived(item.drawn?.unread ?? []);
   /** Pictures of the pages the run read, up to four, one site each before a site's second. */
   const frames = $derived.by(() => {
@@ -22,9 +27,15 @@
     );
     return [...first, ...framed.filter((row) => !first.includes(row))].slice(0, 4);
   });
-  let all = $state(false);
-  let missed = $state(false);
-  const shown = $derived(all ? rows : rows.slice(0, SOURCE_ROWS));
+  /** The whole list, or the pages that would not open, over the canvas: the card never grows. */
+  let sheet = $state<"all" | "looked" | "missed" | null>(null);
+  const shown = $derived(rows.slice(0, SOURCE_ROWS));
+  /** All on one site: it is said once above the rows, and the rows are titles. */
+  const site = $derived(sharedSite(rows));
+  const toggle = (which: "all" | "looked" | "missed") => (event: MouseEvent) => {
+    event.stopPropagation();
+    sheet = sheet === which ? null : which;
+  };
 
   function open(row: RunSource) {
     if (row.file)
@@ -78,6 +89,10 @@
             >
           </li>{/each}
       </ul>{/if}
+    {#if site}<p class="site-head">
+        <span class="mark"><HostGlyph host={site} url={rows[0]!.url} size={16} /></span>
+        <span>{m.work_sources_site({ site, count: rows.length })}</span>
+      </p>{/if}
     {#if rows.length}<ul class="rows">
         {#each shown as row (row.key)}<li>
             <button
@@ -89,63 +104,100 @@
                 open(row);
               }}
             >
-              <span class="mark"
-                ><HostGlyph host={row.host} url={row.url} file={!!row.file} size={16} /></span
-              >
-              <span class="site">{row.host}</span>
-              {#if row.title !== row.host}<span class="title">{row.title}</span>{/if}
+              {@render entry(row, !!site)}
             </button>
           </li>{/each}
       </ul>{/if}
-    {#if rows.length > SOURCE_ROWS}<button
-        type="button"
-        class="quiet nodrag nopan"
-        aria-expanded={all}
-        onclick={(event) => {
-          event.stopPropagation();
-          all = !all;
-        }}
-        >{all ? m.work_sources_fewer() : m.work_sources_all({ count: rows.length })}<Icon
-          icon={ArrowDown01Icon}
-          size={11}
-        /></button
-      >{/if}
-    {#if unread.length}
-      <button
-        type="button"
-        class="quiet missed nodrag nopan"
-        aria-expanded={missed}
-        onclick={(event) => {
-          event.stopPropagation();
-          missed = !missed;
-        }}
-        >{unread.length === 1
-          ? m.work_sources_unread_one()
-          : m.work_sources_unread({ count: unread.length })}<Icon
-          icon={ArrowDown01Icon}
-          size={11}
-        /></button
-      >
-      {#if missed}<ul class="rows unread" aria-label={m.work_env_unread_list()}>
-          {#each unread as page (page.key)}<li>
-              <button
-                type="button"
-                class="row nodrag nopan"
-                title={page.url}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  board?.page(page.url);
-                }}
-              >
-                <span class="mark"><HostGlyph host={page.host} url={page.url} size={16} /></span>
-                <span class="site">{page.host}</span>
-                <span class="title">{page.note}</span>
-              </button>
-            </li>{/each}
-        </ul>{/if}
-    {/if}
+    {#if rows.length > SOURCE_ROWS || looked.length || unread.length}<div class="more">
+        {#if rows.length > SOURCE_ROWS}<button
+            type="button"
+            class="quiet nodrag nopan"
+            aria-expanded={sheet === "all"}
+            onclick={toggle("all")}
+            >{m.work_sources_all({ count: rows.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if looked.length}<button
+            type="button"
+            class="quiet nodrag nopan"
+            aria-expanded={sheet === "looked"}
+            onclick={toggle("looked")}
+            >{m.work_sources_looked({ count: looked.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if unread.length}<button
+            type="button"
+            class="quiet missed nodrag nopan"
+            aria-expanded={sheet === "missed"}
+            onclick={toggle("missed")}
+            >{unread.length === 1
+              ? m.work_sources_unread_one()
+              : m.work_sources_unread({ count: unread.length })}<Icon
+              icon={ArrowDown01Icon}
+              size={11}
+            /></button
+          >{/if}
+        {#if sheet}<Popover
+            label={sheet === "missed"
+              ? m.work_env_unread_list()
+              : sheet === "looked"
+                ? m.work_sources_looked_list()
+                : m.work_sources()}
+            side="below"
+            width={440}
+            onclose={() => (sheet = null)}
+          >
+            <ul
+              class="rows listed"
+              class:unread={sheet === "missed"}
+              aria-label={sheet === "missed" ? m.work_env_unread_list() : undefined}
+            >
+              {#if sheet !== "missed"}{#each sheet === "looked" ? looked : rows as row (row.key)}<li
+                  >
+                    <button
+                      type="button"
+                      class="row nodrag nopan"
+                      title={row.url || row.file?.path}
+                      onclick={() => open(row)}
+                    >
+                      {@render entry(row, !!site && sheet === "all")}
+                    </button>
+                  </li>{/each}{:else}{#each unread as page (page.key)}<li>
+                    <button
+                      type="button"
+                      class="row nodrag nopan"
+                      title={page.url}
+                      onclick={() => board?.page(page.url)}
+                    >
+                      <span class="mark"
+                        ><HostGlyph host={page.host} url={page.url} size={16} /></span
+                      >
+                      <span class="site">{page.host}</span>
+                      <span class="title">{page.note}</span>
+                    </button>
+                  </li>{/each}{/if}
+            </ul>
+          </Popover>{/if}
+      </div>{/if}
   </div>
 </section>
+
+{#snippet entry(row: RunSource, single: boolean)}
+  {@const text = row.file
+    ? row.title === row.host
+      ? ""
+      : row.title
+    : pageLabel({ url: row.url, where: row.host, title: row.title })}
+  <span class="mark"
+    >{#if !single}<HostGlyph host={row.host} url={row.url} file={!!row.file} size={16} />{/if}</span
+  >
+  {#if !single}<span class="site">{row.host}</span>{/if}
+  {#if text && text !== row.host}<span class="title">{text}</span>{/if}
+{/snippet}
 
 <style>
   .sources {
@@ -196,10 +248,6 @@
     transition: translate var(--motion-base) var(--ease-spring);
   }
 
-  .frame:hover {
-    translate: 0 -2px;
-  }
-
   .frame canvas {
     display: block;
     inline-size: 100%;
@@ -236,6 +284,20 @@
     background: var(--color-control-hover);
   }
 
+  .row:not(:has(.site)) {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .site-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 2px;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 24px;
+  }
+
   .mark {
     display: grid;
     place-items: center;
@@ -267,7 +329,6 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    margin-block-start: 6px;
     padding: 0;
     border: 0;
     background: transparent;
@@ -283,9 +344,23 @@
     color: var(--color-text);
   }
 
-  .missed {
+  .more {
+    position: relative;
     display: flex;
+    flex-wrap: wrap;
+    gap: 0 16px;
+    margin-block-start: 6px;
+  }
+
+  .missed {
     color: var(--color-faint);
+  }
+
+  .listed {
+    max-block-size: 360px;
+    margin: -6px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .quiet :global(svg) {
@@ -302,5 +377,10 @@
   .quiet:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
+  }
+
+  /* The cell lifts its window, so the pointer at its lower edge never drops it and finds it again. */
+  .frames li:hover .frame {
+    translate: 0 -2px;
   }
 </style>

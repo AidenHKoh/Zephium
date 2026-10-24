@@ -28,6 +28,23 @@ test("a draft's Markdown is paragraphs and lists; a note's has headings", () => 
   ]);
 });
 
+test("numbered steps are an ordered list, even when a model wrote them on one line", () => {
+  expect(blocks("1. Choose the auth provider. 2. Build billing. 3. Add traces.")).toEqual([
+    {
+      kind: "list",
+      ordered: true,
+      items: ["Choose the auth provider.", "Build billing.", "Add traces."],
+    },
+  ]);
+  expect(blocks("1. First\n2. Second")).toEqual([
+    { kind: "list", ordered: true, items: ["First", "Second"] },
+  ]);
+  // A sentence that only mentions a number stays a sentence.
+  expect(blocks("1. Pick a plan that costs 2. dollars less")).toEqual([
+    { kind: "paragraph", lines: ["1. Pick a plan that costs 2. dollars less"] },
+  ]);
+});
+
 test("sheet cells compare by their type, and the best value is marked only where values differ", () => {
   const money: SheetColumn = { label: "Price", kind: "money", currency: "USD", best: "min" };
   const score: SheetColumn = { label: "Rating", kind: "rating", best: "max" };

@@ -1,19 +1,16 @@
 //! Finding files and text inside a granted folder, with ripgrep's own
-//! libraries: `.gitignore` and `.ignore` rules, hidden files skipped, binary
+//! matchers and local `.gitignore` / `.ignore` rules, hidden files skipped, binary
 //! files and symlinks passed over. Every result is capped and says what it
 //! left out, so the agent narrows instead of paging through a tree.
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::work_files::{protected_path, read_directory, read_text};
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
-use ignore::{WalkBuilder, WalkState};
 
 /// Directories never walked, gitignored or not.
 const SKIPPED: [&str; 6] = [".git", "node_modules", "target", ".cache", "dist", "build"];
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_VISITED: usize = 60_000;
 const BUDGET: Duration = Duration::from_millis(2500);
 pub const MAX_GLOB_FILES: usize = 100;
@@ -57,31 +54,114 @@ pub struct Found {
     pub partial: bool,
 }
 
-fn walker(root: &Path) -> WalkBuilder {
-    let mut walk = WalkBuilder::new(root);
-    walk.hidden(true)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(true)
-        .ignore(true)
-        .parents(true)
-        .require_git(false)
-        .follow_links(false)
-        .same_file_system(true)
-        .max_filesize(Some(MAX_FILE_BYTES))
-        .threads(
-            std::thread::available_parallelism()
-                .map_or(4, |n| n.get())
-                .min(8),
-        )
-        .filter_entry(|entry| {
-            !(entry.file_type().is_some_and(|t| t.is_dir())
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| SKIPPED.contains(&name)))
-        });
-    walk
+/// Walk only directory handles checked by the file boundary. Ignore rules are
+/// loaded through the same bounded opener; parent/global configuration is never
+/// probed. Avoid a second path-based walker which could follow a swapped parent.
+struct Walker {
+    pending: Vec<PathBuf>,
+    entries: Vec<(PathBuf, SystemTime)>,
+    ignores: Vec<(PathBuf, ignore::gitignore::Gitignore)>,
+    started: Instant,
+    partial: bool,
+    visited: usize,
+}
+impl Walker {
+    fn new(root: &Path) -> Self {
+        let mut value = Self {
+            pending: Vec::new(),
+            entries: Vec::new(),
+            ignores: Vec::new(),
+            visited: 0,
+            started: Instant::now(),
+            partial: false,
+        };
+        if !protected_path(root) {
+            if root.is_dir() {
+                value.pending.push(root.to_owned());
+            } else {
+                value
+                    .entries
+                    .push((root.to_owned(), SystemTime::UNIX_EPOCH));
+            }
+        }
+        value
+    }
+}
+impl Iterator for Walker {
+    type Item = (PathBuf, SystemTime);
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.visited >= MAX_VISITED || self.started.elapsed() >= BUDGET {
+                self.partial = true;
+                return None;
+            }
+            if let Some(entry) = self.entries.pop() {
+                self.visited += 1;
+                return Some(entry);
+            }
+            let dir = self.pending.pop()?;
+            let Ok(entries) = read_directory(&dir) else {
+                self.partial = true;
+                continue;
+            };
+            self.partial |= entries.truncated;
+            let mut rules = ignore::gitignore::GitignoreBuilder::new(&dir);
+            for name in [".gitignore", ".ignore"] {
+                if let Ok((_, _, Some(text))) = read_text(&dir.join(name)) {
+                    for line in text.lines() {
+                        let _ = rules.add_line(None, line);
+                    }
+                }
+            }
+            if let Ok(rules) = rules.build() {
+                self.ignores.push((dir.clone(), rules));
+            }
+            for entry in entries.filter_map(Result::ok) {
+                self.visited += 1;
+                if self.visited >= MAX_VISITED || self.started.elapsed() >= BUDGET {
+                    self.partial = true;
+                    break;
+                }
+                let path = entry.path();
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if name.starts_with('.') || SKIPPED.contains(&name) || protected_path(&path) {
+                    continue;
+                }
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_symlink() || (!kind.is_dir() && !kind.is_file()) {
+                    continue;
+                }
+                // Descendants are visited after ancestors. The deepest matching
+                // rule wins, including a whitelist that overrides an ancestor.
+                let ignored = self
+                    .ignores
+                    .iter()
+                    .rev()
+                    .find_map(|(base, rules)| {
+                        if !path.starts_with(base) {
+                            return None;
+                        }
+                        let matched = rules.matched(&path, kind.is_dir());
+                        (!matched.is_none()).then(|| matched.is_ignore())
+                    })
+                    .unwrap_or(false);
+                if ignored {
+                    continue;
+                }
+                if kind.is_dir() {
+                    self.pending.push(path);
+                } else if let Ok(metadata) = entry.metadata() {
+                    if metadata.len() <= 1024 * 1024 {
+                        self.entries
+                            .push((path, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A glob without a slash matches at any depth, as people mean `*.rs`.
@@ -102,40 +182,6 @@ fn matcher(pattern: &str) -> Result<globset::GlobMatcher, FindError> {
         .map_err(|_| FindError::Pattern)
 }
 
-struct Budget {
-    started: Instant,
-    visited: AtomicUsize,
-    stopped: AtomicBool,
-}
-impl Budget {
-    fn new() -> Self {
-        Self {
-            started: Instant::now(),
-            visited: AtomicUsize::new(0),
-            stopped: AtomicBool::new(false),
-        }
-    }
-    /// Counts one entry; false once the walk ran out of time or entries.
-    fn visit(&self) -> bool {
-        if self.visited.fetch_add(1, Ordering::Relaxed) >= MAX_VISITED
-            || self.started.elapsed() >= BUDGET
-        {
-            self.stopped.store(true, Ordering::Relaxed);
-            return false;
-        }
-        true
-    }
-    fn stopped(&self) -> bool {
-        self.stopped.load(Ordering::Relaxed)
-    }
-}
-
-fn modified(path: &Path) -> SystemTime {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}
-
 fn relative(root: &Path, path: &Path) -> String {
     shown_path(path.strip_prefix(root).unwrap_or(path))
 }
@@ -154,33 +200,21 @@ fn by_recency(files: &mut [(PathBuf, SystemTime)]) {
 
 /// Files under `root` whose path relative to it matches `pattern`.
 pub fn glob(root: &Path, pattern: &str) -> Result<Found, FindError> {
-    if !root.is_dir() {
+    if !root.is_absolute() {
+        return Err(FindError::NotADirectory);
+    }
+    if !root.is_dir() || protected_path(root) {
         return Err(FindError::NotADirectory);
     }
     let matcher = matcher(pattern)?;
-    let budget = Budget::new();
-    let hits = Mutex::new(Vec::new());
-    walker(root).build_parallel().run(|| {
-        Box::new(|entry| {
-            if !budget.visit() {
-                return WalkState::Quit;
-            }
-            let Ok(entry) = entry else {
-                return WalkState::Continue;
-            };
-            if entry.file_type().is_some_and(|t| t.is_file())
-                && matcher.is_match(entry.path().strip_prefix(root).unwrap_or(entry.path()))
-            {
-                let path = entry.into_path();
-                let at = modified(&path);
-                if let Ok(mut hits) = hits.lock() {
-                    hits.push((path, at));
-                }
-            }
-            WalkState::Continue
-        })
-    });
-    let mut files = hits.into_inner().unwrap_or_default();
+    let mut hits = Vec::new();
+    let mut walker = Walker::new(root);
+    for (path, at) in walker.by_ref() {
+        if matcher.is_match(path.strip_prefix(root).unwrap_or(&path)) {
+            hits.push((path, at));
+        }
+    }
+    let mut files = hits;
     by_recency(&mut files);
     let total = files.len();
     let mut text = String::new();
@@ -191,7 +225,7 @@ pub fn glob(root: &Path, pattern: &str) -> Result<Found, FindError> {
     Ok(Found {
         shown: total.min(MAX_GLOB_FILES),
         total,
-        partial: budget.stopped(),
+        partial: walker.partial,
         text,
     })
 }
@@ -250,6 +284,12 @@ impl Sink for Collect<'_> {
 
 /// Lines matching a regular expression under `root` (a folder or one file).
 pub fn grep(root: &Path, query: &GrepQuery<'_>) -> Result<Found, FindError> {
+    if !root.is_absolute() {
+        return Err(FindError::NotADirectory);
+    }
+    if protected_path(root) {
+        return Err(FindError::NotADirectory);
+    }
     if query.pattern.is_empty() || query.pattern.len() > 512 {
         return Err(FindError::Pattern);
     }
@@ -272,63 +312,47 @@ pub fn grep(root: &Path, query: &GrepQuery<'_>) -> Result<Found, FindError> {
     } else {
         root.to_path_buf()
     };
-    let budget = Budget::new();
-    let found = Mutex::new(Vec::<FileHits>::new());
-    let files = AtomicUsize::new(0);
-    walker(root).build_parallel().run(|| {
-        let mut searcher = SearcherBuilder::new()
-            .line_number(true)
-            .before_context(context)
-            .after_context(context)
-            .binary_detection(BinaryDetection::quit(0))
-            .build();
-        let matcher = matcher.clone();
-        let filter = filter.clone();
-        let (budget, found, files, base) = (&budget, &found, &files, &base);
-        Box::new(move |entry| {
-            if !budget.visit() {
-                return WalkState::Quit;
-            }
-            let Ok(entry) = entry else {
-                return WalkState::Continue;
-            };
-            if !entry.file_type().is_some_and(|t| t.is_file()) {
-                return WalkState::Continue;
-            }
-            if filter.as_ref().is_some_and(|f| {
-                !f.is_match(entry.path().strip_prefix(base).unwrap_or(entry.path()))
-            }) {
-                return WalkState::Continue;
-            }
-            let mut hits = FileHits {
-                path: entry.path().to_path_buf(),
-                ..Default::default()
-            };
-            let mut sink = Collect {
-                hits: &mut hits,
-                keep_lines: lines,
-                cap: MAX_GREP_LINES + 1,
-            };
-            if searcher
-                .search_path(&matcher, entry.path(), &mut sink)
-                .is_err()
-                || hits.count == 0
-            {
-                return WalkState::Continue;
-            }
-            hits.modified = Some(modified(&hits.path));
-            if let Ok(mut found) = found.lock() {
-                found.push(hits);
-            }
-            // Enough files to rank by recency and still say how many there were.
-            if files.fetch_add(1, Ordering::Relaxed) >= 20 * MAX_GREP_FILES {
-                budget.stopped.store(true, Ordering::Relaxed);
-                return WalkState::Quit;
-            }
-            WalkState::Continue
-        })
-    });
-    let mut found = found.into_inner().unwrap_or_default();
+    let mut found = Vec::<FileHits>::new();
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .before_context(context)
+        .after_context(context)
+        .binary_detection(BinaryDetection::quit(0))
+        .build();
+    let mut walker = Walker::new(root);
+    for (path, modified) in walker.by_ref() {
+        if filter
+            .as_ref()
+            .is_some_and(|f| !f.is_match(path.strip_prefix(&base).unwrap_or(&path)))
+        {
+            continue;
+        }
+        let Ok((_, _, Some(content))) = read_text(&path) else {
+            continue;
+        };
+        let mut hits = FileHits {
+            path,
+            ..Default::default()
+        };
+        let mut sink = Collect {
+            hits: &mut hits,
+            keep_lines: lines,
+            cap: MAX_GREP_LINES + 1,
+        };
+        if searcher
+            .search_slice(&matcher, content.as_bytes(), &mut sink)
+            .is_err()
+            || hits.count == 0
+        {
+            continue;
+        }
+        hits.modified = Some(modified);
+        found.push(hits);
+        if found.len() >= 20 * MAX_GREP_FILES {
+            walker.partial = true;
+            break;
+        }
+    }
     found.sort_by(|a, b| {
         b.modified
             .cmp(&a.modified)
@@ -339,7 +363,7 @@ pub fn grep(root: &Path, query: &GrepQuery<'_>) -> Result<Found, FindError> {
         found,
         query.output,
         query.limit,
-        budget.stopped(),
+        walker.partial,
     ))
 }
 
@@ -458,9 +482,108 @@ mod tests {
     }
 
     #[test]
+    fn search_withholds_recognized_secret_body_and_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("plain.txt"), "needle ordinary").unwrap();
+        std::fs::write(root.join("body.txt"), "needle\nghp_inertFixtureToken").unwrap();
+        std::fs::write(
+            root.join("key.txt"),
+            "needle\n-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        )
+        .unwrap();
+        std::fs::write(root.join("ghp_inertFixtureFilename.txt"), "needle").unwrap();
+        let found = grep(
+            &root,
+            &GrepQuery {
+                pattern: "needle",
+                glob: None,
+                output: GrepOutput::Lines,
+                context: 0,
+                case_insensitive: false,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert!(found.text.contains("plain.txt"));
+        assert!(!found.text.contains("body.txt"));
+        assert!(!found.text.contains("key.txt"));
+        assert!(!found.text.contains("ghp_"));
+        let found = glob(&root, "*.txt").unwrap();
+        assert!(!found.text.contains("ghp_"));
+    }
+
+    #[test]
+    fn child_whitelist_overrides_parent_ignore_rule() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("child")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.txt\n").unwrap();
+        std::fs::write(root.join("child/.gitignore"), "!keep.txt\n").unwrap();
+        for path in ["root.txt", "child/keep.txt", "child/ignored.txt"] {
+            std::fs::write(root.join(path), "needle\n").unwrap();
+        }
+        let found = glob(&root, "*.txt").unwrap();
+        assert_eq!(found.text, "child/keep.txt\n");
+        assert_eq!((found.shown, found.total, found.partial), (1, 1, false));
+        let found = grep(
+            &root,
+            &GrepQuery {
+                pattern: "needle",
+                glob: Some("*.txt"),
+                output: GrepOutput::Files,
+                context: 0,
+                case_insensitive: false,
+                limit: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(found.text, "child/keep.txt\n");
+        assert_eq!((found.shown, found.total, found.partial), (1, 1, false));
+    }
+
+    #[test]
+    fn protected_files_and_external_ignore_rules_never_enter_results() {
+        let parent = tempfile::tempdir().unwrap();
+        let parent = parent.path().canonicalize().unwrap();
+        let root = parent.join("project");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(parent.join(".gitignore"), "*.rs\n").unwrap();
+        std::fs::write(root.join("main.rs"), "public-needle\n").unwrap();
+        std::fs::write(root.join(".env"), "private-needle\n").unwrap();
+        std::fs::hard_link(root.join(".env"), root.join("alias.txt")).unwrap();
+        std::fs::write(root.join("credentials.json"), "private-needle\n").unwrap();
+        let paths = glob(&root, "*").unwrap();
+        assert_eq!(paths.text, "main.rs\n");
+        let query = GrepQuery {
+            pattern: "needle",
+            glob: None,
+            output: GrepOutput::Lines,
+            context: 0,
+            case_insensitive: false,
+            limit: None,
+        };
+        let found = grep(&root, &query).unwrap();
+        assert!(found.text.contains("public-needle"));
+        assert!(!found.text.contains("private-needle"));
+        assert!(grep(&root.join(".env"), &query).is_err());
+        #[cfg(unix)]
+        {
+            let outside = parent.join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::write(outside.join("outside.txt"), "outside-needle").unwrap();
+            std::fs::rename(&root, parent.join("old")).unwrap();
+            std::os::unix::fs::symlink(&outside, &root).unwrap();
+            assert!(glob(&root, "*").unwrap().text.is_empty());
+            assert!(grep(&root, &query).unwrap().text.is_empty());
+        }
+    }
+
+    #[test]
     fn glob_respects_gitignore_and_sorts_by_recency() {
         let dir = tree();
-        let root = dir.path();
+        let canonical = dir.path().canonicalize().unwrap();
+        let root = canonical.as_path();
         let found = glob(root, "*.rs").unwrap();
         let listed: Vec<&str> = found.text.lines().collect();
         assert_eq!(listed.len(), 2, "{listed:?}");
@@ -485,7 +608,8 @@ mod tests {
     #[test]
     fn grep_modes_context_and_caps() {
         let dir = tree();
-        let root = dir.path();
+        let canonical = dir.path().canonicalize().unwrap();
+        let root = canonical.as_path();
         let query = |output, context| GrepQuery {
             pattern: "add",
             glob: None,
@@ -549,7 +673,7 @@ mod tests {
         )
         .unwrap();
         let found = grep(
-            dir.path(),
+            &dir.path().canonicalize().unwrap(),
             &GrepQuery {
                 pattern: "needle",
                 glob: None,

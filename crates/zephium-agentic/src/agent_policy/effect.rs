@@ -57,6 +57,7 @@ impl fmt::Debug for AgentEffectId {
 /// execution still requires independent outcome verification.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AgentEffectAssessment {
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     action_guard: [u8; 32],
     source_context: ContextJoin,
     destination_origin: SemanticOrigin,
@@ -71,11 +72,28 @@ impl AgentEffectAssessment {
         actual_effect: SemanticEffectClass,
     ) -> Self {
         Self {
+            approval_binding: None,
             action_guard: action.verification_guard(),
             source_context: action.frame().context(),
             destination_origin,
             actual_effect,
         }
+    }
+
+    /// Carries the original reviewed native target/option seal into execution.
+    /// A freshly observed different target can never substitute for that seal.
+    pub fn with_approval(
+        action: &SemanticPreparedAction,
+        destination_origin: SemanticOrigin,
+        actual_effect: SemanticEffectClass,
+        approved: crate::SemanticApprovalBinding,
+    ) -> Option<Self> {
+        if action.approval_binding() != Some(approved) {
+            return None;
+        }
+        let mut assessment = Self::new(action, destination_origin, actual_effect);
+        assessment.approval_binding = Some(approved);
+        Some(assessment)
     }
 
     /// Exact pre-execution context assessed by the fixed adapter.
@@ -97,6 +115,9 @@ impl AgentEffectAssessment {
     pub fn matches_action(&self, action: &SemanticPreparedAction) -> bool {
         self.source_context == action.frame().context()
             && self.action_guard == action.verification_guard()
+            && self
+                .approval_binding
+                .is_none_or(|binding| action.approval_binding() == Some(binding))
     }
 }
 
@@ -348,6 +369,7 @@ pub enum AgentEffectAuthorization {
 /// Non-cloneable pre-dispatch operation reservation.
 #[must_use]
 pub struct AgentEffectPermit {
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     manifest: AgentRunManifestId,
     manifest_guard: [u8; 32],
     id: AgentEffectId,
@@ -407,6 +429,7 @@ impl AgentEffectPermit {
         effect: SemanticEffectClass,
     ) -> Self {
         Self {
+            approval_binding: None,
             manifest: manifest.id(),
             manifest_guard: manifest.guard(),
             id,
@@ -438,6 +461,7 @@ impl fmt::Debug for AgentEffectPermit {
 /// Non-cloneable exact effect after final policy revalidation accepted dispatch.
 #[must_use]
 pub struct AgentActiveEffect {
+    approval_binding: Option<crate::SemanticApprovalBinding>,
     manifest: AgentRunManifestId,
     manifest_guard: [u8; 32],
     id: AgentEffectId,
@@ -450,6 +474,9 @@ pub struct AgentActiveEffect {
 }
 
 impl AgentActiveEffect {
+    pub(crate) const fn approval_binding(&self) -> Option<crate::SemanticApprovalBinding> {
+        self.approval_binding
+    }
     /// Exact immutable manifest revision governing this dispatched effect.
     pub const fn manifest(&self) -> AgentRunManifestId {
         self.manifest
@@ -504,6 +531,7 @@ impl AgentActiveEffect {
         attempt: SemanticActionAttemptId,
     ) -> Self {
         Self {
+            approval_binding: None,
             manifest: manifest.id(),
             manifest_guard: manifest.guard(),
             id,
@@ -522,6 +550,7 @@ impl AgentActiveEffect {
         attempt: SemanticActionAttemptId,
     ) -> Self {
         Self {
+            approval_binding: None,
             manifest: AgentRunManifestId::generate(),
             manifest_guard: [0x81; 32],
             id: AgentEffectId::new(attempt.get()).expect("test effect identity"),
@@ -531,6 +560,30 @@ impl AgentActiveEffect {
             attempt,
             action_guard: action.verification_guard(),
             guard: [0x82; 32],
+        }
+    }
+
+    /// Authority for one step the person directed on their own tab from the
+    /// Ask panel. No run, plan or model stands behind it: the step is the
+    /// person's, and the shell holds every committing step for their
+    /// confirm before it gets here. Its manifest guard marks it as such and
+    /// joins no agent run.
+    pub(crate) fn for_person_directed(
+        action: &SemanticPreparedAction,
+        attempt: SemanticActionAttemptId,
+        id: AgentEffectId,
+    ) -> Self {
+        Self {
+            approval_binding: action.approval_binding(),
+            manifest: AgentRunManifestId::generate(),
+            manifest_guard: [0x50; 32],
+            id,
+            lease: AgentPlanLeaseId::generate(),
+            node: AgentPlanNodeId::generate(),
+            effect: action.effect(),
+            attempt,
+            action_guard: action.verification_guard(),
+            guard: [0x51; 32],
         }
     }
 
@@ -1101,6 +1154,7 @@ impl AgentRunPolicy {
             state: AgentEffectRowState::Authorized,
         });
         Ok(AgentEffectAuthorization::Permit(AgentEffectPermit {
+            approval_binding: assessment.approval_binding,
             manifest: self.manifest.id(),
             manifest_guard: self.manifest.guard(),
             id: request.id(),
@@ -1198,6 +1252,7 @@ impl AgentRunPolicy {
         }
         self.effects[index].state = AgentEffectRowState::Dispatched(request.attempt());
         Ok(AgentActiveEffect {
+            approval_binding: permit.approval_binding,
             manifest: permit.manifest,
             manifest_guard: permit.manifest_guard,
             id: permit.id,
@@ -1535,6 +1590,13 @@ fn effect_guard(
     hash_context(&mut hasher, request.automation().context());
     hasher.update(action.verification_guard());
     hash_effect_class(&mut hasher, assessment.actual_effect());
+    match assessment.approval_binding {
+        Some(binding) => {
+            hasher.update([1]);
+            hasher.update(binding.guard_bytes());
+        }
+        None => hasher.update([0]),
+    }
     hash_origin(&mut hasher, assessment.destination_origin());
     hasher.update((taints.len() as u64).to_be_bytes());
     for taint in taints {

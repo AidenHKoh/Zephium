@@ -150,27 +150,66 @@ fn read_request(stream: &mut std::net::TcpStream) -> Value {
     serde_json::from_slice(&bytes[header..]).unwrap()
 }
 
+struct FirstLookCopy(AgentWorkExtractionTask, bool);
+impl AgentWorkTask for FirstLookCopy {
+    fn allows_human_request(&self) -> bool {
+        self.1
+    }
+    fn assess(
+        &self,
+        action: &SemanticPreparedAction,
+    ) -> Result<AgentEffectAssessment, AgentWorkFailure> {
+        self.0.assess(action)
+    }
+    fn whole_first_look(&self) -> bool {
+        self.1
+    }
+    fn extraction_schema(&self) -> Option<&SemanticExtractionSchema> {
+        self.0.extraction_schema()
+    }
+    fn evaluate(
+        &mut self,
+        look: &SemanticObservation,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.evaluate(look)
+    }
+    fn accept_extraction(
+        &mut self,
+        result: &SemanticExtractionResult<'_>,
+    ) -> Result<AgentWorkTaskProgress, AgentWorkFailure> {
+        self.0.accept_extraction(result)
+    }
+    fn attest_account(
+        &self,
+        context: ContextJoin,
+        now: AgentPolicyInstant,
+    ) -> Result<AgentContextAccountBinding, AgentWorkFailure> {
+        self.0.attest_account(context, now)
+    }
+}
+
 #[test]
 fn typed_copy_finishes_after_one_decision_without_a_page_model_or_native_action() {
     let _serial = lock(&SERIAL);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
-    let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        for index in 0..2 {
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline);
-                        std::thread::sleep(Duration::from_millis(2));
+    for refreshed in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            for index in 0..if refreshed { 4 } else { 2 } {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(error) => panic!("{error}"),
                     }
-                    Err(error) => panic!("{error}"),
-                }
-            };
-            let request = read_request(&mut stream);
-            let body = if index == 0 {
+                };
+                let request = read_request(&mut stream);
+                let body = if index % 2 == 0 {
                 json!({"object":"response.input_tokens","input_tokens":100})
             } else {
                 let schemas = request["text"]["format"]["schema"]["properties"]["answers"]["properties"].as_object().unwrap();
@@ -191,54 +230,78 @@ fn typed_copy_finishes_after_one_decision_without_a_page_model_or_native_action(
                     "output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":json!({"answers":answers}).to_string()}]}],
                     "usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":50}}})
             }.to_string();
-            write!(stream, "HTTP/1.1 200 Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        }
-    });
-    let mut input = input_with_effects(&[SemanticEffectClass::Read]);
-    input.decision_provider = Some(super::super::super::AgentBrowserDecisionProvider::Emulation);
-    let task = AgentWorkExtractionTask::try_new(
-        vec![
-            SemanticExtractionFieldSchema::try_text("label".into(), true, 64)
-                .unwrap()
-                .with_verbatim_text()
-                .unwrap(),
-        ],
-        AgentAccountScope::Anonymous,
-    )
-    .unwrap();
-    let (controller, handle) = AgentWorkController::try_new_for_probe(
-        input,
-        AgentProviderTransport::try_new_loopback(
-            AgentProviderTransportConfig::STANDARD,
-            &endpoint,
-            &endpoint,
+                write!(stream, "HTTP/1.1 200 Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut input = input_with_effects(&[SemanticEffectClass::Read]);
+        input.decision_provider =
+            Some(super::super::super::AgentBrowserDecisionProvider::Emulation);
+        let task = AgentWorkExtractionTask::try_new(
+            vec![
+                SemanticExtractionFieldSchema::try_text("label".into(), true, 64)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+            AgentAccountScope::Anonymous,
         )
-        .unwrap(),
-        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+        .unwrap();
+        let (controller, handle) = AgentWorkController::try_new_for_probe(
+            input,
+            AgentProviderTransport::try_new_loopback(
+                AgentProviderTransportConfig::STANDARD,
+                &endpoint,
+                &endpoint,
+            )
             .unwrap(),
-        Arc::new(Audit(Fault::None)),
-        Box::new(task),
-        AgentBrowserRetention::Stateless,
-    )
-    .unwrap();
-    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::DecisionClick(false));
-    assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-    assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
-    let AgentWorkOutcome::Succeeded(success) = outcome else {
-        panic!("{outcome:?}")
-    };
-    assert_eq!(success.closure().model_calls(), 1);
-    assert_eq!(success.closure().effects(), 0);
-    assert!(
-        matches!(success.extraction().unwrap().fields()[0].value(), SemanticExtractedValue::Text(value) if value.as_str() == "Details")
-    );
-    server.join().unwrap();
+            AgentProviderCredential::try_new(
+                AgentProviderKind::OpenAiResponses,
+                "fixture-key".into(),
+            )
+            .unwrap(),
+            Arc::new(Audit(Fault::None)),
+            Box::new(FirstLookCopy(task, refreshed)),
+            AgentBrowserRetention::Stateless,
+        )
+        .unwrap();
+        let (outcome, shutdown, calls, _) = drive(
+            controller,
+            handle,
+            if refreshed {
+                Fault::DecisionRefresh
+            } else {
+                Fault::DecisionClick(false)
+            },
+        );
+        assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
+        if !refreshed {
+            assert_eq!(calls, [1, 2, 3, 4, 5, 6]);
+        }
+        let AgentWorkOutcome::Succeeded(success) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            success.closure().model_calls(),
+            if refreshed { 2 } else { 1 },
+            "a fresh look must retire the old decision and obtain one for its own provenance"
+        );
+        assert_eq!(success.closure().effects(), 0);
+        assert!(
+            matches!(success.extraction().unwrap().fields()[0].value(), SemanticExtractedValue::Text(value) if value.as_str() == "Details")
+        );
+        server.join().unwrap();
+    }
 }
 
 #[test]
 fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
     let _serial = lock(&SERIAL);
-    for (scroll, applied) in [(false, false), (false, true), (true, false)] {
+    for (scroll, applied, refused) in [
+        (false, false, false),
+        (false, true, false),
+        (true, false, false),
+        (false, false, true),
+    ] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
@@ -330,7 +393,9 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
         let (outcome, shutdown, calls, events) = drive(
             controller,
             handle,
-            if scroll {
+            if refused {
+                Fault::DecisionTargetChanged
+            } else if scroll {
                 Fault::ScrollVerification
             } else {
                 Fault::DecisionClick(applied)
@@ -340,7 +405,14 @@ fn typed_native_read_verifies_or_closes_without_retry_and_keeps_accounting() {
             panic!("{outcome:?}");
         };
         assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
-        assert_eq!(calls, [1, 2, 3, 7, 3, 4, 5, 6]);
+        assert_eq!(
+            calls,
+            if refused {
+                vec![1, 2, 3, 7, 4, 5, 6]
+            } else {
+                vec![1, 2, 3, 7, 3, 4, 5, 6]
+            }
+        );
         assert_eq!(closed.policy_settlement().closure().effects(), 1);
         assert_eq!(
             closed.policy_settlement().closure().model_calls(),

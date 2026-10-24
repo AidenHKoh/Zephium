@@ -18,6 +18,7 @@ fn tab(id: ItemId, parent: Option<ItemId>, placement: Placement, host: &str) -> 
             url: format!("https://{host}/"),
             title: host.into(),
             zoom: 1.0,
+            last_active_ms: None,
         },
     }
 }
@@ -69,16 +70,19 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                     id: space,
                     profile,
                     name: "Main".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: sibling_space,
                     profile,
                     name: "Research".into(),
+                    look: Default::default(),
                 },
                 PersistedSpace {
                     id: foreign_space,
                     profile: foreign_profile,
                     name: "Foreign".into(),
+                    look: Default::default(),
                 },
             ],
             items: vec![
@@ -149,16 +153,19 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
         })
     );
     assert_eq!(
-        state.spaces,
+        state
+            .spaces
+            .iter()
+            .map(|view| (
+                view.id.clone(),
+                view.name.clone(),
+                view.icon.clone(),
+                view.theme.clone()
+            ))
+            .collect::<Vec<_>>(),
         vec![
-            SpaceView {
-                id: space.to_string(),
-                name: "Main".into(),
-            },
-            SpaceView {
-                id: sibling_space.to_string(),
-                name: "Research".into(),
-            },
+            (space.to_string(), "Main".into(), None, None),
+            (sibling_space.to_string(), "Research".into(), None, None),
         ]
     );
     assert_eq!(state.active_space_id, Some(space.to_string()));

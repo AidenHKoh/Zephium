@@ -5,6 +5,7 @@
 //! returns is data for the agent, never instructions.
 pub mod cli;
 pub mod gh;
+mod github_broker;
 pub mod helper;
 pub mod mcp;
 pub mod store;
@@ -38,6 +39,11 @@ pub struct CallFact {
 
 /// Where a connection's calls go: the run that owns the part.
 pub trait ConnectionHost: Send + Sync {
+    /// Qualified native connections require a live cancellation source.
+    /// Unknown hosts fail closed; legacy MCP paths do not use this seam.
+    fn cancelled(&self) -> HostFuture<'_, bool> {
+        Box::pin(async { true })
+    }
     /// Records a finished call on the part. `source` is the bounded result,
     /// kept with the step and out of the lead's context.
     fn record(

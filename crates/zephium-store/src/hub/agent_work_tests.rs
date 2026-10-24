@@ -623,3 +623,185 @@ fn process_fence_child() {
         _ => panic!("invalid process fixture expectation"),
     }
 }
+
+/// Raw persisted history: one terminal row with an exact settlement order.
+pub(super) fn insert_settled(
+    connection: &Connection,
+    owner: AgentWorkIncarnation,
+    key: u16,
+    disposition: AgentWorkDisposition,
+    debt: AgentWorkDebt,
+    settled: Option<i64>,
+) -> AgentWorkRecord {
+    let mut bytes = *initial(owner, key).as_bytes();
+    bytes[1] = disposition as u8;
+    bytes[2] = debt.bits();
+    bytes[15] = 3;
+    let record = AgentWorkRecord::decode(bytes).unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_work_runs(run_key, record, terminal, settled) VALUES (?1, ?2, 1, ?3)",
+            params![record.key().as_slice(), record.as_bytes().as_slice(), settled],
+        )
+        .unwrap();
+    record
+}
+
+pub(super) fn clean_runs(hub: &mut Hub) -> Vec<[u8; 32]> {
+    settled_clean(journal(hub))
+        .unwrap()
+        .into_iter()
+        .map(|run| run.key)
+        .collect()
+}
+
+fn debt_rows(hub: &mut Hub) -> usize {
+    outstanding(journal(hub)).unwrap()
+}
+
+#[test]
+fn clean_history_never_blocks_admission_and_reopening_prunes_it() {
+    let _process = work_test_guard();
+    let (directory, mut hub, owner) = open();
+    let transaction = journal(&mut hub).transaction().unwrap();
+    let mut debt = Vec::new();
+    for key in 1..=1100 {
+        insert_settled(
+            &transaction,
+            owner,
+            key,
+            AgentWorkDisposition::Failed,
+            AgentWorkDebt::NONE,
+            Some(i64::from(key)),
+        );
+    }
+    for key in 2001..=2003 {
+        debt.push(insert_settled(
+            &transaction,
+            owner,
+            key,
+            AgentWorkDisposition::FailedClosed,
+            AgentWorkDebt::UNKNOWN,
+            Some(i64::from(key)),
+        ));
+    }
+    transaction.commit().unwrap();
+
+    // 1,103 stored runs used to refuse every admission for good.
+    let admitted = initial(owner, 3001);
+    put(&mut hub, admitted);
+    let Reply::Claimed { records, .. } = hub.agent_work(Request::Claim).unwrap() else {
+        panic!()
+    };
+    assert_eq!(records.len(), 3 + 1 + RETAINED_CLEAN_AGENT_WORK_RUNS);
+    assert!(debt.iter().all(|record| records.contains(record)));
+
+    // A run's end prunes one bounded batch, oldest first.
+    hub.prune_agent_work(0, AGENT_WORK_PRUNE_BATCH);
+    assert_eq!(clean_runs(&mut hub).len(), 1100 - AGENT_WORK_PRUNE_BATCH);
+    assert_eq!(
+        read(journal(&mut hub), initial(owner, 1).key()).unwrap(),
+        None
+    );
+    assert!(read(journal(&mut hub), initial(owner, 1100).key())
+        .unwrap()
+        .is_some());
+
+    drop(hub);
+    simulate_process_exit();
+    let mut reopened = open_hub(directory.path()).unwrap();
+    let kept = clean_runs(&mut reopened);
+    assert_eq!(kept.len(), RETAINED_CLEAN_AGENT_WORK_RUNS);
+    assert_eq!(kept[0], initial(owner, 1100).key());
+    assert_eq!(kept[255], initial(owner, 845).key());
+    assert_eq!(debt_rows(&mut reopened), 4);
+    for record in &debt {
+        assert_eq!(
+            read(journal(&mut reopened), record.key()).unwrap(),
+            Some(*record)
+        );
+    }
+}
+
+#[test]
+fn recovery_history_is_never_pruned_or_deletable() {
+    let _process = work_test_guard();
+    let (_directory, mut hub, owner) = open();
+    let transaction = journal(&mut hub).transaction().unwrap();
+    let mut debt = Vec::new();
+    for key in 1..=300 {
+        debt.push(insert_settled(
+            &transaction,
+            owner,
+            key,
+            AgentWorkDisposition::Rejected,
+            AgentWorkDebt::UNKNOWN,
+            None,
+        ));
+    }
+    let clean = insert_settled(
+        &transaction,
+        owner,
+        301,
+        AgentWorkDisposition::Cancelled,
+        AgentWorkDebt::NONE,
+        None,
+    );
+    transaction.commit().unwrap();
+    let live = initial(owner, 302);
+    put(&mut hub, live);
+
+    hub.prune_agent_work(0, AGENT_WORK_PRUNE_AT_OPEN);
+    assert_eq!(debt_rows(&mut hub), 301);
+    assert_eq!(clean_runs(&mut hub), [clean.key()]);
+    for row in [debt[0], live] {
+        assert!(journal(&mut hub)
+            .execute(
+                "DELETE FROM agent_work_runs WHERE run_key = ?1",
+                [row.key().as_slice()]
+            )
+            .is_err());
+    }
+    assert_eq!(
+        journal(&mut hub)
+            .execute(
+                "DELETE FROM agent_work_runs WHERE run_key = ?1",
+                [clean.key().as_slice()]
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(debt_rows(&mut hub), 301);
+}
+
+#[test]
+fn settlement_orders_terminals_and_admission_counts_only_outstanding_runs() {
+    let _process = work_test_guard();
+    let (_directory, mut hub, owner) = open();
+    let mut settled = Vec::new();
+    for key in [9, 3, 7] {
+        let admitted = initial(owner, key);
+        put(&mut hub, admitted);
+        let closed = transition(&mut hub, admitted, AgentWorkDisposition::FailedClosed).unwrap();
+        settled.push(
+            journal(&mut hub)
+                .query_row(
+                    "SELECT settled FROM agent_work_runs WHERE run_key = ?1",
+                    [closed.key().as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+        );
+    }
+    assert_eq!(settled, [1, 2, 3]);
+    // A terminal write that skips the settlement order is refused.
+    let admitted = initial(owner, 10);
+    put(&mut hub, admitted);
+    assert!(journal(&mut hub)
+        .execute(
+            "UPDATE agent_work_runs SET terminal = 1 WHERE settled IS NULL",
+            []
+        )
+        .is_err());
+    assert_eq!(debt_rows(&mut hub), 4);
+}

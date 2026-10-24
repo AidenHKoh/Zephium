@@ -3,6 +3,7 @@
   import { SvelteSet } from "svelte/reactivity";
   import type { SidebarSectionView, TabView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   import type { Snippet } from "svelte";
   import type { TabTileProps } from "../lib/tab-tile";
   import FolderRow from "./FolderRow.svelte";
@@ -16,6 +17,8 @@
   import { untrack } from "svelte";
   import { ListMotion } from "$shared/lib/list-motion";
   import { RowDrag } from "$session/row-drag.svelte";
+  import { favicons } from "$domain/favicons";
+  import DragMark from "$shared/ui/DragMark";
 
   let {
     entries,
@@ -47,12 +50,15 @@
 
   const drag = new RowDrag({
     list: () => list,
+    region: () => list?.closest<HTMLElement>("[data-tabs-drop]") ?? undefined,
     // Only open tabs reorder in place; native places anything dropped in
     // this list among them.
     reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
     drop: ({ id, x, y, over, before }) => {
       // A split's tabs share one row, so they never reorder in place; let go
       // anywhere in the sidebar and the tab leaves its split for there.
+      // A tab that cannot be kept goes back where it was.
+      if (over?.closest("[data-essentials-drop]") && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && over?.closest("[data-essentials-drop], [data-tabs-drop]")) {
         const essential = !!over.closest("[data-essentials-drop]");
         void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
@@ -76,9 +82,6 @@
   const handlePointerMove = (event: PointerEvent) => drag.move(event);
   const handlePointerUp = (event: PointerEvent) => drag.up(event);
   const handlePointerCancel = (event: PointerEvent) => drag.cancel(event);
-  let ghostTitle = $derived(
-    drag.ghost ? (tabs.tabs().find((tab) => tab.id === drag.ghost?.id)?.title ?? "") : "",
-  );
 
   // Motion follows the list's shape, not its content: a title or a loading
   // state changing moves nothing, so only a change of order or membership
@@ -141,6 +144,7 @@
   class={["tab-list", variant === "essentials" && "tab-list-flush"]}
   aria-label={label}
   hidden={entries.length === 0}
+  data-close-buttons={preferences.value("tabs.close-button")}
 >
   <ul
     bind:this={list}
@@ -202,7 +206,7 @@
           tab={unit.tab}
           active={unit.tab.id === tabs.activeId()}
           depth={unit.depth}
-          closable={section === "today"}
+          closable={section === "today" && !tabs.loneNewTab(unit.tab.id)}
           class={[
             variant === "essentials" ? "col-span-full" : "",
             hiddenUnits.has(unit.key) ? "hidden" : "",
@@ -221,16 +225,15 @@
   </ul>
 </nav>
 
-{#if drag.ghost !== null}
-  <div
-    class="pointer-events-none fixed z-50 max-w-52 truncate rounded-control bg-raised px-3 py-2 text-[13px] text-text shadow-overlay"
-    style:left={`${drag.ghost.x + 12}px`}
-    style:top={`${drag.ghost.y + 8}px`}
-    aria-hidden="true"
-  >
-    {ghostTitle}
-  </div>
-{/if}
+{#if drag.ghost !== null}{@const held = tabs
+    .tabs()
+    .find((tab) => tab.id === drag.ghost?.id)}<DragMark
+    x={drag.ghost.x}
+    y={drag.ghost.y}
+    image={favicons.image(held?.icon)}
+    tone={favicons.tone(held?.icon)}
+    title={held?.title}
+  />{/if}
 
 <style>
   .tab-list {

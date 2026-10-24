@@ -49,6 +49,7 @@ fn project_work_deadline(origin: Instant, deadline: Instant) -> Option<AgentPoli
 enum Phase {
     Constructing,
     Retained,
+    ReadingMedia,
     Acquiring,
     Leased,
     Revoking,
@@ -67,6 +68,7 @@ struct State {
     // Keep that exact delivery reservation separate from the active lease.
     retirement_delivery: Option<WorkBrowserExecutionLease>,
     human_delivery: Option<Operation>,
+    media_delivery: bool,
     human_deadline: Option<AgentPolicyInstant>,
     reads: usize,
     navigation: Option<zephium_agentic::ContextOperationJoin>,
@@ -106,10 +108,14 @@ pub(crate) struct WorkResourceGuard {
     storage: ContextProfileStorageClass,
     isolated_public: bool,
     anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
+    work_website_data: bool,
     document: Option<ContextNavigationTarget>,
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
+    redirect: Option<zephium_agentic::WorkBrowserRedirect>,
     state: Mutex<State>,
+    image_receipt: Mutex<image_receipt::NativeImageSlot>,
+    fresh_native_store: Mutex<Option<crate::host::FreshNativeStore>>,
     // Drop order is deliberate: the original native reporting owner retires
     // before its counted delivery lane. No audit may overlook a live reporter.
     health: Option<WorkBrowserResourceHealthReporter>,
@@ -158,19 +164,24 @@ impl WorkResourceGuard {
             storage: request.storage(),
             isolated_public: request.isolated_public(),
             anonymous_session: request.anonymous_session().cloned(),
+            work_website_data: request.work_website_data(),
             document: request.document().cloned(),
             document_policy: request.document_policy(),
             construction_window: request.construction_window(),
+            redirect: request.redirect().cloned(),
             health: None,
             health_permit: None,
             #[cfg(test)]
             notification_dispatch: Mutex::new(None),
+            image_receipt: Mutex::new(image_receipt::NativeImageSlot::default()),
+            fresh_native_store: Mutex::new(None),
             state: Mutex::new(State {
                 phase: Phase::Constructing,
                 construction_pending: true,
                 lease: None,
                 retirement_delivery: None,
                 human_delivery: None,
+                media_delivery: false,
                 human_deadline: None,
                 reads: 0,
                 navigation: None,
@@ -186,6 +197,13 @@ impl WorkResourceGuard {
     }
     pub(crate) fn resource(&self) -> &WorkBrowserResourceJoin {
         &self.resource
+    }
+    /// Hands the owner of a public construction the destination its first
+    /// load was redirected to; the document still fails.
+    pub(crate) fn record_redirect(&self, destination: ContextNavigationTarget) {
+        if let Some(redirect) = &self.redirect {
+            redirect.record(destination);
+        }
     }
     pub(crate) fn notify_frame_projection(&self) {
         if let Some(health) = &self.health {
@@ -316,6 +334,10 @@ impl WorkResourceGuard {
     pub(crate) fn isolated_public(&self) -> bool {
         self.isolated_public
     }
+    /// Work's own persistent store for the profile, never the profile's own.
+    pub(crate) fn work_website_data(&self) -> bool {
+        self.isolated_public && self.work_website_data
+    }
     pub(crate) fn storage(&self) -> ContextProfileStorageClass {
         self.storage
     }
@@ -387,6 +409,8 @@ impl WorkResourceGuard {
         if !matches!(state.phase, Phase::Destroying | Phase::Destroyed) {
             state.phase = Phase::Quarantined;
         }
+        drop(state);
+        self.invalidate_image_sources();
     }
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     #[track_caller]
@@ -399,6 +423,38 @@ impl WorkResourceGuard {
             source: WorkNativeGuardFailureSource::of(caller.file()),
             line: caller.line(),
         });
+    }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn bind_fresh_native_store(
+        &self,
+        proof: crate::host::FreshNativeStore,
+    ) -> Result<(), ContextPortFailure> {
+        if !self.construction_current()
+            || self.work_website_data
+            || !self.isolated_public
+            || self.anonymous_session.is_none()
+        {
+            return Err(ContextPortFailure::Stale);
+        }
+        let mut slot = self
+            .fresh_native_store
+            .lock()
+            .map_err(|_| ContextPortFailure::NativeRefused)?;
+        if slot.is_some() {
+            return Err(ContextPortFailure::Stale);
+        }
+        *slot = Some(proof);
+        Ok(())
+    }
+    pub(crate) fn revoke_public_visual_lineage(&self) {
+        let proof = self
+            .fresh_native_store
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(proof) = proof {
+            proof.revoke();
+        }
     }
     fn admit_lifecycle(
         &self,
@@ -424,6 +480,32 @@ impl WorkResourceGuard {
             state.action_drain_closed = true;
         }
         match request.operation() {
+            Operation::ReadMedia
+                if self.session_current()
+                    && self.health_current()
+                    && state.phase == Phase::Retained
+                    && !state.uncertain
+                    && state.lease.is_none()
+                    && state.retirement_delivery.is_none()
+                    && state.human_delivery.is_none()
+                    && !state.media_delivery
+                    && state.reads == 0
+                    && state.navigation.is_none()
+                    && state.action.is_none()
+                    && state.callbacks == 0 =>
+            {
+                if request
+                    .media_plans()
+                    .is_none_or(|plans| plans.is_empty() || plans.len() > 12)
+                    || request.media_deadline().is_none_or(|deadline| {
+                        deadline <= now || deadline.millis() - now.millis() > 8000
+                    })
+                {
+                    return Err(ContextPortFailure::Stale);
+                }
+                state.phase = Phase::ReadingMedia;
+                state.media_delivery = true;
+            }
             Operation::Acquire
                 if self.session_current()
                     && self.health_current()
@@ -432,6 +514,7 @@ impl WorkResourceGuard {
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -452,6 +535,7 @@ impl WorkResourceGuard {
                     && state.lease.is_none()
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -479,6 +563,7 @@ impl WorkResourceGuard {
                     && state.phase == Phase::PresentedHuman
                     && !state.uncertain
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.human_deadline == request.human_deadline()
                     && state.human_deadline.is_some_and(|deadline| now < deadline) =>
             {
@@ -498,6 +583,11 @@ impl WorkResourceGuard {
                 state.phase = Phase::Destroying;
             }
             _ => return Err(ContextPortFailure::Stale),
+        }
+        drop(state);
+        self.invalidate_image_sources();
+        if request.operation() == Operation::PresentHuman {
+            self.revoke_public_visual_lineage();
         }
         Ok(())
     }
@@ -564,7 +654,10 @@ impl WorkResourceGuard {
                     )
             })
     }
-    #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+    #[cfg(all(
+        target_os = "windows",
+        feature = "native-agentic-work-lifetime-diagnostic"
+    ))]
     pub(crate) fn revocation_drain_facts(
         &self,
         lease: &WorkBrowserExecutionLease,
@@ -599,6 +692,7 @@ impl WorkResourceGuard {
             !state.construction_pending
                 && state.retirement_delivery.is_none()
                 && state.human_delivery.is_none()
+                && !state.media_delivery
                 && state.reads == 0
                 && state.navigation.is_none()
                 && state.action.is_none()
@@ -720,6 +814,13 @@ impl WorkResourceGuard {
             state.construction_pending = false;
         }
         match (request.operation(), outcome) {
+            (Operation::ReadMedia, Outcome::MediaRead)
+                if state.media_delivery && !state.uncertain =>
+            {
+                if state.phase == Phase::ReadingMedia {
+                    state.phase = Phase::Retained;
+                }
+            }
             (Operation::Construct, Outcome::Constructed)
                 if state.phase == Phase::Constructing && !state.uncertain =>
             {
@@ -760,6 +861,7 @@ impl WorkResourceGuard {
                 if !state.construction_pending
                     && state.retirement_delivery.is_none()
                     && state.human_delivery.is_none()
+                    && !state.media_delivery
                     && state.reads == 0
                     && state.navigation.is_none()
                     && state.action.is_none()
@@ -878,6 +980,12 @@ impl WorkResourceGuard {
                 state.phase = Phase::Retained;
             }
         } else {
+            if request.operation() == Operation::ReadMedia && state.media_delivery {
+                state.media_delivery = false;
+                if state.phase == Phase::ReadingMedia {
+                    state.phase = Phase::Retained;
+                }
+            }
             if state.human_delivery == Some(request.operation()) {
                 state.human_delivery = None;
             }
@@ -890,6 +998,28 @@ impl WorkResourceGuard {
             if state.phase != Phase::Destroyed {
                 state.phase = Phase::Quarantined;
             }
+        }
+        drop(state);
+        self.report_uncertainty();
+    }
+    pub(crate) fn media_current(&self) -> bool {
+        self.port_open()
+            && self.session_current()
+            && self.health_current()
+            && self.state.lock().is_ok_and(|state| {
+                !state.uncertain && state.phase == Phase::ReadingMedia && state.media_delivery
+            })
+    }
+    fn finish_media_delivery(&self, returned: bool, released: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.media_delivery || !returned || !released {
+            state.uncertain = true;
+        }
+        if released {
+            state.media_delivery = false;
         }
         drop(state);
         self.report_uncertainty();
@@ -1064,6 +1194,7 @@ impl WorkLifecycleTask {
             return;
         };
         let construction = request.operation() == Operation::Construct;
+        let media = request.operation() == Operation::ReadMedia;
         let human = matches!(
             request.operation(),
             Operation::PresentHuman | Operation::ContinueAfterHuman
@@ -1124,6 +1255,12 @@ impl WorkLifecycleTask {
             }
         }
         self.permit.release();
+        if media {
+            self.guard.finish_media_delivery(
+                callback_returned,
+                self.permit.released && self.permit.admission.counts().is_some(),
+            );
+        }
         if let Some(operation) = human {
             self.guard.finish_human_delivery(
                 operation,
@@ -1139,7 +1276,7 @@ impl WorkLifecycleTask {
                 delivery,
             );
         }
-        if (construction || revocation.is_some() || human.is_some())
+        if (construction || revocation.is_some() || human.is_some() || media)
             && self.guard.destruction_started()
         {
             crate::host::notify_work_resource(self.guard.clone());
@@ -1250,6 +1387,39 @@ impl Drop for WorkObservationTask {
 }
 
 impl EngineAgentBrowserPort {
+    pub(super) fn native_image_public_candidate(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        context: zephium_agentic::ContextJoin,
+    ) -> bool {
+        let guard = self
+            .admission
+            .work
+            .lock()
+            .ok()
+            .and_then(|ingress| ingress.rows.get(&context.identity().id()).cloned());
+        guard.is_some_and(|guard| guard.public_image_candidate(lease, context))
+    }
+
+    pub(super) fn claim_native_image_source(
+        &self,
+        lease: &WorkBrowserExecutionLease,
+        image: &zephium_agentic::SemanticScreenshot,
+    ) -> Option<Arc<dyn zephium_agentic::SemanticScreenshotSource>> {
+        let guard = self
+            .admission
+            .work
+            .lock()
+            .ok()?
+            .rows
+            .get(&image.context().identity().id())?
+            .clone();
+        if guard.resource() != lease.resource() {
+            return None;
+        }
+        guard.claim_image_source(lease, image)
+    }
+
     pub(super) fn schedule_work_lifecycle(
         &self,
         mut request: WorkBrowserResourceRequest,
@@ -1508,3 +1678,6 @@ pub(crate) use navigation::{WorkHistoryBackTask, WorkNavigationTask};
 #[path = "work_resource_action_port.rs"]
 mod action;
 pub(crate) use action::WorkActionTask;
+
+#[path = "work_resource_image_receipt.rs"]
+mod image_receipt;

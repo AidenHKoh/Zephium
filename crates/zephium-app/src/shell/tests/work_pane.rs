@@ -331,3 +331,42 @@ fn a_modal_prompt_removes_the_pane_page_from_the_stage_but_keeps_the_pane() {
     );
     assert_eq!(engine.last_layout(), vec![first.to_string()]);
 }
+
+#[test]
+fn a_new_tab_asked_for_in_work_waits_for_chrome_and_then_fills_the_window() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let page = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: page,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: page,
+        url: "https://example.com/".into(),
+    }));
+    present_committed(&mut shell, page, "https://example.com/");
+    enter_work(&mut shell);
+
+    assert_eq!(
+        shell.handle_operation(Command::Open).outcome,
+        OperationOutcome::Deferred
+    );
+    // Nothing is opened until chrome has taken Browse back.
+    assert_eq!(active_id(&screen), page);
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    let opened = active_id(&screen);
+    assert_ne!(opened, page);
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(shell.browser_after_return.is_none());
+    let frame = chrome.last_frame().expect("chrome was placed");
+    assert!(frame.fill_width, "{frame:?}");
+    assert!(engine
+        .calls()
+        .iter()
+        .rev()
+        .find(|call| call.starts_with("layout@"))
+        .is_some_and(|call| !call.contains(&page.to_string())));
+}

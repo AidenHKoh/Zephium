@@ -4,15 +4,20 @@ export const selectionRevision = () => revision;
 let current = $state<SettingsSection>("general");
 let search = $state("");
 let target = $state<string | null>(null);
+let asked = $state<"credits" | null>(null);
 export const section = () => current;
 export const query = () => search;
 export const highlighted = () => target;
+/** A dialog another surface asked Settings to open as it shows, until it opens. */
+export const asking = () => asked;
+export function ask(dialog: "credits" | null) {
+  asked = dialog;
+}
 export function setQuery(value: string) {
   search = value;
   target = null;
 }
 export function select(value: SettingsSection, field: string | null = null) {
-  if (value === "account") value = "ai";
   revision++;
   current = value;
   search = "";
@@ -31,7 +36,9 @@ export function handleNativeSection(id: string) {
   }
   if (
     id.startsWith("settings.section.") &&
-    ["profiles", "newtab", "ai", "focus", "about"].includes(section)
+    ["profiles", "newtab", "ai", "focus", "account", "about", "shortcuts", "sites"].includes(
+      section,
+    )
   )
     select(section as SettingsSection);
 }

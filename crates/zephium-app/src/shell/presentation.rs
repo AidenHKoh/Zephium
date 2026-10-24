@@ -48,6 +48,9 @@ pub(super) struct PresentationState {
     /// tab switch does not re-render every row in the column.
     pub(super) last_tab_views: std::cell::RefCell<std::collections::HashMap<ItemId, TabView>>,
     pub(super) projection_sequence: std::cell::Cell<u128>,
+    /// The last sidebar snapshot offered to chrome. Chrome holds it plus the
+    /// per-tab deltas since, so a snapshot equal to it would change nothing.
+    pub(super) last_items: std::cell::RefCell<Option<zephium_ipc::ItemsState>>,
 }
 
 impl Shell {

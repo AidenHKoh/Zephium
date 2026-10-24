@@ -13,6 +13,8 @@ pub enum AgentProviderNavigationRefusalReason {
     AlreadyHere,
     /// The target was opened as often as the scope allows.
     Revisited,
+    /// The site already redirected this exact address to the open page.
+    Redirected,
     /// Every page visit of the task is spent.
     HopsSpent,
 }
@@ -106,11 +108,15 @@ impl AgentProviderNavigationRefusal {
             ),
             AgentProviderNavigationRefusalReason::AlreadyHere => (
                 "already_on_document",
-                "No navigation occurred. That address is the document already open. Work on the current observation: inspect its main region, scroll it, or use its controls. All original budgets remain in force.",
+                "No navigation occurred. That address is the document already open: a #section anchor in an address only scrolls, so it opens nothing new. To read one section of this page, snapshot text_search on the document ref with that section's words (for #method.push, the query push) or surrounding_text on its heading; otherwise inspect the main region, scroll it, or use its controls. If this page shows a search's results instead of the document you want, open the document's own address without the search in it. If the page is still loading its results, opening it again restarts them: wait for a semantic change instead. All original budgets remain in force.",
             ),
             AgentProviderNavigationRefusalReason::Revisited => (
                 "destination_visited",
                 "No navigation occurred. This address was already opened as often as this task allows. Use what was observed there, or choose a different page or control.",
+            ),
+            AgentProviderNavigationRefusalReason::Redirected => (
+                "navigation_redirected",
+                "No navigation occurred. This exact address already led to the page you are on: the site redirected it (requested_document_url versus current_document_url) and would do so again. Work on this page, or use the site's own search box, filters or links.",
             ),
             AgentProviderNavigationRefusalReason::HopsSpent => (
                 "navigation_budget_spent",

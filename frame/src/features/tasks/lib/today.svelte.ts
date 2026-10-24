@@ -1,3 +1,4 @@
+import { everyWhileVisible } from "$shared/lib/visible-interval";
 import { todayKey } from "./task-sections";
 
 /** The local calendar day, shared by every task surface.
@@ -6,7 +7,7 @@ import { todayKey } from "./task-sections";
  *  when today ends, and a hidden panel is not paying for a second interval.
  */
 let current = $state(todayKey());
-let timer: ReturnType<typeof setInterval> | undefined;
+let stop: (() => void) | undefined;
 let watchers = 0;
 
 export function today(): string {
@@ -17,14 +18,14 @@ export function today(): string {
 export function watchToday(): () => void {
   watchers += 1;
   // Midnight while a list is open must not leave yesterday's work in Today.
-  timer ??= setInterval(() => {
+  stop ??= everyWhileVisible(60_000, () => {
     const now = todayKey();
     if (now !== current) current = now;
-  }, 60_000);
+  });
   return () => {
     watchers -= 1;
-    if (watchers > 0 || timer === undefined) return;
-    clearInterval(timer);
-    timer = undefined;
+    if (watchers > 0 || stop === undefined) return;
+    stop();
+    stop = undefined;
   };
 }

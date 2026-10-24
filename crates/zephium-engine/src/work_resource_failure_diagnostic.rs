@@ -11,6 +11,8 @@ use zephium_agentic::WorkBrowserResourceJoin;
 pub enum WorkResourceFailureCause {
     /// The native navigation-event stream refused the fixed document.
     NavigationEventRefused,
+    /// The public document's first load was redirected; the gate refused it.
+    Redirected,
     /// A classified WKWebView `URL` observation refused the fixed document.
     UrlObservationRefused(WorkUrlObservationFailure),
     /// The single revision-fenced URL sample could not seal the document.

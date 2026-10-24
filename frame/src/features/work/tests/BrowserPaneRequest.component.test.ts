@@ -56,7 +56,6 @@ test.each(["applied", "no_op", "deferred", "rejected", "failed"] as const)(
       session,
       tabs: [tabFixture({ id: "space-tab", title: "Research tab" })],
       spaceName: "Personal",
-      profileLabel: "Reader",
       aiEnabled: false,
       onopen: vi.fn(),
       onnewtab: vi.fn(),

@@ -115,6 +115,73 @@ pub async fn check_key(target: &LeadTarget, secret: &LeadSecret) -> LeadKeyCheck
     }
 }
 
+/// A model server running on this Mac that speaks Chat Completions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalServer {
+    /// Which server answered.
+    pub kind: LocalServerKind,
+    /// The base to configure, such as `http://localhost:11434/v1`.
+    pub base: &'static str,
+    /// Models it serves now.
+    pub models: usize,
+}
+
+/// The local model servers Zephium recognises.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalServerKind {
+    /// Ollama, on port 11434.
+    Ollama,
+    /// LM Studio's server, on port 1234.
+    LmStudio,
+}
+
+/// Looks for Ollama and LM Studio on their default ports, briefly, without
+/// a key. A server that does not answer like itself is not reported.
+pub async fn detect_local_servers() -> Vec<LocalServer> {
+    const PROBES: [(LocalServerKind, &str); 2] = [
+        (LocalServerKind::Ollama, "http://127.0.0.1:11434/v1"),
+        (LocalServerKind::LmStudio, "http://127.0.0.1:1234/v1"),
+    ];
+    let probe = |kind: LocalServerKind, base: &'static str| async move {
+        let client = super::http(true).ok()?;
+        let url = format!("{base}/models");
+        let response = client
+            .get(url)
+            .timeout(std::time::Duration::from_millis(900))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.ok()?;
+            if body.len() + chunk.len() > MAX_LIST_BYTES {
+                return None;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body: Value = serde_json::from_slice(&body).ok()?;
+        let models = body.get("data")?.as_array()?.len();
+        Some(LocalServer {
+            kind,
+            base: match kind {
+                LocalServerKind::Ollama => "http://localhost:11434/v1",
+                LocalServerKind::LmStudio => "http://localhost:1234/v1",
+            },
+            models,
+        })
+    };
+    let (ollama, lm_studio) = futures_util::future::join(
+        probe(PROBES[0].0, PROBES[0].1),
+        probe(PROBES[1].0, PROBES[1].1),
+    )
+    .await;
+    [ollama, lm_studio].into_iter().flatten().collect()
+}
+
 /// Lists the chat models the provider offers to this key, as catalog entries.
 pub async fn list_models(
     target: &LeadTarget,
@@ -136,17 +203,29 @@ pub async fn list_models(
     Ok(parse_list(target, &body))
 }
 
+/// A signed-in session's hosted catalog.
+#[derive(Clone, Debug, Default)]
+pub struct CloudCatalog {
+    /// Chat models for the Work roles.
+    pub models: Vec<super::models::CloudModel>,
+    /// The server's per-role defaults, when it states them.
+    pub defaults: Option<super::models::CloudDefaults>,
+    /// The speech-to-text model, when the account has one.
+    pub transcriber: Option<super::models::CloudTranscriber>,
+}
+
 /// Fetches Zephium Cloud's `GET /v1/models` for a signed-in session.
 pub async fn fetch_cloud_catalog(
     base: &str,
     secret: &LeadSecret,
-) -> Result<Vec<super::models::CloudModel>, WorkModelError> {
+) -> Result<CloudCatalog, WorkModelError> {
     let root = reqwest::Url::parse(base).map_err(|_| WorkModelError::BadRequest)?;
     let target = LeadTarget {
         wire: WorkModelWire::ChatCompletions,
         upstream: WorkModelProvider::Cloud,
         base: join(&root, "v1")?,
         cloud: true,
+        search_calls: None,
     };
     let (status, body) = get(&target, "models", None, secret).await?;
     match status {
@@ -155,7 +234,11 @@ pub async fn fetch_cloud_catalog(
         _ => return Err(WorkModelError::Protocol),
     }
     let body: Value = serde_json::from_slice(&body).map_err(|_| WorkModelError::Protocol)?;
-    Ok(super::models::parse_cloud(&body))
+    Ok(CloudCatalog {
+        models: super::models::parse_cloud(&body),
+        defaults: super::models::parse_cloud_defaults(&body),
+        transcriber: super::models::parse_cloud_transcriber(&body),
+    })
 }
 
 pub(super) fn parse_list(target: &LeadTarget, body: &Value) -> Vec<WorkModelEntry> {
@@ -263,6 +346,37 @@ fn row_entry(
             let id = text("id")?;
             (id.to_owned(), id.to_owned(), None, None, false, true)
         }
+        WorkModelProvider::XAi
+        | WorkModelProvider::Mistral
+        | WorkModelProvider::Groq
+        | WorkModelProvider::Cerebras => {
+            let id = text("id")?;
+            // Their lists mix chat models with speech, embedding, image and
+            // safety models, which cannot run a turn.
+            let other = [
+                "embed",
+                "whisper",
+                "tts",
+                "guard",
+                "moderation",
+                "ocr",
+                "image",
+                "imagine",
+                "audio",
+                "transcri",
+                "voxtral",
+                "safeguard",
+            ];
+            if other
+                .iter()
+                .any(|word| id.to_ascii_lowercase().contains(word))
+            {
+                return None;
+            }
+            let window =
+                number(row.get("context_window")).or_else(|| number(row.get("max_context_length")));
+            (id.to_owned(), id.to_owned(), window, None, false, true)
+        }
         WorkModelProvider::Cloud => return None,
     };
     if deprecated(provider, &model) || !valid_text(&model, 160) || !valid_text(&name, 96) {
@@ -311,7 +425,7 @@ fn row_entry(
     })
 }
 
-// Official deprecation notices, checked 2026-09-30. Aliases and snapshots
+// Official deprecation notices, checked 2026-10-07. Aliases and snapshots
 // sharing a retired family are hidden from the full listing as well.
 fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
     let (provider, id) = if provider == WorkModelProvider::OpenRouter {
@@ -341,16 +455,29 @@ fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
                 "o3-2025",
                 "o3-pro",
                 "gpt-5.4-cyber",
+                "gpt-5-chat",
+                "gpt-5.1-chat",
+                "gpt-5.1-2",
+                "gpt-5.4-nano",
+                "o1-",
+                "o3-mini",
+                "o4-mini",
             ]
             .iter()
             .any(|prefix| id.starts_with(prefix))
-                || matches!(id, "gpt-4" | "gpt-5" | "o3")
+                || matches!(id, "gpt-4" | "gpt-5" | "gpt-5.1" | "o1" | "o3")
         }
         // https://platform.claude.com/docs/en/about-claude/model-deprecations
         WorkModelProvider::Anthropic => {
-            ["claude-1.", "claude-2.", "claude-instant-", "claude-3-"]
-                .iter()
-                .any(|prefix| id.starts_with(prefix))
+            [
+                "claude-1.",
+                "claude-2.",
+                "claude-instant-",
+                "claude-3-",
+                "claude-sonnet-4-5",
+            ]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
                 || matches!(
                     id,
                     "claude-mythos-preview"
@@ -366,6 +493,9 @@ fn deprecated(provider: WorkModelProvider, id: &str) -> bool {
                     id,
                     "gemini-2.0-flash"
                         | "gemini-2.0-flash-001"
+                        | "gemini-2.0-flash-lite"
+                        | "gemini-2.0-flash-lite-001"
+                        | "gemini-3.1-flash-lite"
                         | "gemini-3-pro-preview"
                         | "gemini-3.1-flash-lite-preview"
                         | "gemini-3.1-flash-image-preview"
@@ -433,10 +563,23 @@ mod tests {
             (P::OpenAi, "gpt-3.5-turbo"),
             (P::Anthropic, "claude-opus-4-1-20250805"),
             (P::Google, "gemini-3-pro-preview"),
+            (P::OpenAi, "o4-mini-2025-04-16"),
+            (P::OpenAi, "o1"),
+            (P::OpenAi, "gpt-5.1"),
+            (P::Anthropic, "claude-sonnet-4-5-20250929"),
+            (P::Google, "gemini-3.1-flash-lite"),
+            (P::OpenRouter, "openai/o3-mini"),
         ] {
-            assert!(super::deprecated(provider, id));
+            assert!(super::deprecated(provider, id), "{id}");
         }
-        assert!(!super::deprecated(P::Google, "gemini-2.5-pro"));
+        for (provider, id) in [
+            (P::Google, "gemini-2.5-pro"),
+            (P::OpenAi, "gpt-5.1-codex"),
+            (P::OpenAi, "gpt-4.1-mini"),
+            (P::Anthropic, "claude-opus-4-5-20251101"),
+        ] {
+            assert!(!super::deprecated(provider, id), "{id}");
+        }
     }
 
     use super::*;

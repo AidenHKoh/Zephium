@@ -16,22 +16,13 @@ export type HumanPage = {
   reason: WorkHumanReasonV1;
   remaining: number;
   canContinue: boolean;
+  /** The wait is a short one the person may keep going. */
+  canExtend: boolean;
+  /** The page runs in Work's own website data: what is solved here is kept. */
+  workMemory: boolean;
 };
 
-const REASONS: Record<WorkHumanReasonV1, () => string> = {
-  sign_in: m.work_human_sign_in,
-  challenge: m.work_human_challenge,
-  permission: m.work_human_permission,
-  verification: m.work_human_verification,
-  user_decision: m.work_human_user_decision,
-  sensitive_effect: m.work_human_sensitive_effect,
-  unsupported_interaction: m.work_human_unsupported_interaction,
-};
-
-/** The short label on a waiting card: what the person is asked for. */
-export const reasonBadge = (reason: WorkHumanReasonV1) => REASONS[reason]();
-
-/** Why the page waits, in one sentence, person first: the card, the line and the pane say it alike. */
+/** Why the page waits, in one sentence, person first: the takeover pane says it under the site. */
 export function reasonSentence(reason: WorkHumanReasonV1, host: string): string {
   switch (reason) {
     case "sign_in":
@@ -50,6 +41,48 @@ export function reasonSentence(reason: WorkHumanReasonV1, host: string): string 
       return m.work_human_why_unsupported_interaction();
   }
 }
+
+/** What the person is asked to do, action first: "Solve the check on allegro.pl". */
+export function needTitle(reason: WorkHumanReasonV1, host: string): string {
+  switch (reason) {
+    case "challenge":
+    case "verification":
+      return m.work_human_title_check({ host });
+    case "sign_in":
+      return m.work_human_title_sign_in({ host });
+    case "permission":
+      return m.work_human_title_permission({ host });
+    case "user_decision":
+      return m.work_human_title_decision({ host });
+    case "sensitive_effect":
+      return m.work_human_title_sensitive({ host });
+    case "unsupported_interaction":
+      return m.work_human_title_hand({ host });
+  }
+}
+
+/** One calm line for what a site asks of the person, and the one button that meets it. */
+export function needLine(
+  reason: WorkHumanReasonV1,
+  host: string,
+): { text: string; action: string } {
+  switch (reason) {
+    case "challenge":
+    case "verification":
+      return { text: m.work_need_wants_check({ host }), action: m.work_need_open_site({ host }) };
+    case "sign_in":
+      return {
+        text: m.work_need_wants_sign_in({ host }),
+        action: m.work_need_sign_in_site({ host }),
+      };
+    default:
+      return { text: needTitle(reason, host), action: m.work_need_open_site({ host }) };
+  }
+}
+
+/** Only a solved check is worth remembering, and only where Work keeps its own website data. */
+export const remembers = (page: Pick<HumanPage, "reason" | "workMemory">) =>
+  page.workMemory && (page.reason === "challenge" || page.reason === "verification");
 
 /** A refused command is one line in the pane, in the person's words. */
 export const failureLine = (failure: WorkHumanFailure) =>
@@ -77,12 +110,15 @@ function secondsLeft(remaining: number): number | null {
   return Math.max(1, Math.ceil(remaining / 1000));
 }
 
-const NEAR = 60_000;
+/** Two minutes: a bot check's whole wait, and a sign-in's last stretch. */
+const NEAR = 120_000;
 
-/** How long the person still has; the pane always shows it. */
+/** How long the person still has, as a clock reads it: "1:05 left". The pane always shows it. */
 export function countdownLabel(remaining: number): string | null {
   const seconds = secondsLeft(remaining);
-  return seconds === null ? null : m.work_human_seconds_left({ seconds });
+  if (seconds === null) return null;
+  const time = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  return m.work_human_time_left({ time });
 }
 
 /** The card is quiet about a long wait: the countdown only appears near the end. */
@@ -116,6 +152,8 @@ export const humanPage = (page: WorkHumanPageV1): HumanPage => ({
   reason: page.reason,
   remaining: page.remaining_millis,
   canContinue: page.can_continue,
+  canExtend: page.can_extend,
+  workMemory: page.work_memory,
 });
 
 /** Rust floors the size only; the corner may sit at the content view's origin. */
@@ -142,7 +180,3 @@ export function regionOf(
   if (x + width > Math.floor(parent.width) || y + height > Math.floor(parent.height)) return null;
   return { x, y, width, height };
 }
-
-/** Two regions are the same placement, so nothing is torn down to rebuild it. */
-export const sameRegion = (a: WorkHumanRegionV1 | null, b: WorkHumanRegionV1 | null) =>
-  !!a && !!b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;

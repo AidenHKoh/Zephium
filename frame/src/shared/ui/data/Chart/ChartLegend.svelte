@@ -1,35 +1,24 @@
 <script lang="ts">
-  import { useChart } from "./chart-utils";
-
   /**
-   * shadcn-svelte's ChartLegend, vendored: a square of each key's colour and
-   * its label, in a row under the plot, or as a list beside a round chart
-   * with each part's share.
+   * A square of each entry's colour and its label: a row under the plot, two
+   * rows on a card, or a list beside a round chart with each part's share.
    */
   let {
-    keys,
-    shares = {},
+    entries,
     layout = "row",
   }: {
-    keys: readonly string[];
-    /** A part's share or value, written after its name. */
-    shares?: Readonly<Record<string, string>>;
+    entries: readonly { key: string; label: string; color: string; share?: string }[];
     layout?: "row" | "rows" | "list";
   } = $props();
-
-  const chart = useChart();
 </script>
 
 <ul class="chart-legend {layout}">
-  {#each keys as key (key)}
-    {@const entry = chart.config[key]}
-    {#if entry}
-      <li>
-        <span class="swatch" style:background={`var(--color-${key})`}></span><span class="name"
-          >{entry.label}</span
-        >{#if shares[key]}<span class="share">{shares[key]}</span>{/if}
-      </li>
-    {/if}
+  {#each entries as entry (entry.key)}
+    <li>
+      <span class="swatch" style:background={entry.color}></span><span class="name"
+        >{entry.label}</span
+      >{#if entry.share}<span class="share">{entry.share}</span>{/if}
+    </li>
   {/each}
 </ul>
 

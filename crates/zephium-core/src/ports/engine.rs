@@ -571,6 +571,17 @@ pub enum StageMotion {
     Arrive,
 }
 
+/// A tab dragged over a pane's edge, shown before it is dropped: the pane's
+/// page slides aside by `shift` without being resized and the tint marks where
+/// the new pane will stand. Rects are relative to the content region; nothing
+/// is laid out until the drop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DropPreview {
+    pub tab: ItemId,
+    pub zone: Rect,
+    pub shift: (f64, f64),
+}
+
 /// Where page content goes when it enters element fullscreen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullscreenPresentation {
@@ -685,6 +696,10 @@ pub trait Engine {
     ) {
         completion.finish(false);
     }
+    /// Replaces the Ask panel page style of one registrable site in
+    /// `profile`; an empty sheet removes it. The CSS must come from the
+    /// page-assist validator, never from a page or a model directly.
+    fn set_page_style(&self, _profile: ProfileId, _site: String, _css: Arc<str>) {}
     /// Browser-owned file actions. Only trusted Shell admission supplies the
     /// profile partition; the caller supplies IDs, never filesystem paths.
     fn download_call(
@@ -734,7 +749,7 @@ pub trait Engine {
         tree: Option<Pane>,
         region: Option<Rect>,
     ) -> NativeDispatch;
-    fn set_drop_indicator(&self, window: WindowId, zone: Option<Rect>) -> NativeDispatch;
+    fn set_drop_indicator(&self, window: WindowId, preview: Option<DropPreview>) -> NativeDispatch;
     /// A transient guide in window coordinates; never changes pane geometry.
     fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -916,6 +931,13 @@ pub trait Engine {
     fn fullscreen_presentation(&self) -> FullscreenPresentation {
         FullscreenPresentation::OwnWindow
     }
+    /// Browser tab selection, never a page or Work command. Returning closes
+    /// only the video PiP owned by this automatic presentation.
+    fn automatic_pip(&self, _id: ItemId, _background: bool) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    fn cancel_automatic_pip(&self) {}
+
     /// Asks the page to leave element fullscreen. The result arrives as
     /// [`EngineEvent::FullscreenChanged`]; picture in picture is unaffected.
     fn exit_fullscreen(&self, _id: ItemId) -> NativeDispatch {
@@ -1350,6 +1372,8 @@ pub enum EngineEvent {
         id: ItemId,
         url: String,
         app: Option<String>,
+        /// The person clicked, rather than the page navigating by itself.
+        user_gesture: bool,
     },
     /// A top-level load was shut because a focus round is running.
     FocusBlocked {

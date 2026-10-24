@@ -25,15 +25,22 @@ const SEARCH_ANSWER_CHARS: usize = 2_400;
 const SEARCH_SOURCES: usize = 8;
 const RECORD_LINES: usize = 32;
 const FILE_TEXT_BYTES: usize = 6 * 1024;
+/// A page's note when it waited its whole turn and the browser never took it.
+const NOT_READY: &str = "The browser was not ready for this page";
+
+/// Page tasks at once on one public site the run only reads, in Work's own
+/// website data. A site the run works on as the person, was let in to, or
+/// saves to takes all of them: one session there means one actor.
+const SITE_PAGES: u32 = 2;
 
 /// The browser closure the host gives the run, shared by every part, with
-/// its gates: at most three pages live, and at most one page task per site,
-/// since one session means one actor per site.
+/// its gates: at most three pages live, and per site at most two page tasks,
+/// or one where the run acts in a session.
 pub(crate) struct SharedBrowser<B> {
     browser: Mutex<B>,
     pages: tokio::sync::Semaphore,
     searches: tokio::sync::Semaphore,
-    sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Mutex<()>>)>>,
+    sites: Mutex<Vec<(String, std::sync::Arc<tokio::sync::Semaphore>)>>,
     entries: EntryDesk,
 }
 impl<B> SharedBrowser<B> {
@@ -46,7 +53,7 @@ impl<B> SharedBrowser<B> {
             entries: EntryDesk::default(),
         }
     }
-    fn site_lane(&self, site: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    fn site_lane(&self, site: &str) -> std::sync::Arc<tokio::sync::Semaphore> {
         let mut sites = self
             .sites
             .lock()
@@ -54,7 +61,7 @@ impl<B> SharedBrowser<B> {
         if let Some((_, lane)) = sites.iter().find(|(known, _)| known == site) {
             return lane.clone();
         }
-        let lane = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let lane = std::sync::Arc::new(tokio::sync::Semaphore::new(SITE_PAGES as usize));
         sites.push((site.to_owned(), lane.clone()));
         lane
     }
@@ -270,7 +277,7 @@ where
         limits: WorkExecutionLimits,
         objective: String,
     ) -> Self {
-        let driver = WorkPartDriver::new(
+        let mut driver = WorkPartDriver::new(
             run.handle.clone(),
             run.profile,
             run.probe.clone(),
@@ -281,6 +288,20 @@ where
             part,
         )
         .await;
+        if let Ok(projection) = run.probe.runtime_projection().await {
+            if projection.executions.iter().any(|execution| {
+                execution
+                    .steps
+                    .iter()
+                    .any(crate::work_agent::private_page_step)
+            }) {
+                run.mark_private();
+            }
+            driver.inherit_private(&projection);
+            if crate::work_agent::has_private_blocks(&projection) {
+                run.mark_private();
+            }
+        }
         Self {
             run,
             attempt,
@@ -311,10 +332,53 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let projection = self
+            .run
+            .probe
+            .runtime_projection()
+            .await
+            .map_err(|_| WorkAttemptStatus::Failed)?;
+        let mut private = crate::work_agent::projection_private_artifact_texts(&projection);
+        let block_texts = self.run.blocks.private_texts();
+        private.extend(block_texts.iter().cloned());
+        if projection.executions.iter().any(|execution| {
+            execution
+                .steps
+                .iter()
+                .any(crate::work_agent::private_page_step)
+        }) {
+            self.run.mark_private();
+        }
+        {
+            let mut driver = self.driver.lock().await;
+            driver.inherit_private(&projection);
+            driver.inherit_private_texts(&block_texts);
+        }
+        if crate::work_agent::has_private_blocks(&projection) {
+            self.run.mark_private();
+        }
         let mut refused = Vec::new();
         let mut admitted = Vec::with_capacity(requests.len());
         for request in requests {
+            if matches!(&request.kind, WorkStepKindV1::Search { query } | WorkStepKindV1::Discover { query, .. }
+                if crate::work_agent::query_discloses(query, &private))
+            {
+                refused.push((
+                    request.call,
+                    "A search would repeat private page content and was not sent.".into(),
+                    true,
+                ));
+                continue;
+            }
             if let WorkStepKindV1::Read { url, .. } = &request.kind {
+                if self.run.browser_down() {
+                    refused.push((
+                        request.call,
+                        format!("Failed: {NOT_READY}; pages cannot open in this request now"),
+                        true,
+                    ));
+                    continue;
+                }
                 if let Err(why) = self.run.admit_address(url, self.part).await {
                     refused.push((request.call, why, true));
                     continue;
@@ -356,42 +420,97 @@ where
             return Err(status);
         }
         // Typing could carry what the run read to a site the person did not
-        // name, so on those sites each field waits for them.
+        // name or let the run work in, so on those sites each field waits.
         let private = self.run.is_private();
-        driver.hold_typing(
-            requests
-                .iter()
-                .filter_map(|request| match &request.kind {
-                    WorkStepKindV1::Read {
-                        url, goal: Some(_), ..
-                    } if private => crate::work_sites::site_of(url),
-                    _ => None,
-                })
-                .filter(|site| !self.run.trusts(site))
-                .collect(),
-        );
+        let held: Vec<String> = requests
+            .iter()
+            .filter_map(|request| match &request.kind {
+                WorkStepKindV1::Read {
+                    url, goal: Some(_), ..
+                } if private => crate::work_sites::site_of(url),
+                _ => None,
+            })
+            .filter(|site| !self.run.trusts(site) && !driver.works_as_person(site))
+            .collect();
+        driver.hold_typing(held);
+        for request in &requests {
+            if let WorkStepKindV1::Read {
+                url, goal: Some(_), ..
+            } = &request.kind
+            {
+                // A save the person asked for goes ahead in their session once
+                // they let the run in, and always in Work's own website data,
+                // where nothing of theirs is touched.
+                if let Some(site) = crate::work_sites::site_of(url) {
+                    if self.run.asked_to_save(&site) {
+                        driver.allow_saves(&site);
+                    }
+                }
+            }
+        }
+        // Sites where the run reads only, in its own website data, as the
+        // batch is sent; a site a redirect leads to is not among them.
+        let shared: Vec<String> = requests
+            .iter()
+            .filter_map(|request| match &request.kind {
+                WorkStepKindV1::Read {
+                    url, goal: Some(_), ..
+                } => crate::work_sites::site_of(url),
+                _ => None,
+            })
+            .filter(|site| {
+                !self.run.trusts(site)
+                    && !self.run.asked_to_save(site)
+                    && !driver.works_as_person(site)
+            })
+            .collect();
         let mut gate = |probe: WorkAttemptProbe, request: WorkAgentBrowseRequest| {
             let lane = match &request.step {
                 WorkStepKindV1::Read {
                     url, goal: Some(_), ..
-                } => crate::work_sites::site_of(url).map(|site| self.browser.site_lane(&site)),
+                } => crate::work_sites::site_of(url).map(|site| {
+                    let permits = if shared.contains(&site) && request.redirected_from.is_none() {
+                        1
+                    } else {
+                        SITE_PAGES
+                    };
+                    (self.browser.site_lane(&site), permits)
+                }),
                 _ => None,
             };
-            let future = {
-                let mut browser = self
-                    .browser
-                    .browser
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                (browser)(probe, request)
+            // A read the driver opens where an earlier read was redirected
+            // passes the checks a read the lead asked for itself passes.
+            let followed = match (&request.redirected_from, &request.step) {
+                (Some(_), WorkStepKindV1::Read { url, .. }) => {
+                    Some((url.clone(), request.step.clone()))
+                }
+                _ => None,
             };
-            let pages = &self.browser.pages;
+            let browser = &self.browser;
+            let (run, part) = (self.run, self.part);
             async move {
+                if let Some((url, kind)) = followed {
+                    run.allow_url(&url);
+                    let admitted = match super::parts::redirected_read(&kind, &url, run) {
+                        Ok(_) => run.admit_address(&url, part).await,
+                        Err(why) => Err(why),
+                    };
+                    if let Err(why) = admitted {
+                        return Ok(not_opened(why));
+                    }
+                }
                 let _site = match &lane {
-                    Some(lane) => Some(lane.lock().await),
+                    Some((lane, permits)) => lane.acquire_many(*permits).await.ok(),
                     None => None,
                 };
-                let _page = pages.acquire().await.ok();
+                let future = {
+                    let mut browser = browser
+                        .browser
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (browser)(probe, request)
+                };
+                let _page = browser.pages.acquire().await.ok();
                 future.await
             }
         };
@@ -413,6 +532,7 @@ where
         for site in driver.take_typing_allowed() {
             self.run.trust_site(&site);
         }
+        let redirects = driver.take_redirects();
         let used = driver.used();
         let notices = driver.take_notices();
         {
@@ -465,7 +585,21 @@ where
             })
             .unwrap_or_default();
         if new.iter().any(|step| {
-            step.account.is_some()
+            matches!(step.kind, WorkStepKindV1::Read { .. })
+                && step.status != WorkStepStatus::Succeeded
+                && matches!(
+                    step.note.as_deref(),
+                    Some(
+                        NOT_READY
+                            | zephium_core::work::runtime::read_note::WORK_STORAGE
+                            | zephium_core::work::runtime::read_note::STORAGE_UNCONFIRMED
+                    )
+                )
+        }) {
+            self.run.set_browser_down();
+        }
+        if new.iter().any(|step| {
+            crate::work_agent::private_page_step(step)
                 || matches!(
                     step.kind,
                     WorkStepKindV1::List { .. }
@@ -481,6 +615,25 @@ where
         for request in &requests {
             let step = new.iter().find(|step| {
                 !used_steps.contains(&step.id) && same_request(&request.kind, &step.kind)
+            });
+            // A read the driver followed to its redirect answers as the last
+            // read of its chain, which cites the final address; a redirect
+            // it did not follow is the lead's to read or not.
+            let (mut read_at, mut unfollowed) = (None, None);
+            let step = step.map(|first| {
+                let mut step = first;
+                while let Some((_, destination, next)) =
+                    redirects.iter().find(|(id, _, _)| *id == step.id)
+                {
+                    let Some(next) = next.and_then(|next| new.iter().find(|s| s.id == next)) else {
+                        unfollowed = Some(destination.clone());
+                        break;
+                    };
+                    used_steps.insert(step.id);
+                    read_at = Some(destination.clone());
+                    step = next;
+                }
+                step
             });
             let (content, error) = match (step, &execution) {
                 (Some(step), Some(execution)) => {
@@ -503,6 +656,19 @@ where
                         .unwrap_or_else(|| "Not run: the part's budget or steps are spent".into()),
                     true,
                 ),
+            };
+            let content = match (&read_at, &request.kind) {
+                (Some(destination), WorkStepKindV1::Read { url, .. }) => format!(
+                    "{url} redirects to {destination}; this is a read of {destination}.\n{content}"
+                ),
+                _ => content,
+            };
+            let content = match &unfollowed {
+                Some(destination) => format!(
+                    "{}\nRead {destination} if it is what you need: this read did not follow the redirect there.",
+                    content.trim_end()
+                ),
+                None => content,
             };
             results.push((request.call.clone(), content, error));
         }
@@ -563,7 +729,18 @@ where
                 ) else {
                     continue;
                 };
-                if !(request.mine || self.personal || crate::work_sites::personal_page(url)) {
+                // The model's own word that a page is the person's account
+                // counts only where the person's words point there (the site,
+                // or their own day, inbox or tasks): a store they shop in is
+                // read as anyone sees it, never asked about, even when it
+                // holds their cookies.
+                let mine = request.mine
+                    && (self.run.trusts(&site)
+                        || self.run.asked_to_save(&site)
+                        || super::skills::about_own_apps(&self.run.said())
+                        || super::route::site(site.split('.').next().unwrap_or_default())
+                            .is_some());
+                if !(mine || self.personal || crate::work_sites::personal_page(url)) {
                     if !public.contains(&site) {
                         public.push(site);
                     }
@@ -579,6 +756,14 @@ where
         driver.scope_sites(&public, &personal);
         if hosts.is_empty() {
             return None;
+        }
+        for (site, _) in &hosts {
+            if let Some(answer) = self.run.entry_answer(site) {
+                driver.enter(site, answer).await;
+                if driver.works_as_person(site) {
+                    self.run.trust_site(site);
+                }
+            }
         }
         let desk = &self.browser.entries;
         let preparing = desk.prepare();
@@ -623,6 +808,9 @@ where
                 EntryTurn::Decided(answers) => {
                     for (site, answer) in answers {
                         driver.enter(&site, answer).await;
+                        if driver.works_as_person(&site) {
+                            self.run.trust_site(&site);
+                        }
                     }
                     return None;
                 }
@@ -648,7 +836,7 @@ where
             });
             if let Some(note) = &step.note {
                 out.push_str(": ");
-                out.push_str(note);
+                out.push_str(crate::work_agent::split_ledger(note).0);
             }
             out.push('\n');
         }
@@ -680,6 +868,10 @@ where
                     .evidence
                     .and_then(|id| execution.provider_evidence.iter().find(|r| r.id == id))
                 {
+                    if record.evidence.provider == WorkSearchProvider::Browser {
+                        out.push_str(&self.results(record));
+                        return (out, failed);
+                    }
                     let answer: String = record
                         .evidence
                         .answer
@@ -709,10 +901,29 @@ where
                     }
                 }
             }
-            WorkStepKindV1::Read { url, goal, .. } => {
+            WorkStepKindV1::Read {
+                url,
+                goal,
+                collection,
+                ..
+            } => {
                 let measured = step.measurements.as_ref();
+                let records: usize = step
+                    .artifacts
+                    .iter()
+                    .filter_map(|id| {
+                        execution
+                            .artifacts
+                            .iter()
+                            .find(|artifact| artifact.id == *id)
+                    })
+                    .map(|artifact| match &artifact.data {
+                        WorkArtifactDataV1::ComparisonMatrix { subjects, .. } => subjects.len(),
+                        _ => 0,
+                    })
+                    .sum();
                 crate::work_trace::record(format_args!(
-                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={}",
+                    "work: phase=page site={} task={} status={:?} wall_ms={} calls={} actions={} tokens={} records={} artifacts={} outcome={:?}",
                     crate::work_sites::site_of(url).unwrap_or_default(),
                     goal.is_some(),
                     step.status,
@@ -720,7 +931,9 @@ where
                     measured.map_or(0, |m| m.planner_calls),
                     measured.map_or(0, |m| m.native_actions),
                     measured.map_or(0, |m| m.model_tokens),
+                    records,
                     step.artifacts.len(),
+                    measured.and_then(|m| m.outcome),
                 ));
                 let title = step
                     .local
@@ -729,19 +942,31 @@ where
                     .unwrap_or_else(|| host(url));
                 for id in &step.artifacts {
                     if let Some(artifact) = execution.artifacts.iter().find(|a| a.id == *id) {
-                        out.push_str(&self.records(artifact, &title, url, driver));
+                        out.push_str(&self.records(
+                            artifact,
+                            &title,
+                            url,
+                            driver,
+                            collection.as_ref(),
+                        ));
                     }
                 }
-                if step.artifacts.is_empty() && !failed {
-                    out.push_str("The page gave nothing usable.\n");
-                }
-                if let Some((_, said)) = step
+                let (note, committed) = step
                     .note
                     .as_deref()
+                    .map_or(("", Vec::new()), crate::work_agent::split_ledger);
+                if step.artifacts.is_empty() && !failed && committed.is_empty() {
+                    out.push_str("The page gave nothing usable.\n");
+                }
+                if let Some((_, said)) = Some(note)
                     .filter(|_| !failed)
                     .and_then(|note| note.split_once(" · "))
                 {
                     out.push_str(said);
+                    out.push('\n');
+                }
+                for line in committed {
+                    out.push_str(line);
                     out.push('\n');
                 }
             }
@@ -794,6 +1019,43 @@ where
         (out, failed)
     }
 
+    /// A results page's results in the engine's order, each with its source
+    /// key, address and the engine's own snippet. No answer: the model reads
+    /// the pages it picks.
+    fn results(&self, record: &WorkProviderSearchRecordV1) -> String {
+        let engine = zephium_core::search::SearchEngine::from_id(&record.evidence.model)
+            .map_or("the search engine", |engine| engine.name());
+        let mut out = format!(
+            "Results from {engine}, in its order. Snippets are the engine's, not the pages': web_fetch the best pages before you rely on them.\n"
+        );
+        for (index, result) in record
+            .evidence
+            .citations
+            .iter()
+            .enumerate()
+            .take(SEARCH_SOURCES)
+        {
+            let key = self.run.cite(
+                WorkEvidenceLink {
+                    extraction_id: record.id,
+                    source_id: (index + 1) as u16,
+                },
+                &result.title,
+                Some(&result.url),
+            );
+            out.push_str(&format!(
+                "{}. [{key}] {} — {}\n",
+                index + 1,
+                clip(&result.title, 120),
+                result.url
+            ));
+            if let Some(snippet) = &result.snippet {
+                out.push_str(&format!("   {}\n", clip(snippet, 300)));
+            }
+        }
+        out
+    }
+
     /// A page's records as lines the model can build objects from: names,
     /// facts, pictures and links, each with the key of its source.
     fn records(
@@ -802,7 +1064,14 @@ where
         title: &str,
         url: &str,
         driver: &WorkPartDriver,
+        collection: Option<&WorkBrowseCollection>,
     ) -> String {
+        let record_keys = self
+            .run
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(artifact, collection);
         let keys: Vec<String> = artifact
             .evidence
             .iter()
@@ -812,7 +1081,10 @@ where
                     .and_then(|p| p.link_destination.clone())
                     .unwrap_or_else(|| url.to_owned());
                 self.run.allow_url(&page);
-                self.run.cite(link.clone(), title, Some(&page))
+                match driver.preview(link) {
+                    Some(preview) => self.run.cite_preview(preview, &page),
+                    None => self.run.cite(link.clone(), title, Some(&page)),
+                }
             })
             .collect();
         let cite = |indices: &[u16]| -> String {
@@ -877,8 +1149,14 @@ where
                 cells,
                 notes,
             } => {
-                for (row, item) in subjects.iter().zip(cells).take(RECORD_LINES) {
-                    let mut line = format!("- {}", subject(row));
+                for (index, (row, item)) in
+                    subjects.iter().zip(cells).take(RECORD_LINES).enumerate()
+                {
+                    let key = record_keys
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("unregistered");
+                    let mut line = format!("- record {key}: {}", subject(row));
                     for (criterion, cell) in criteria.iter().zip(item) {
                         let value = match &cell.value {
                             WorkCellValue::Text { text } => text.clone(),
@@ -892,10 +1170,15 @@ where
                             }
                             WorkCellValue::Unknown => continue,
                         };
-                        line.push_str(&format!(" · {}: {value}", criterion.name));
-                        line.push_str(&cite(&cell.evidence));
+                        append_record_cell(
+                            &mut line,
+                            &criterion.name,
+                            &value,
+                            row.homepage.as_deref(),
+                            &cite(&cell.evidence),
+                        );
                     }
-                    out.push_str(&clip(&line, 900));
+                    out.push_str(&line);
                     out.push('\n');
                 }
                 for note in notes {
@@ -925,12 +1208,58 @@ where
     }
 }
 
+// The native record owns the full values. Clipping a row mid-URL made the
+// helper treat retained images as missing and reopen already-read pages.
+fn append_record_cell(
+    line: &mut String,
+    name: &str,
+    value: &str,
+    homepage: Option<&str>,
+    citation: &str,
+) {
+    let shown = if homepage == Some(value) {
+        "same full URL as this record"
+    } else if line.chars().count()
+        + name.chars().count()
+        + value.chars().count()
+        + citation.chars().count()
+        + 5
+        > 900
+    {
+        "stored verbatim in this record (not missing)"
+    } else {
+        value
+    };
+    line.push_str(&format!(" · {name}: {shown}{citation}"));
+}
+
 /// The run's search provider behind its shared search permits.
 struct SearchLane<'a> {
     inner: &'a dyn WorkPublicSearchProvider,
     permits: &'a tokio::sync::Semaphore,
 }
 impl WorkPublicSearchProvider for SearchLane<'_> {
+    fn grant(&self) -> Option<(zephium_core::work::search::WorkSearchProvider, String)> {
+        self.inner.grant()
+    }
+    fn fallback(&self) -> Option<WorkSearchFallbackV1> {
+        self.inner.fallback()
+    }
+    fn results_page(&self, scope: &WorkPublicSearchScope) -> Option<WorkResultsPage> {
+        self.inner.results_page(scope)
+    }
+    fn search_page<'a>(
+        &'a self,
+        scope: &'a WorkPublicSearchScope,
+        page: Option<WorkSearchPage>,
+        limits: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        Box::pin(async move {
+            let _permit = self.permits.acquire().await;
+            self.inner.search_page(scope, page, limits).await
+        })
+    }
+
     fn reuse<'a>(
         &'a self,
         scope: &'a WorkPublicSearchScope,
@@ -1027,6 +1356,24 @@ fn host(url: &str) -> String {
 
 /// The step the driver made for a request: same query, url or path. A page
 /// task may start from the site's entry page, so its goal decides.
+/// A followed read the lead's own checks refused: it never opened.
+fn not_opened(why: String) -> WorkBrowserOutcome {
+    WorkBrowserOutcome {
+        status: WorkStepStatus::Failed,
+        usage: Some(WorkUsage::default()),
+        artifacts: vec![],
+        intervention: None,
+        note: Some(why),
+        measurements: None,
+        helped: false,
+        held_back: false,
+        committed: Vec::new(),
+        rerun: false,
+        search: None,
+        redirect: None,
+    }
+}
+
 fn same_request(request: &WorkStepKindV1, step: &WorkStepKindV1) -> bool {
     match (request, step) {
         (WorkStepKindV1::Search { query: a }, WorkStepKindV1::Search { query: b }) => a == b,
@@ -1039,9 +1386,17 @@ fn same_request(request: &WorkStepKindV1, step: &WorkStepKindV1) -> bool {
             },
         ) => a == b,
         (
-            WorkStepKindV1::Read { goal: Some(a), .. },
-            WorkStepKindV1::Read { goal: Some(b), .. },
-        ) => a == b,
+            WorkStepKindV1::Read {
+                goal: Some(a),
+                verbatim: words_a,
+                ..
+            },
+            WorkStepKindV1::Read {
+                goal: Some(b),
+                verbatim: words_b,
+                ..
+            },
+        ) => a == b && words_a == words_b,
         (WorkStepKindV1::List { path: a, .. }, WorkStepKindV1::List { path: b, .. })
         | (WorkStepKindV1::ReadFile { path: a, .. }, WorkStepKindV1::ReadFile { path: b, .. })
         | (WorkStepKindV1::WriteFile { path: a, .. }, WorkStepKindV1::WriteFile { path: b, .. })
@@ -1068,17 +1423,63 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
     let Some(value) = value.filter(|v| !v.is_null()) else {
         return Ok(None);
     };
-    let mut collection: WorkBrowseCollection = serde_json::from_value(value.clone())
+    use zephium_core::work::artifact::{MAX_ARTIFACT_CRITERIA, MAX_ARTIFACT_SUBJECTS};
+    use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
+    // What a helper means is clear even when it leaves out the title or
+    // the count: they take their usual values rather than costing a turn.
+    let mut value = value.clone();
+    if let Value::Object(map) = &mut value {
+        if !map.get("title").is_some_and(Value::is_string) {
+            map.insert("title".into(), Value::String("Records".into()));
+        }
+        if !map.get("max_items").is_some_and(Value::is_u64) {
+            map.insert("max_items".into(), Value::from(12));
+        }
+    }
+    let mut collection: WorkBrowseCollection = serde_json::from_value(value)
         .map_err(|error| format!("records does not match its shape: {error}"))?;
+    // Every row already has its name, and a column name is a plain
+    // identifier: a "name" column, a "Product link" or a fourth picture
+    // column is the same request said loosely.
+    let mut names: Vec<String> = Vec::new();
+    let mut pictures = 0;
+    collection.columns.retain_mut(|column| {
+        let name: String = column
+            .name
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let name = name.trim_matches('_').to_owned();
+        let picture = column.value == WorkBrowseValue::ImageUrl;
+        if !name.starts_with(|c: char| c.is_ascii_alphabetic())
+            || matches!(name.as_str(), "name" | "title")
+            || names.contains(&name)
+            || (picture && pictures == 3)
+        {
+            return false;
+        }
+        pictures += usize::from(picture);
+        names.push(name.clone());
+        column.name = name;
+        true
+    });
+    collection.columns.truncate(MAX_ARTIFACT_CRITERIA);
+    let fits = (256 / (collection.columns.len() + 1)).min(MAX_ARTIFACT_SUBJECTS);
+    collection.max_items = collection
+        .max_items
+        .clamp(1, u8::try_from(fits).unwrap_or(u8::MAX).max(1));
     // A row missing a price or a picture is still a find the lead can use;
     // only a link is ever required. A price is kept as the page shows it:
     // most sites print "$" without a currency code, which a money value
     // never admits, and the lead reads records as text either way.
     for column in &mut collection.columns {
-        use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
         if matches!(column.value, WorkBrowseValue::Money { .. }) {
             column.value = WorkBrowseValue::Text;
-            column.extraction = WorkBrowseExtraction::Generate;
+        }
+        if column.value == WorkBrowseValue::Text {
+            column.extraction = WorkBrowseExtraction::Verbatim;
         }
         if column.value != WorkBrowseValue::Url {
             column.required = false;
@@ -1094,6 +1495,32 @@ pub(crate) fn collection(value: Option<&Value>) -> Result<Option<WorkBrowseColle
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn record_summary_does_not_cut_images_or_repeat_long_record_urls() {
+        let url = format!("https://catalog.example/item?query={}", "x".repeat(360));
+        let image = format!("https://images.example/photo?variant={}", "y".repeat(160));
+        let mut line = format!("- record r1: One stay · url {url}");
+        append_record_cell(&mut line, "listing url", &url, Some(&url), " [s1]");
+        append_record_cell(
+            &mut line,
+            "total",
+            "$236 total, originally $279",
+            Some(&url),
+            " [s2]",
+        );
+        append_record_cell(&mut line, "image", &image, Some(&url), " [s3]");
+        append_record_cell(&mut line, "dates", "Nov 18 – 21", Some(&url), " [s4]");
+        assert_eq!(line.matches(&url).count(), 1);
+        assert!(line.contains(&image), "{line}");
+        assert!(line.contains("Nov 18 – 21 [s4]"), "{line}");
+        assert!(!line.contains('…'));
+        let long = "界".repeat(1_000);
+        append_record_cell(&mut line, "details", &long, Some(&url), " [s5]");
+        assert!(line.ends_with("details: stored verbatim in this record (not missing) [s5]"));
+        assert!(!line.contains('界'), "never emit part of a stored value");
+        assert!(line.contains("$236 total, originally $279 [s2]"));
+    }
 
     #[derive(Default)]
     struct Counting {
@@ -1248,6 +1675,23 @@ mod tests {
     }
 
     #[test]
+    fn model_record_fields_cannot_request_generated_prices_dates_or_stock() {
+        use zephium_core::work::collection::WorkBrowseExtraction;
+        let records = serde_json::json!({"max_items":3,"columns":[
+            {"name":"price","value":{"kind":"text"},"required":true,"extraction":"generate"},
+            {"name":"date","value":{"kind":"text"},"required":true},
+            {"name":"stock","value":{"kind":"text"},"required":false,"extraction":"generate"},
+            {"name":"url","value":{"kind":"url"},"required":true}
+        ]});
+        let collection = collection(Some(&records)).unwrap().unwrap();
+        assert!(collection.columns[..3]
+            .iter()
+            .all(|column| column.extraction == WorkBrowseExtraction::Verbatim));
+        assert!(collection.columns[3].required);
+        assert_eq!(collection.max_items, 3);
+    }
+
+    #[test]
     fn a_price_column_keeps_the_price_as_the_page_shows_it() {
         use zephium_core::work::collection::{WorkBrowseExtraction, WorkBrowseValue};
         let records = serde_json::json!({
@@ -1262,9 +1706,31 @@ mod tests {
         assert_eq!(collection.columns[0].value, WorkBrowseValue::Text);
         assert_eq!(
             collection.columns[0].extraction,
-            WorkBrowseExtraction::Generate
+            WorkBrowseExtraction::Verbatim
         );
         assert!(!collection.columns[0].required && collection.columns[1].required);
+    }
+
+    #[test]
+    fn records_said_loosely_are_the_same_request() {
+        let records = serde_json::json!({
+            "columns": [
+                {"name": "name", "value": {"kind": "text"}, "required": true},
+                {"name": "Product link", "value": {"kind": "url"}, "required": true},
+                {"name": "price", "value": {"kind": "text"}, "required": true},
+                {"name": "price", "value": {"kind": "text"}, "required": false},
+                {"name": "a", "value": {"kind": "image_url"}, "required": false},
+                {"name": "b", "value": {"kind": "image_url"}, "required": false},
+                {"name": "c", "value": {"kind": "image_url"}, "required": false},
+                {"name": "d", "value": {"kind": "image_url"}, "required": false}
+            ],
+            "max_items": 40
+        });
+        let collection = collection(Some(&records)).unwrap().unwrap();
+        let names: Vec<&str> = collection.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["product_link", "price", "a", "b", "c"]);
+        assert_eq!(collection.title, "Records");
+        assert_eq!(collection.max_items, 32);
     }
 
     #[test]

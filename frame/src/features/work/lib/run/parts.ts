@@ -12,6 +12,7 @@ import { leadRun } from "../agent-steps";
 import * as m from "$shared/i18n/messages";
 import { runSources } from "./sources";
 import { hostOf, registrableSite, siteKey, siteName } from "./site";
+import { ulidTime } from "../ulid-time";
 
 /** A question waiting on the person about one part: which part (its id, key or site) and the ask card's props. */
 export type PartAsk = { part: string; props: Record<string, unknown> };
@@ -51,6 +52,13 @@ export type RunPart = {
   sources: SourceRow[];
   /** Where the part began in its run, for its row's order. */
   order: number;
+  /** The lead's turn that started it: work begun later stands to the right of what it built on. */
+  turn?: number;
+  /** When it began and ended, in epoch milliseconds, as its facts say: work that overlapped stands in one column. */
+  began?: number;
+  ended?: number;
+  /** The search whose results it went on to open: it stands under that search, not past it. */
+  follows?: string;
   /** The connection a connection part works through: "github". */
   connection?: string;
   /** What the part came to, in its helper's words: "3 homes". */
@@ -69,7 +77,44 @@ export type RunPart = {
   lines?: { kind: "read" | "write" | "command" | "search"; text: string }[];
   /** While it works, what it is doing now, in words: "Reading Lux 2br near YC". */
   now?: string;
+  /** A web search's words, its latest when it searched more than once. */
+  query?: string;
+  /** How many searches the row stands for, when more than one. */
+  queries?: number;
 };
+
+/** The earliest lead turn among `steps`. */
+function firstTurn(steps: readonly Step[]): { turn?: number } {
+  const turns = steps.map((step) => step.turn).filter((turn) => typeof turn === "number");
+  return turns.length ? { turn: Math.min(...turns) } : {};
+}
+
+/**
+ * When a part began and ended. Its id is minted when the lead asks for it, so
+ * a part waiting for its turn already stands with the work begun beside it.
+ */
+function times(fact: { id: string; started_ms?: string | null; ended_ms?: string | null }) {
+  const at = (text?: string | null) => {
+    const value = text ? Number(text) : NaN;
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const began = ulidTime(fact.id)?.getTime() ?? at(fact.started_ms);
+  const ended = at(fact.ended_ms);
+  return {
+    ...(began !== undefined ? { began } : {}),
+    ...(ended !== undefined ? { ended } : {}),
+  };
+}
+
+/**
+ * When the lead's own steps began, as one moment: a step's id is minted as it
+ * starts, and the lead does one thing at a time, so the next row's start is
+ * this one's end.
+ */
+function stepTimes(steps: readonly Step[]): { began?: number; ended?: number } {
+  const began = steps[0] ? ulidTime(steps[0].id)?.getTime() : undefined;
+  return began === undefined ? {} : { began, ended: began };
+}
 
 /** What a step is doing while it runs, as a live part's row says it. */
 function nowWords(step: Step): string | undefined {
@@ -143,7 +188,16 @@ function addLine(part: RunPart, kind: Step["kind"]) {
     part.lines!.push(line);
 }
 
+/** An approved step that sends, pays or deletes: running it again could do it twice. */
+export const effected = (step: Step) =>
+  step.kind.kind === "confirm" &&
+  ["communication", "purchase", "destructive"].includes(step.kind.confirm.category) &&
+  (step.kind.confirm.decision === "approved" || step.kind.confirm.decision === "allowed_for_run");
+
 /** A step a connection part draws as a row: a call (a read, before calls were their own) or a confirmation. */
+/** A part in one of these states is done working, for better or worse. */
+const ENDED: readonly string[] = ["done", "failed", "stopped"];
+
 const callRow = (step: Step) =>
   step.kind.kind === "confirm" ||
   ((step.kind.kind === "call" || step.kind.kind === "read") && !!step.note);
@@ -172,6 +226,7 @@ function factParts(
       const state =
         !going && ["planned", "running", "waiting"].includes(fact.state) ? "stopped" : fact.state;
       const host = fact.service?.host ? registrableSite(fact.service.host) : undefined;
+      const committed = steps.some(effected);
       const part: RunPart = {
         id: `part:${card}:${fact.id}`,
         key: fact.id,
@@ -188,10 +243,19 @@ function factParts(
               )
             : [],
         order: parts.length,
+        ...firstTurn(steps),
+        ...times(fact),
         ...(fact.summary ? { summary: fact.summary } : {}),
         ...(fact.goal?.trim() ? { goal: fact.goal.trim() } : {}),
         ...(going && state === "running" && nowOf(steps) ? { now: nowOf(steps)! } : {}),
-        ...(fact.need && !going ? { need: fact.need } : {}),
+        // A part that ended short offers its remedy at once, even while the run goes on;
+        // never a retry once an approved send or purchase may have happened.
+        ...(fact.need &&
+        (!going || ENDED.includes(state)) &&
+        !(committed && fact.need.kind === "retry")
+          ? { need: fact.need }
+          : {}),
+        ...(committed && state === "failed" ? { summary: m.work_part_effect_unconfirmed() } : {}),
         ...(fact.service?.connection ? { connection: fact.service.connection } : {}),
         ...(fact.helper === "computer"
           ? { steps: [...ids], lines: [] }
@@ -203,8 +267,17 @@ function factParts(
       if (part.lines) for (const step of steps) addLine(part, step.kind);
       parts.push(part);
     }
+    const searched = leadSearches(card, run, going);
+    if (searched) parts.push({ ...searched, order: parts.length });
     const lead = leadReads(card, run, recorded, going);
-    if (lead) parts.push({ ...lead, order: parts.length });
+    // Pages opened from what the search found read as that search's next step.
+    const opened =
+      searched &&
+      lead?.pages.some((page) =>
+        searched.sources.some((row) => samePage(row.url) === samePage(page.url)),
+      );
+    if (lead)
+      parts.push({ ...lead, order: parts.length, ...(opened ? { follows: searched.id } : {}) });
   }
   return parts;
 }
@@ -261,7 +334,72 @@ function leadReads(
     unread,
     sources: [],
     order: 0,
+    ...firstTurn(steps),
+    ...stepTimes(steps),
     ...(reading && nowOf(steps) ? { now: nowOf(steps)! } : {}),
+  };
+}
+
+/** An address as a person would recognise it again: no fragment, no tracking tag. */
+function samePage(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const key of [...parsed.searchParams.keys()])
+      if (key.startsWith("utm_")) parsed.searchParams.delete(key);
+    return `${parsed.hostname.replace(/^www\./u, "")}${parsed.pathname.replace(/\/$/u, "")}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * The web searches the lead ran itself, outside any part, as one row: what it
+ * asked, the results in the engine's order, and which of them it went on to open.
+ */
+function leadSearches(card: string, run: WorkExecutionFact, going: boolean): RunPart | null {
+  const steps = (run.steps ?? []).filter((step) => !step.part && step.kind.kind === "search");
+  if (!steps.length) return null;
+  const opened = new Set(
+    (run.steps ?? []).flatMap((step) =>
+      step.kind.kind === "read" ? [samePage(step.kind.url)] : [],
+    ),
+  );
+  const seen = new Set<string>();
+  const sources: SourceRow[] = [];
+  for (const step of steps) {
+    const record = run.provider_evidence?.find((entry) => entry.id === step.evidence);
+    for (const [index, result] of (record?.evidence.citations ?? []).entries()) {
+      const page = samePage(result.url);
+      if (!result.url || seen.has(page)) continue;
+      seen.add(page);
+      sources.push({
+        key: `${step.id}:${index}`,
+        url: result.url,
+        where: hostOf(result.url).replace(/^www\./u, ""),
+        title: result.title.trim(),
+        ...(opened.has(page) ? { opened: true } : {}),
+      });
+    }
+  }
+  const queries = steps.flatMap((step) => (step.kind.kind === "search" ? [step.kind.query] : []));
+  const searching = going && steps.some((step) => step.status === "running");
+  return {
+    id: `part:${card}:search:${run.id}`,
+    key: `search:${run.id}`,
+    title: m.work_part_search(),
+    helper: "research",
+    state: searching ? "running" : "done",
+    pages: [],
+    unread: [],
+    sources,
+    order: 0,
+    ...firstTurn(steps),
+    ...stepTimes(steps),
+    query: queries.at(-1)!,
+    ...(queries.length > 1 ? { queries: queries.length } : {}),
+    ...(sources.length ? { summary: m.work_part_results({ count: sources.length }) } : {}),
+    ...(searching && nowOf(steps) ? { now: nowOf(steps)! } : {}),
   };
 }
 

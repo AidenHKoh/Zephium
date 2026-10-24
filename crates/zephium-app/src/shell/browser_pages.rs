@@ -29,14 +29,9 @@ fn restored_tab_matches_snapshot(old: &TabView, tab: &TabState) -> bool {
             zephium_core::item::TabContent::ExtensionOwned
         )
     );
-    let same_url = tab.url.as_ref().map(url::Url::as_str) == old.url.as_deref();
-    // A native extension document may publish its title while privileged
-    // chrome is acknowledging the exact tab graph. Its identity, URL-less
-    // owner, profile, active item and split topology still have to match.
-    let guest_title_update = old.content == zephium_ipc::TabContentView::ExtensionOwned
-        && old.url.is_none()
-        && tab.url.is_none();
-    same_owner && same_url && (tab.title == old.title || guest_title_update)
+    // A title is presentation: a page may retitle itself (an unread count)
+    // while chrome acknowledges the tab graph, and its delta follows.
+    same_owner && tab.url.as_ref().map(url::Url::as_str) == old.url.as_deref()
 }
 
 impl Shell {
@@ -162,10 +157,16 @@ impl Shell {
         &mut self,
         page: Option<crate::BrowserPage>,
     ) -> OperationDisposition {
-        if page == Some(crate::BrowserPage::Work)
-            && self.store.app_setting("work.enabled").as_deref() == Some("false")
+        if page
+            .and_then(crate::BrowserPage::feature)
+            .is_some_and(|feature| {
+                !zephium_core::preferences::feature_enabled(
+                    |key| self.store.app_setting(key),
+                    feature,
+                )
+            })
         {
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+            return operation_result(OperationOutcome::Rejected, OperationReason::FeatureDisabled);
         }
         if let Some(crate::BrowserPage::Extensions) = page {
             return self.open_extensions_tab();
@@ -260,6 +261,8 @@ impl Shell {
         let Some(items) = self.items_snapshot() else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
+        // Chrome is handed this snapshot outside the ordinary projection.
+        self.forget_offered_items();
         let Some((window, splits)) = self.windows.focused().map(|w| (w.id, w.splits.clone()))
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
@@ -334,6 +337,9 @@ impl Shell {
         });
         self.browser_return = None;
         if !applied || !exact {
+            crate::diagnostic!(
+                "browser: return to Browse refused (chrome applied={applied}, snapshot exact={exact})"
+            );
             self.browser_after_return = None;
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
@@ -345,20 +351,26 @@ impl Shell {
         if let Some(window) = self.windows.focused().map(|window| window.id) {
             let _ = self.engine.hint_stage_motion(window, StageMotion::Arrive);
         }
-        if self.relayout() != NativeDispatch::Scheduled {
+        let next = self.browser_after_return.take();
+        // A command that follows decides what the window shows: laying out the
+        // page left behind first would bring it into view for a frame, and
+        // under a new tab it could stay there.
+        self.browser_return_hidden = next.is_some();
+        let scheduled = self.relayout() == NativeDispatch::Scheduled;
+        self.browser_return_hidden = false;
+        if !scheduled {
             self.browser_page = previous;
             let _ = self.relayout();
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
+        } else if let Some(next) = next {
+            self.browser_return_ready = true;
+            self.handle(*next);
+            self.browser_return_ready = false;
+            let _ = self.relayout();
+            self.project_browser_page_if_changed();
         } else {
-            if let Some(next) = self.browser_after_return.take() {
-                self.browser_return_ready = true;
-                self.handle(*next);
-                self.browser_return_ready = false;
-                self.project_browser_page_if_changed();
-            } else {
-                self.project_browser_page();
-            }
+            self.project_browser_page();
         }
     }
 }

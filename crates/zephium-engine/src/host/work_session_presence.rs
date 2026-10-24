@@ -43,35 +43,94 @@ impl EngineHost {
             return;
         };
         let identifier = NSUUID::from_bytes(profile.bytes());
-        // SAFETY: main thread (`mtm`); the retained store, set and block stay
-        // live for the call and WebKit copies the block.
-        unsafe {
-            let store = WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm);
-            if !store.isPersistent()
-                || store.identifier().map(|value| value.as_bytes()) != Some(profile.bytes())
-            {
-                let _ = reply.send(none);
-                return;
-            }
-            let types = NSSet::from_slice(&[WKWebsiteDataTypeCookies]);
-            let callback =
-                block2::RcBlock::new(move |records: NonNull<NSArray<WKWebsiteDataRecord>>| {
-                    // SAFETY: WebKit owns the array for the callback's duration.
-                    let records = records.as_ref();
-                    let sites: Vec<String> = records
-                        .iter()
-                        .take(MAX_RECORDS)
-                        .map(|record| record.displayName().to_string())
-                        .collect();
-                    let _ = reply.send(
-                        hosts
-                            .iter()
-                            .map(|host| sites.iter().any(|site| site_matches(host, site)))
-                            .collect(),
-                    );
-                });
-            store.fetchDataRecordsOfTypes_completionHandler(&types, &callback);
+        // SAFETY: main thread (`mtm`); the retained store outlives these calls.
+        let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+        // SAFETY: as above.
+        let exact = unsafe {
+            store.isPersistent()
+                && store.identifier().map(|value| value.as_bytes()) == Some(profile.bytes())
+        };
+        if !exact {
+            let _ = reply.send(none);
+            return;
         }
+        reply_cookie_sites(&store, hosts, reply);
+    }
+
+    /// QA only: visits the addresses in the profile's own store, binding it
+    /// as durable as its first ordinary tab would.
+    #[cfg(feature = "agentic-browser-qa")]
+    pub(crate) fn visit_in_profile(&mut self, profile: ProfileId, urls: Vec<String>) -> usize {
+        if self.erasure_tombstones.contains(&profile)
+            || !super::profiles::bind_profile_persistence_class(
+                &mut self.profile_persistence_classes,
+                zephium_core::ports::engine::Partition::Persistent(profile),
+            )
+        {
+            return 0;
+        }
+        crate::platform::imp::profile_seed_probe::start(profile, urls)
+    }
+
+    /// The same closed facts for Work's own store of the profile. A profile
+    /// whose Work store was never created answers all false without one.
+    #[cfg(feature = "agentic-browser")]
+    pub(crate) fn work_store_sessions_present(
+        &mut self,
+        profile: ProfileId,
+        hosts: Vec<String>,
+        reply: Sender<Vec<bool>>,
+    ) {
+        use wry::WebViewExtDarwin;
+        let none = vec![false; hosts.len()];
+        if self.erasure_tombstones.contains(&profile) {
+            let _ = reply.send(none);
+            return;
+        }
+        if let Some(store) = self.work_data_stores.get(&profile) {
+            reply_cookie_sites(store, hosts, reply);
+            return;
+        }
+        let identifier = crate::work_website_data::identifier(profile);
+        let _ =
+            <wry::WebView as WebViewExtDarwin>::fetch_data_store_identifiers(move |identifiers| {
+                if !identifiers.contains(&identifier) {
+                    let _ = reply.send(none);
+                    return;
+                }
+                match crate::platform::imp::work_data_store(profile) {
+                    Ok(store) => reply_cookie_sites(&store, hosts, reply),
+                    Err(_) => {
+                        let _ = reply.send(none);
+                    }
+                }
+            });
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reply_cookie_sites(store: &WKWebsiteDataStore, hosts: Vec<String>, reply: Sender<Vec<bool>>) {
+    // SAFETY: callers run on the main thread; the retained store, set and
+    // block stay live for the call and WebKit copies the block.
+    unsafe {
+        let types = NSSet::from_slice(&[WKWebsiteDataTypeCookies]);
+        let callback =
+            block2::RcBlock::new(move |records: NonNull<NSArray<WKWebsiteDataRecord>>| {
+                // SAFETY: WebKit owns the array for the callback's duration.
+                let records = records.as_ref();
+                let sites: Vec<String> = records
+                    .iter()
+                    .take(MAX_RECORDS)
+                    .map(|record| record.displayName().to_string())
+                    .collect();
+                let _ = reply.send(
+                    hosts
+                        .iter()
+                        .map(|host| sites.iter().any(|site| site_matches(host, site)))
+                        .collect(),
+                );
+            });
+        store.fetchDataRecordsOfTypes_completionHandler(&types, &callback);
     }
 }
 
@@ -141,6 +200,9 @@ impl EngineHost {
 
 #[cfg(all(target_os = "windows", feature = "agentic-browser"))]
 impl EngineHost {
+    /// A site's Work page opens on its site store after the profile's site
+    /// cookies were added to it, so it holds what either one holds: present
+    /// in the profile or in a remembered store is present on the page.
     pub(crate) fn work_sessions_present(
         &mut self,
         profile: ProfileId,

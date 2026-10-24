@@ -25,6 +25,7 @@ const LEGAL_RESOURCES: [(&str, &str); 3] = [
 ];
 
 fn main() {
+    record_source_revision();
     if let Err(error) = validate_privileged_window_ownership() {
         eprintln!("Tauri privileged-window ownership check failed: {error}");
         std::process::exit(1);
@@ -44,6 +45,48 @@ fn main() {
         println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
     } else {
         tauri_build::build();
+    }
+}
+
+fn record_source_revision() {
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).output().ok();
+    let revision = git(&["rev-parse", "HEAD"])
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| {
+            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .filter(|output| output.status.success())
+        .map(|output| !output.stdout.is_empty());
+    println!(
+        "cargo:rustc-env=ZEPHIUM_BUILD_REVISION={revision}{}",
+        match dirty {
+            Some(true) => "+dirty",
+            Some(false) => "",
+            None => "+state-unknown",
+        }
+    );
+    for name in ["HEAD", "index"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name])
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+        {
+            println!("cargo:rerun-if-changed={}", path.trim());
+        }
+    }
+    if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"])
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+    {
+        if let Some(path) = git(&["rev-parse", "--git-path", reference.trim()])
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+        {
+            println!("cargo:rerun-if-changed={}", path.trim());
+        }
     }
 }
 

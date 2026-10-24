@@ -1,5 +1,11 @@
 <script lang="ts">
   const loadWorkWorkspace = () => import("./WorkWorkspace.svelte");
+  // Loaded on the first visit to Work, the only place it shows.
+  let accountButton: ReturnType<typeof importAccountButton> | null = null;
+  function importAccountButton() {
+    return import("$features/account").then((account) => account.loadAccountButton());
+  }
+  const loadAccountButton = () => (accountButton ??= importAccountButton());
   // Dynamic like the panel's own path to Notes, so the feature's entry is
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
@@ -30,7 +36,7 @@
 
   import { onMount } from "svelte";
   import { events } from "$shared/ipc/native-events";
-  import { handleNativeSection } from "$features/settings";
+  import { askSettings, handleNativeSection } from "$features/settings";
   import * as m from "$shared/i18n/messages";
   import { surface as browserPage } from "$domain/surface";
   import { loadToolSlot } from "$features/tools";
@@ -45,10 +51,18 @@
   import { focus } from "$domain/time";
   import { loadNewTabSearch } from "$features/search";
   import { loadNewTab } from "$features/newtab";
-  import { ModeTabs, PrivateBar, Sidebar, SidebarNotice, UtilityTray } from "$features/sidebar";
-  import { IS_MAC } from "$shared/platform";
+  import {
+    ModeTabs,
+    PrivateBar,
+    Sidebar,
+    SidebarSearch,
+    SidebarNotice,
+    UtilityTray,
+  } from "$features/sidebar";
+  import { IS_WINDOWS } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
     const profile = tabs.profile()?.id;
@@ -61,6 +75,11 @@
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
     handleNativeSection("settings.section.newtab");
+    void browserPage.open("settings");
+  }
+  function openAccount(intent: "account" | "credits") {
+    askSettings(intent === "credits" ? "credits" : null);
+    handleNativeSection("settings.section.account");
     void browserPage.open("settings");
   }
   function openAbout() {
@@ -110,6 +129,10 @@
   });
   let splitting = $state(false);
   let inWork = $derived(browserPage.currentPage() === "work");
+  // Settings stands beside the rail the way a tool panel does.
+  let paneled = $derived(
+    toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
+  );
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
@@ -140,21 +163,32 @@
 
   // The current tab's plate travels to the next current tab. Measured before
   // the change lands and played after it, across every list in the column.
+  // Another space's list is a different sheet, so a plate never crosses to it:
+  // the new space simply shows its own current tab.
   let shownActive: string | null = null;
+  let shownSpace: string | null = null;
   let glideFrom: ReturnType<typeof selectionGlide.capture> = null;
   $effect.pre(() => {
     const next = tabs.activeId();
+    const space = tabs.activeSpaceId();
     untrack(() => {
-      if (next !== shownActive) glideFrom = selectionGlide.capture(shownActive);
+      if (next === shownActive) return;
+      const origin = selectionGlide.capture(shownActive);
+      glideFrom = space === shownSpace ? origin : null;
     });
   });
   $effect(() => {
     const next = tabs.activeId();
+    const space = tabs.activeSpaceId();
     untrack(() => {
-      if (next === shownActive) return;
+      if (next === shownActive) {
+        shownSpace = space;
+        return;
+      }
       selectionGlide.play(glideFrom, next);
       glideFrom = null;
       shownActive = next;
+      shownSpace = space;
     });
   });
   let tree = $derived(sidebarTree(tabs.sidebarNodes(), tabs.tabs()));
@@ -260,21 +294,29 @@
   }
 </script>
 
+<!-- The chrome view starts at the window's corner in every shape and draws
+     the gutter itself, which stays a place to drag the window by. -->
 <div
-  class="shell flex h-screen w-screen"
-  class:p-2={!IS_MAC || inWork}
+  class="shell flex h-screen w-screen p-2"
+  data-tauri-drag-region
   class:pb-0={inWork}
+  data-caption={IS_WINDOWS || undefined}
   data-zephium-active-tab={tabs.activeId() ?? ""}
   data-zephium-surface={browserPage.currentPage() ?? "browse"}
   data-private={incognito || undefined}
 >
   <Sidebar
     >{#snippet browserBody(compact)}
-      {#if compact && (inWork || toolHost.activeTool() !== null)}
+      {#if compact && (inWork || paneled)}
         {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
-        {#if toolHost.activeTool() !== null}<ModeTabs compact standalone />{/if}
+        {#if paneled && IS_WINDOWS}
+          {#if browserPage.currentPage() === "settings"}<ModeTabs compact standalone />{/if}
+          <div class="rail-search"><SidebarSearch /></div>
+        {:else if paneled}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else if !incognito}<div class="sidebar-head"><ModeTabs /></div>{/if}
+      {:else if !incognito && preferences.enabled("work")}<div class="sidebar-head">
+          <ModeTabs />
+        </div>{/if}
       <!-- One column in both environments: only what it lists changes, and the
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
@@ -300,6 +342,7 @@
                 </UtilityTray>
               {/snippet}
             </AddressField>
+
             <HidingBar />
             {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
                 {m.choose_split()}
@@ -314,14 +357,19 @@
             <UpdateNotice view="cards" />
           {/if}
         </div>{/key}
-    {/snippet}{#snippet dock(compact)}{#if compact && incognito}<PrivateBar
+    {/snippet}{#snippet dock(
+      compact,
+    )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
+            name={tabs.profile()?.name ?? ""}
+          />{/await}{/snippet}{#if compact && incognito}<PrivateBar
           compact
         />{:else if compact}{#if tabs.profile()?.id && !inWork}<DownloadPulse
             profile={tabs.profile()?.id ?? ""}
-          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock compact tools={!inWork}>
-          {#snippet extensions()}<ExtensionActions variant="stack" /><ManageExtensions
-              variant="stack"
-            />{/snippet}
+          />{/if}<UpdateNotice view="glyph" onabout={openAbout} /><Dock
+          compact
+          tools={!inWork}
+          foot={inWork ? accountFoot : undefined}
+        >
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
               onSelect={selectTab}
@@ -387,162 +435,186 @@
           />{/snippet}</LazyView
       >{/snippet}</Sidebar
   >
-  {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
-      {m.browser_nav_failed()}
-    </div>{/if}
-  {#if focus.cover() !== null && browserPage.currentPage() === null}
-    <!-- Focus shuts the site this tab shows; native has taken the page off
+  <div class="stage-column">
+    {#if browserPage.navigationFailed()}<div class="navigation-error" role="alert">
+        {m.browser_nav_failed()}
+      </div>{/if}
+    {#if focus.cover() !== null && browserPage.currentPage() === null}
+      <!-- Focus shuts the site this tab shows; native has taken the page off
          the stage, so this stands where it was. -->
-    <main class="internal-stage">
-      <div class="stage-page">
-        <LazyView
-          loader={loadFocusCover}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(View)}<View site={focus.cover() ?? ""} />{/snippet}</LazyView
-        >
-      </div>
-    </main>
-  {:else if (tabs.activeTab()?.availability?.state === "waiting_for_capacity" || tabs.activeTab()?.availability?.state === "blocked_by_capacity") && browserPage.currentPage() === null}
-    {@const capacityTab = tabs.activeTab()}
-    <main class="internal-stage">
-      {#if capacityTab}<LazyView
-          loader={loadTabCapacityState}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
-        >{/if}
-    </main>
-  {:else if tabs.activeTab()?.failure && !tabs.activeTab()?.url && !tabs.activeTab()?.loading && browserPage.currentPage() === null}
-    {@const failedTab = tabs.activeTab()}
-    {@const failure = failedTab?.failure}
-    <!-- A first load that failed: the pane says why instead of a blank new tab. -->
-    <main class="min-w-0 flex-1 ps-2">
-      <div class="content-pane h-full w-full overflow-hidden">
-        {#if failedTab && failure}<LazyView
-            loader={loadNavigationError}
+      <main class="internal-stage">
+        <div class="stage-page">
+          <LazyView
+            loader={loadFocusCover}
             loadingLabel={m.surface_loading()}
             failureLabel={m.surface_render_failed()}
             retryLabel={m.surface_retry()}
-            >{#snippet children(View)}<View tab={failedTab} {failure} />{/snippet}</LazyView
+            >{#snippet children(View)}<View site={focus.cover() ?? ""} />{/snippet}</LazyView
+          >
+        </div>
+      </main>
+    {:else if (tabs.activeTab()?.availability?.state === "waiting_for_capacity" || tabs.activeTab()?.availability?.state === "blocked_by_capacity") && browserPage.currentPage() === null}
+      {@const capacityTab = tabs.activeTab()}
+      <main class="internal-stage">
+        {#if capacityTab}<LazyView
+            loader={loadTabCapacityState}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(View)}<View tab={capacityTab} />{/snippet}</LazyView
           >{/if}
-      </div>
-    </main>
-  {:else if newTabShown}
-    <!--
+      </main>
+    {:else if tabs.activeTab()?.failure && !tabs.activeTab()?.url && !tabs.activeTab()?.loading && browserPage.currentPage() === null}
+      {@const failedTab = tabs.activeTab()}
+      {@const failure = failedTab?.failure}
+      <!-- A first load that failed: the pane says why instead of a blank new tab. -->
+      <main class="min-w-0 flex-1 ps-2">
+        <div class="content-pane h-full w-full overflow-hidden">
+          {#if failedTab && failure}<LazyView
+              loader={loadNavigationError}
+              loadingLabel={m.surface_loading()}
+              failureLabel={m.surface_render_failed()}
+              retryLabel={m.surface_retry()}
+              >{#snippet children(View)}<View tab={failedTab} {failure} />{/snippet}</LazyView
+            >{/if}
+        </div>
+      </main>
+    {:else if newTabShown}
+      <!--
       A tab opened straight to an address is loading before it has a URL; it
       goes to its page rather than flashing the new tab first.
       Occupies exactly the rect a content WebView would, so moving between a
       page and the new tab never changes the window's shape. The inline start
       inset matches the core layout gap between chrome and content.
     -->
-    <main class="min-w-0 flex-1 ps-2" data-zephium-new-tab>
-      <!-- New Tab paints its own ground, so its dock can open onto the frame. -->
-      <div class="content-pane h-full w-full overflow-hidden" data-ground="own">
-        <LazyView
-          loader={loadNewTab}
-          loadingLabel={m.surface_loading()}
-          failureLabel={m.surface_render_failed()}
-          retryLabel={m.surface_retry()}
-          >{#snippet children(NewTab)}<NewTab
-              oncustomize={openSettings}
-              ontasks={() => void browserPage.open("tasks")}
-              ontime={() => void browserPage.open("time")}
-              >{#snippet search()}{#key tabs.activeId()}<LazyView
-                    loader={loadNewTabSearch}
+      <main class="min-w-0 flex-1 ps-2" data-zephium-new-tab>
+        <!-- New Tab paints its own ground, so its dock can open onto the frame. -->
+        <div class="content-pane h-full w-full overflow-hidden" data-ground="own">
+          <LazyView
+            loader={loadNewTab}
+            loadingLabel={m.surface_loading()}
+            failureLabel={m.surface_render_failed()}
+            retryLabel={m.surface_retry()}
+            >{#snippet children(NewTab)}<NewTab
+                oncustomize={openSettings}
+                onaccount={openAccount}
+                ontasks={() => void browserPage.open("tasks")}
+                ontime={() => void browserPage.open("time")}
+                >{#snippet search()}{#key tabs.activeId()}<LazyView
+                      loader={loadNewTabSearch}
+                      loadingLabel={m.surface_loading()}
+                      failureLabel={m.surface_render_failed()}
+                      retryLabel={m.surface_retry()}
+                      >{#snippet children(Search)}<Search
+                          tabId={tabs.activeId()}
+                        />{/snippet}</LazyView
+                    >{/key}{/snippet}</NewTab
+              >{/snippet}</LazyView
+          >
+        </div>
+      </main>
+    {/if}
+    {#if browserPage.currentPage() !== null}
+      <main class="internal-stage">
+        <!-- Each destination arrives as its own page: the ground settles in
+           while its content rises onto it. -->
+        {#key browserPage.currentPage()}<div
+            class="stage-page"
+            data-page={browserPage.currentPage()}
+          >
+            <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
+              {#if browserPage.currentPage() === "settings"}
+                <LazyView
+                  loader={loadSettings}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View />{/snippet}</LazyView
+                >
+              {:else if browserPage.currentPage() === "extensions"}
+                <LazyView
+                  loader={loadWebExtensionManager}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View />{/snippet}</LazyView
+                >
+              {:else if browserPage.currentPage() === "work"}
+                {#key tabs.profile()?.id}<LazyView
+                    loader={loadWorkWorkspace}
                     loadingLabel={m.surface_loading()}
                     failureLabel={m.surface_render_failed()}
                     retryLabel={m.surface_retry()}
-                    >{#snippet children(Search)}<Search
-                        tabId={tabs.activeId()}
+                    >{#snippet children(View)}<View />{/snippet}</LazyView
+                  >{/key}
+              {:else if browserPage.currentPage() === "notes"}
+                {#key tabs.profile()?.id}<LazyView
+                    loader={loadNotesPage}
+                    loadingLabel={m.surface_loading()}
+                    failureLabel={m.surface_render_failed()}
+                    retryLabel={m.surface_retry()}
+                    >{#snippet children(View)}<View
+                        profile={tabs.profile()?.id ?? ""}
+                        onclose={() => void browserPage.close()}
                       />{/snippet}</LazyView
-                  >{/key}{/snippet}</NewTab
-            >{/snippet}</LazyView
-        >
-      </div>
-    </main>
-  {/if}
-  {#if browserPage.currentPage() !== null}
-    <main class="internal-stage">
-      <!-- Each destination arrives as its own page: the ground settles in
-           while its content rises onto it. -->
-      {#key browserPage.currentPage()}<div class="stage-page">
-          <RenderBoundary title={m.surface_render_failed()} retryLabel={m.surface_retry()}>
-            {#if browserPage.currentPage() === "settings"}
-              <LazyView
-                loader={loadSettings}
-                loadingLabel={m.surface_loading()}
-                failureLabel={m.surface_render_failed()}
-                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-              >
-            {:else if browserPage.currentPage() === "extensions"}
-              <LazyView
-                loader={loadWebExtensionManager}
-                loadingLabel={m.surface_loading()}
-                failureLabel={m.surface_render_failed()}
-                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-              >
-            {:else if browserPage.currentPage() === "work"}
-              {#key tabs.profile()?.id}<LazyView
-                  loader={loadWorkWorkspace}
+                  >{/key}
+              {:else if browserPage.currentPage() === "tasks"}
+                <LazyView
+                  loader={loadTasksPage}
                   loadingLabel={m.surface_loading()}
                   failureLabel={m.surface_render_failed()}
                   retryLabel={m.surface_retry()}
                   >{#snippet children(View)}<View />{/snippet}</LazyView
-                >{/key}
-            {:else if browserPage.currentPage() === "notes"}
-              {#key tabs.profile()?.id}<LazyView
-                  loader={loadNotesPage}
-                  loadingLabel={m.surface_loading()}
-                  failureLabel={m.surface_render_failed()}
-                  retryLabel={m.surface_retry()}
-                  >{#snippet children(View)}<View
-                      profile={tabs.profile()?.id ?? ""}
-                      onclose={() => void browserPage.open(null)}
-                    />{/snippet}</LazyView
-                >{/key}
-            {:else if browserPage.currentPage() === "tasks"}
-              <LazyView
-                loader={loadTasksPage}
-                loadingLabel={m.surface_loading()}
-                failureLabel={m.surface_render_failed()}
-                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-              >
-            {:else if browserPage.currentPage() === "time"}
-              {#key tabs.profile()?.id}<LazyView
-                  loader={loadTimePage}
+                >
+              {:else if browserPage.currentPage() === "time"}
+                {#key tabs.profile()?.id}<LazyView
+                    loader={loadTimePage}
+                    loadingLabel={m.surface_loading()}
+                    failureLabel={m.surface_render_failed()}
+                    retryLabel={m.surface_retry()}
+                    >{#snippet children(View)}<View />{/snippet}</LazyView
+                  >{/key}
+              {:else if browserPage.currentPage() === "history"}
+                <LazyView
+                  loader={loadHistoryPage}
                   loadingLabel={m.surface_loading()}
                   failureLabel={m.surface_render_failed()}
                   retryLabel={m.surface_retry()}
                   >{#snippet children(View)}<View />{/snippet}</LazyView
-                >{/key}
-            {:else if browserPage.currentPage() === "history"}
-              <LazyView
-                loader={loadHistoryPage}
-                loadingLabel={m.surface_loading()}
-                failureLabel={m.surface_render_failed()}
-                retryLabel={m.surface_retry()}>{#snippet children(View)}<View />{/snippet}</LazyView
-              >
-            {:else}
-              <LazyView
-                loader={loadLibraryPage}
-                loadingLabel={m.surface_loading()}
-                failureLabel={m.surface_render_failed()}
-                retryLabel={m.surface_retry()}
-                >{#snippet children(View)}<View kind="downloads" />{/snippet}</LazyView
-              >{/if}
-          </RenderBoundary>
-        </div>{/key}
-    </main>
-  {/if}
+                >
+              {:else}
+                <LazyView
+                  loader={loadLibraryPage}
+                  loadingLabel={m.surface_loading()}
+                  failureLabel={m.surface_render_failed()}
+                  retryLabel={m.surface_retry()}
+                  >{#snippet children(View)}<View kind="downloads" />{/snippet}</LazyView
+                >{/if}
+            </RenderBoundary>
+          </div>{/key}
+      </main>
+    {/if}
+  </div>
 </div>
 
 <style>
-  /* One continuous tint over the native acrylic, including the outer gutter. */
-  :global(html[data-material="acrylic"] body) {
-    background: color-mix(in srgb, var(--color-chrome) 28%, transparent);
+  .stage-column {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .stage-column > :global(main) {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .rail-search {
+    display: flex;
+    justify-content: center;
+    margin-block: 8px 14px;
   }
 
   .sidebar-mode-body {

@@ -26,7 +26,7 @@ impl DecisionCallAccounting for Accounting {
     }
 }
 
-fn admitted_fixture() -> (
+pub(super) fn admitted_fixture() -> (
     AgentRunPolicy,
     AgentModelCallRequest,
     SemanticObservation,
@@ -332,7 +332,7 @@ fn emulation_config() -> WorkPlanningConfig {
     .unwrap()
 }
 
-fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
+pub(super) fn fixture_answers(request: &DecisionRequest) -> serde_json::Value {
     let answers: BTreeMap<_, _> = request.questions().iter().map(|(key, question)| {
         let value = match question {
             Question::Noul { .. } => json!({"type":"noul","noul":0.01}),
@@ -386,7 +386,7 @@ fn located_fixture_priced(
         {"k":1,"r":"document","fc":true},
         {"k":2,"p":0,"r":"heading","l":1,"n":"Public product","t":"Public product","fc":true},
         {"k":3,"p":0,"r":"paragraph","n":"Price","t":"$349.99","fc":true},
-        {"k":4,"p":0,"r":"image","n":"Product","m":"https://example.test/product.webp","fc":true},
+        {"k":4,"p":0,"r":"image","n":"Product","m":"https://example.test/product.webp","b":{"x":0,"y":0,"w":160,"h":110},"fc":true},
         {"k":5,"p":0,"r":"paragraph","t":"Product description","fc":true},
         {"k":6,"p":0,"r":"paragraph","t":"Nearby evidence","fc":true},
         {"k":7,"p":0,"r":"paragraph","t":"Personal value","q":"sensitive","fc":true},
@@ -400,7 +400,7 @@ fn located_fixture_priced(
             SemanticSnapshotGeneration::new(1).unwrap(),
         ),
         &serde_json::to_vec(
-            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes,"m":[{"k":4,"t":"image","r":[2],"l":true}]}),
         )
         .unwrap(),
     )
@@ -721,7 +721,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
         &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
     )
     .unwrap();
-    for relevant in [0.9, 0.1] {
+    for (relevant, complete) in [(0.9, 0.99), (0.1, 0.99), (0.9, 0.01), (0.9, 0.5)] {
         let projection = DecisionObservation::try_for_read(
             &observation,
             &objective,
@@ -732,6 +732,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
         .unwrap();
         assert!(!projection.request().questions().contains_key("locate_0"));
         let mut body = fixture_answers(projection.request());
+        body["answers"]["done"] = json!({"type":"noul","noul":complete});
         body["answers"]["any_0"] = json!({"type":"noul","noul":relevant});
         let Question::Choice { criteria, .. } = &projection.request().questions()["find_0"] else {
             panic!("choice expected");
@@ -760,7 +761,7 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
             .unwrap();
         let mut answers = projection.route(Ok(response)).unwrap().finish(None);
         let mut evidence = SemanticRetainedReadEvidence::default();
-        let (selection, ready) = answers
+        let selected = answers
             .take_read_progress_retaining_evidence(
                 &observation,
                 call.account(),
@@ -768,8 +769,15 @@ fn a_whole_page_findings_read_generates_from_ranked_evidence_or_leaves_the_plann
                 SemanticCaptureInstant::from_millis(101),
                 &mut evidence,
             )
-            .unwrap()
             .unwrap();
+        if complete != 0.99 {
+            assert!(
+                selected.is_none(),
+                "partial or uncertain completion must leave the planner"
+            );
+            continue;
+        }
+        let (selection, ready) = selected.unwrap();
         if relevant < 0.5 {
             // Nothing located: the page planner reads this page.
             assert!(!ready && selection.located() == 0);
@@ -953,7 +961,7 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         .is_none());
 
     let mut later_nodes = vec![json!({"k":1,"r":"document","n":"New section","fc":true})];
-    later_nodes.extend((2..=128).map(|key| json!({
+    later_nodes.extend((2..=256).map(|key| json!({
         "k":key + 100,"p":0,"r":"paragraph","t":format!("Unrelated current fact {key}"),"fc":true,
     })));
     let snapshot = decode_semantic_snapshot(
@@ -972,7 +980,7 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         SemanticObservationRequest::initial(
             SemanticObservationId::new(2).unwrap(),
             call.account().context(),
-            SemanticObservationBudget::try_new(128, 32768, 1).unwrap(),
+            SemanticObservationBudget::try_new(256, 65536, 1).unwrap(),
         ),
         snapshot,
     )
@@ -987,13 +995,13 @@ fn incomplete_reads_retain_only_confident_located_evidence_for_later_mapping() {
         SemanticReadAuthority::Acknowledged(&ack),
         SemanticCaptureInstant::from_millis(102),
         SemanticReadSensitivityLimit::PublicOnly,
-        SemanticReadBudget::STANDARD,
+        SemanticReadBudget::EXTRACTION,
         &schema,
     )
     .unwrap();
-    assert_eq!(current.fragments().len(), 128);
+    assert_eq!(current.fragments().len(), 256);
     let merged = retained.merge_for_extraction(current).unwrap();
-    assert_eq!(merged.fragments().len(), 128);
+    assert_eq!(merged.fragments().len(), 256);
     assert!(merged.fragments().iter().any(|fragment| fragment
         .content()
         .text()
@@ -2698,6 +2706,7 @@ fn search_ranking_fixture(
                 title: format!("Source {index}"),
                 start_index: 0,
                 end_index: 6,
+                snippet: None,
             })
             .collect(),
         actual_input_tokens: 100,
@@ -2837,6 +2846,96 @@ async fn search_reuse_needs_the_same_request_and_a_found_answer() {
     let mut secret = evidence.clone();
     secret.answer = "Authorization: Bearer do-not-disclose-this-secret".into();
     assert!(super::search::search_reuse_projection(&scope, "query", &secret).is_err());
+}
+
+#[tokio::test]
+async fn changed_numeric_search_constraints_never_dispatch_a_reuse_decision() {
+    let (mut scope, evidence) = search_ranking_fixture(2);
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        "http://127.0.0.1:9/v1/responses",
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(None, emulation_config(), None);
+    for (new, earlier) in [
+        ("batch dates 2027", "batch dates 2026"),
+        ("library 1.2 compatibility", "library 2.1 compatibility"),
+        ("hotel 2 adults 3 nights", "hotel 2 adults 4 nights"),
+        ("laptops under $500", "laptops under $800"),
+        ("device X100 specifications", "device X200 specifications"),
+        ("conference 2027", "conference"),
+    ] {
+        scope.query = new.into();
+        let result = ranking
+            .reuse(
+                &transport,
+                &credential,
+                &scope,
+                earlier,
+                &evidence,
+                limits(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+        assert!(!result.answers);
+        assert_eq!(result.usage.operations, 0);
+        assert_eq!(result.usage.model_tokens, 0);
+    }
+    assert!(transport.snapshot().unwrap().is_idle());
+}
+
+#[tokio::test]
+async fn completion_decisions_refuse_truncated_evidence_without_dispatch() {
+    use zephium_core::work::{search::WorkPublicSearchError, WorkError};
+    let (scope, mut evidence) = search_ranking_fixture(2);
+    evidence.answer = "é".repeat(1600);
+    let request =
+        super::search::search_reuse_projection(&scope, "public source", &evidence).unwrap();
+    assert_eq!(request.state()["earlier_answer"]["text"], evidence.answer);
+    let found = "é".repeat(8000);
+    let request = super::search::search_enough_projection(&scope, &found).unwrap();
+    assert_eq!(request.state()["found"]["text"], found);
+    evidence
+        .answer
+        .push_str(" but the requested facts could not be verified");
+    let found = format!("{found} but the requested facts could not be verified");
+    let transport = AgentProviderTransport::try_new_loopback(
+        AgentProviderTransportConfig::STANDARD,
+        "http://127.0.0.1:9/v1/responses",
+        "http://127.0.0.1:9/v1/messages",
+    )
+    .unwrap();
+    let credential =
+        AgentProviderCredential::try_new(AgentProviderKind::OpenAiResponses, "fixture-key".into())
+            .unwrap();
+    let ranking = super::search::SearchDecisionRanking::new(None, emulation_config(), None);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    assert!(matches!(
+        ranking
+            .reuse(
+                &transport,
+                &credential,
+                &scope,
+                "public source",
+                &evidence,
+                limits(),
+                deadline
+            )
+            .await,
+        Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity))
+    ));
+    assert!(matches!(
+        ranking
+            .enough(&transport, &credential, &scope, &found, limits(), deadline)
+            .await,
+        Err(WorkPublicSearchError::NotDispatched(WorkError::Capacity))
+    ));
+    assert!(transport.snapshot().unwrap().is_idle());
 }
 
 #[test]
@@ -3326,7 +3425,7 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
             json!({"k":k,"p":1,"r":"list_item","fc":true}),
             json!({"k":k+1,"p":parent,"r":"document","t":text,"fc":true}),
             json!({"k":k+2,"p":k,"r":"link","n":name,"u":format!("https://shop.example.test/{slug}"),"fc":true}),
-            json!({"k":k+3,"p":k+1,"r":"image","n":"primary","m":format!("https://shop.example.test/{slug}.webp"),"fc":true}),
+            json!({"k":k+3,"p":k+1,"r":"image","n":"primary","m":format!("https://shop.example.test/{slug}.webp"),"b":{"x":0,"y":0,"w":160,"h":110},"fc":true}),
             json!({"k":k+4,"p":k,"r":"heading","l":3,"n":name,"fc":true}),
             json!({"k":k+5,"p":k,"r":"button","n":"Add to Bag","fc":true}),
         ]
@@ -3357,7 +3456,7 @@ fn a_catalog_read_copies_each_found_record_from_inside_it_or_leaves_the_planner(
             SemanticSnapshotGeneration::new(1).unwrap(),
         ),
         &serde_json::to_vec(
-            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes,"m":[{"k":6,"t":"image","r":[4,5,7],"l":true},{"k":12,"t":"image","r":[10,11,13],"l":true},{"k":18,"t":"image","r":[16,17,19],"l":true}]}),
         )
         .unwrap(),
     )
@@ -3580,4 +3679,294 @@ fn a_located_label_value_pair_copies_its_value_node() {
         panic!("text expected");
     };
     assert_eq!(value.as_str(), "3745");
+}
+
+#[test]
+fn whole_page_findings_leave_clipped_observations_to_the_page_planner() {
+    let (_, call, previous, _) = admitted_fixture();
+    let schema = SemanticExtractionSchema::try_new(
+        SemanticExtractionSchemaId::new(1).unwrap(),
+        vec![
+            SemanticExtractionFieldSchema::try_text_list("findings".into(), true, 16, 1024)
+                .unwrap(),
+        ],
+    )
+    .unwrap();
+    let objective = AgentProviderObjective::try_admit_conservative_utf8(
+        "Find the installation command and license conditions".into(),
+        &SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap(),
+    )
+    .unwrap();
+    for completeness in [
+        "complete",
+        "field_limit",
+        "text_limit",
+        "node_limit",
+        "depth_limit",
+        "inspection_limit",
+        "wire_limit",
+        "scope_boundary",
+        "unsupported_frame",
+        "model_projection",
+    ] {
+        let mut snapshot = decode_semantic_snapshot(
+            SemanticDecodeContext::new(
+                SemanticInvocationId::new(1).unwrap(),
+                previous.frames()[0].frame().clone(),
+                SemanticSnapshotGeneration::new(1).unwrap(),
+            ),
+            &serde_json::to_vec(&json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,
+                "c":if completeness == "model_projection" { "complete" } else { completeness },
+                "n":[{"k":1,"r":"document"},{"k":2,"p":0,"r":"paragraph","t":"Installation introduction"}]})).unwrap(),
+        ).unwrap();
+        if completeness == "model_projection" {
+            snapshot.retain_model_prefix(2);
+        }
+        let observation = SemanticObservationAssembler::new(
+            SemanticObservationRequest::initial(
+                SemanticObservationId::new(1).unwrap(),
+                call.account().context(),
+                SemanticObservationBudget::try_new(8, 4096, 1).unwrap(),
+            ),
+            snapshot,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+        let authority = AgentProviderActionAuthority::try_new(&observation, &[]).unwrap();
+        for locate_only in [false, true] {
+            let result = if locate_only {
+                DecisionObservation::try_for_locate(
+                    &observation,
+                    &objective,
+                    &authority,
+                    call.account(),
+                    &schema,
+                )
+            } else {
+                DecisionObservation::try_for_read(
+                    &observation,
+                    &objective,
+                    &authority,
+                    call.account(),
+                    Some(&schema),
+                )
+            };
+            if completeness == "complete" {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    matches!(result, Err(DecisionProjectionError::Capacity)),
+                    "{completeness}"
+                );
+            }
+        }
+        // Wall/action triage without a findings shortcut remains available.
+        assert!(DecisionObservation::try_for_read(
+            &observation,
+            &objective,
+            &authority,
+            call.account(),
+            None
+        )
+        .is_ok());
+    }
+}
+
+#[test]
+fn owned_initial_extraction_requires_native_taint_and_the_exact_lease_without_a_prior_model_call() {
+    for sensitive in [false, true] {
+        let mut nodes = vec![
+            json!({"k":1,"r":"document","fc":true}),
+            json!({"k":2,"p":0,"r":"paragraph","t":"Public exact value","fc":true}),
+        ];
+        if sensitive {
+            nodes.push(json!({"k":3,"p":0,"r":"paragraph","t":"Confidential content","q":"sensitive","fc":true}));
+        }
+        let (mut policy, original, observation, _) =
+            admitted_fixture_with_nodes(Value::Array(nodes));
+        let (baseline, _) =
+            SemanticObservationAcknowledgement::whole_page_scope(&observation).unwrap();
+        let schema = SemanticExtractionSchema::try_new(
+            SemanticExtractionSchemaId::new(1).unwrap(),
+            vec![
+                SemanticExtractionFieldSchema::try_text("title".into(), true, 128)
+                    .unwrap()
+                    .with_verbatim_text()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let read = read_semantic_observation_for_schema(
+            &observation,
+            SemanticReadAuthority::Acknowledged(&baseline),
+            SemanticCaptureInstant::from_millis(101),
+            SemanticReadSensitivityLimit::PublicOnly,
+            SemanticReadBudget::EXTRACTION,
+            &schema,
+        )
+        .unwrap();
+        let revision = SemanticTokenizerRevision::try_new("fixture-v1".into()).unwrap();
+        let config = AgentProviderPricingSchedule::try_for_test(
+            AgentProviderKind::OpenAiResponses,
+            AgentProviderModelRevision::try_new("gpt-fixture".into()).unwrap(),
+            AgentProviderReasoningEffort::None,
+            revision.clone(),
+            AgentProviderPricingProfile::try_new(
+                AgentProviderPricingRevision::new(1).unwrap(),
+                32768,
+            )
+            .unwrap(),
+            AgentProviderTokenRates::try_new(1, 1, 1, 1).unwrap(),
+        )
+        .unwrap()
+        .try_provider_exact_call_config(1024, AgentProviderStreamBudget::STANDARD)
+        .unwrap()
+        .restrict_to_extraction();
+        let request = AgentModelCallRequest::new(
+            AgentModelCallId::new(1).unwrap(),
+            original.lease(),
+            original.account(),
+            AgentModelCallBudget::try_new(32768, 1024, 1000).unwrap(),
+            AgentPolicyInstant::from_millis(102),
+        );
+        let lease = AgentPlanLeaseBinding::new(original.lease(), AgentPlanNodeId::from_raw(15));
+        let objective = AgentProviderObjective::try_admit_conservative_utf8(
+            "Read the public value".into(),
+            &revision,
+        )
+        .unwrap();
+        let draft = |policy: &AgentRunPolicy, lease| {
+            let payload = encode_semantic_extraction_request(
+                &schema,
+                &read,
+                SemanticModelEncodingBudget::EXTRACTION_PROVIDER_EXACT_CONSERVATIVE,
+            )
+            .unwrap()
+            .admit_conservative_utf8(&revision)
+            .unwrap();
+            AgentProviderExtractionRequestDraft::try_owned_read(
+                policy, lease, request, &baseline, &schema, &read, &config, &objective, payload,
+            )
+        };
+        assert!(draft(&policy, lease)
+            .unwrap()
+            .try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read)
+            .is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        policy
+            .admit_owned_observation(&observation, original.account())
+            .unwrap();
+        let wrong_node =
+            AgentPlanLeaseBinding::new(original.lease(), AgentPlanNodeId::from_raw(999));
+        assert!(draft(&policy, wrong_node)
+            .unwrap()
+            .try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read)
+            .is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        let wrong_lease = AgentPlanLeaseBinding::new(AgentPlanLeaseId::from_raw(999), lease.node());
+        assert!(draft(&policy, wrong_lease).is_err());
+        assert_eq!(policy.pending_model_calls(), 0);
+        let draft = draft(&policy, lease).unwrap();
+        let body = String::from_utf8(draft.request().body().to_vec()).unwrap();
+        assert!(body.contains("Public exact value"));
+        assert!(!body.contains("Confidential content"));
+        let prepared =
+            draft.try_prepare_for_provider_exact_count(&mut policy, request, &schema, &read);
+        if sensitive {
+            assert!(matches!(
+                prepared,
+                Err(AgentProviderRequestError::Policy(
+                    AgentPolicyError::Sensitivity
+                ))
+            ));
+            assert_eq!(policy.pending_model_calls(), 0);
+        } else {
+            assert!(prepared.is_ok());
+            assert_eq!(policy.pending_model_calls(), 1);
+        }
+    }
+}
+fn listing_census_fixture(extra: Vec<Value>) -> SemanticObservation {
+    let (_, call, previous, _) = admitted_fixture();
+    let mut nodes = vec![
+        json!({"k":1,"r":"document","o":16,"fc":true}),
+        json!({"k":2,"p":0,"r":"list","fc":true}),
+        json!({"k":3,"p":1,"r":"list_item","fc":true}),
+        json!({"k":4,"p":2,"r":"heading","l":2,"n":"First record","fc":true}),
+        json!({"k":5,"p":3,"r":"link","n":"First record","u":"https://example.test/item?id=1","o":1,"fc":true}),
+        json!({"k":6,"p":1,"r":"list_item","fc":true}),
+        json!({"k":7,"p":5,"r":"heading","l":2,"n":"Second record","fc":true}),
+        json!({"k":8,"p":6,"r":"link","n":"Second record","u":"https://example.test/item?id=2","o":1,"fc":true}),
+    ];
+    nodes.extend(extra);
+    let snapshot = decode_semantic_snapshot(
+        SemanticDecodeContext::new(
+            SemanticInvocationId::new(1).unwrap(),
+            previous.frames()[0].frame().clone(),
+            SemanticSnapshotGeneration::new(1).unwrap(),
+        ),
+        &serde_json::to_vec(
+            &json!({"v":SEMANTIC_WIRE_VERSION,"i":1,"g":1,"c":"complete","n":nodes}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    SemanticObservationAssembler::new(
+        SemanticObservationRequest::initial(
+            SemanticObservationId::new(1).unwrap(),
+            call.account().context(),
+            SemanticObservationBudget::try_new(128, 8192, 1).unwrap(),
+        ),
+        snapshot,
+    )
+    .unwrap()
+    .finish()
+    .unwrap()
+}
+
+#[test]
+fn native_listing_counts_distinct_full_destinations_without_a_decision_model() {
+    let observation = listing_census_fixture(vec![]);
+    let census = native_listing_census(&observation);
+    assert_eq!(census.identities.len(), 2);
+    assert_ne!(census.identities[0], census.identities[1]);
+    assert_eq!(
+        census.scroll,
+        Some(observation.frames()[0].nodes()[0].reference())
+    );
+    assert!(!census.limited);
+    assert!(census.continuation.is_none());
+}
+
+#[test]
+fn native_listing_continuations_exclude_record_actions_and_navigation_noise() {
+    let observation = listing_census_fixture(vec![
+        json!({"k":9,"p":2,"r":"button","n":"Load more","o":1,"fc":true}),
+        json!({"k":10,"p":0,"r":"landmark","lm":"banner","fc":true}),
+        json!({"k":11,"p":9,"r":"link","n":"Next page","u":"https://example.test/ad","o":1,"fc":true}),
+        json!({"k":12,"p":0,"r":"link","n":"Next","u":"https://example.test/unrelated","o":1,"fc":true}),
+        json!({"k":13,"p":0,"r":"landmark","lm":"navigation","n":"Pagination","fc":true}),
+        json!({"k":14,"p":12,"r":"link","n":"Next","u":"https://example.test/?page=2","o":1,"fc":true}),
+    ]);
+    let census = native_listing_census(&observation);
+    assert_eq!(census.identities.len(), 2);
+    assert_eq!(
+        census.continuation,
+        Some(NativeListingContinuation::NextPage(
+            observation.frames()[0].nodes()[13].reference()
+        ))
+    );
+}
+
+#[test]
+fn native_listing_leaves_modal_pages_to_the_existing_handoff_and_consent_path() {
+    let observation = listing_census_fixture(vec![
+        json!({"k":9,"p":0,"r":"dialog","n":"Sign in","fc":true}),
+    ]);
+    let census = native_listing_census(&observation);
+    assert!(census.limited);
+    assert!(
+        census.identities.is_empty() && census.scroll.is_none() && census.continuation.is_none()
+    );
 }

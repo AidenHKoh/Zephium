@@ -25,16 +25,33 @@ describe("keymap model", () => {
       entry("tab.new", "file"),
       entry("tab.select.1", "keys"),
       entry("tab.next", "window"),
+      entry("tab.below", "window"),
+      entry("space.next", "keys"),
       entry("tool.downloads", "window"),
       entry("launcher.toggle", "global", false),
       entry("work.pane.close", "work", false),
+      entry("work.dictate", "keys"),
     ]);
-    expect(sections.map((section) => section.id)).toEqual(["browser", "tabs"]);
+    expect(sections.map((section) => section.id)).toEqual(["browser", "tabs", "spaces", "work"]);
     expect(sections[0]!.entries.map((e) => e.id)).toEqual([
       "browser.settings",
       "tab.new",
       "tool.downloads",
     ]);
-    expect(sections[1]!.entries.map((e) => e.id)).toEqual(["tab.select.1", "tab.next"]);
+    expect(sections[1]!.entries.map((e) => e.id)).toEqual([
+      "tab.select.1",
+      "tab.next",
+      "tab.below",
+    ]);
+    expect(sections[2]!.entries.map((e) => e.id)).toEqual(["space.next"]);
+    expect(commandTitle(sections[2]!.entries[0]!)).toBe("Next space");
+    expect(sections[3]!.entries.map((e) => e.id)).toEqual(["work.dictate"]);
+    expect(commandTitle(sections[3]!.entries[0]!)).toBe("Dictate in Work");
+    expect(
+      keymapSections(
+        [entry("tab.new", "file"), entry("work.dictate", "keys")],
+        (id) => id !== "work.dictate",
+      ).map((section) => section.id),
+    ).toEqual(["browser"]);
   });
 });

@@ -2,11 +2,10 @@
 
 use std::{sync::Arc, time::Instant};
 use zephium_agent_controller::{
-    AgentBrowserModel, AgentWorkAccountSource, AgentWorkContextSpec, AgentWorkDiscoveryTask,
-    AgentWorkFailure, AgentWorkLocalActionPolicy, AgentWorkRunInput, AgentWorkRunSettings,
-    AgentWorkTask, TerraControllerIds,
+    AgentBrowserModel, AgentBrowserModelAccess, AgentWorkAccountSource, AgentWorkContextSpec,
+    AgentWorkDiscoveryTask, AgentWorkFailure, AgentWorkLocalActionPolicy, AgentWorkRunInput,
+    AgentWorkRunSettings, AgentWorkTask, TerraControllerIds,
 };
-use zephium_agent_provider_transport::AgentProviderCredential;
 use zephium_agentic::*;
 use zephium_app::{AgentWorkApplicationConfig, AgentWorkProfileBinding};
 
@@ -66,7 +65,7 @@ pub struct PublicReadWorkInvocation {
     objective: PublicReadWorkObjective,
     settings: PublicReadWorkSettings,
     config: AgentWorkApplicationConfig,
-    credential: AgentProviderCredential,
+    access: AgentBrowserModelAccess,
     persist_result: bool,
     #[cfg(feature = "public-qualification")]
     inspectable_public: bool,
@@ -80,6 +79,24 @@ impl PublicReadWorkInvocation {
             actions: LocalActions {
                 policy: Box::new(read_interactions::ReadingInteractionPolicy),
                 max_actions: 8,
+                read_only: true,
+                commits: Vec::new(),
+            },
+        }
+    }
+
+    /// A browser search's results page, read by Rust with no model call
+    /// and nothing pressed.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) fn with_results_page(
+        self,
+        reader: Arc<results_page::ResultsReader>,
+    ) -> PublicLocalActionWorkInvocation {
+        PublicLocalActionWorkInvocation {
+            read: self,
+            actions: LocalActions {
+                policy: Box::new(results_page::ResultsPagePolicy { reader }),
+                max_actions: 1,
                 read_only: true,
                 commits: Vec::new(),
             },
@@ -131,13 +148,13 @@ impl PublicReadWorkInvocation {
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
     ) -> Self {
         Self {
             objective,
             settings,
             config,
-            credential,
+            access: access.into(),
             persist_result: false,
             #[cfg(feature = "public-qualification")]
             inspectable_public: false,
@@ -171,7 +188,7 @@ impl PublicReadWorkInvocation {
             self.objective,
             self.settings,
             self.config,
-            self.credential,
+            self.access,
         )?;
         if self.persist_result {
             request.input = request.input.persist_extraction_result()?;
@@ -209,14 +226,14 @@ struct LocalActions {
 }
 
 impl PublicLocalActionWorkInvocation {
-    /// Consumes the same objective, account, profile settings and credential as
+    /// Consumes the same objective, account, profile settings and model access as
     /// public reading, plus trusted local effect approval and an independent
     /// action ceiling. Admission is dormant; no page or provider work runs here.
     pub fn try_new(
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
         policy: Box<dyn AgentWorkLocalActionPolicy>,
         max_actions: u64,
     ) -> Result<Self, AgentWorkFailure> {
@@ -224,7 +241,7 @@ impl PublicLocalActionWorkInvocation {
             return Err(AgentWorkFailure::Contract);
         }
         Ok(Self {
-            read: PublicReadWorkInvocation::new(objective, settings, config, credential),
+            read: PublicReadWorkInvocation::new(objective, settings, config, access),
             actions: LocalActions {
                 policy,
                 max_actions,
@@ -281,7 +298,7 @@ impl PublicLocalActionWorkInvocation {
         if self.read.persist_result {
             input = input.persist_extraction_result()?;
         }
-        let request = TrustedWorkRequest::new(input, self.read.config, self.read.credential, task)
+        let request = TrustedWorkRequest::new(input, self.read.config, self.read.access, task)
             .with_browser_profile(profile);
         #[cfg(feature = "public-qualification")]
         if self.read.inspectable_public {
@@ -307,7 +324,7 @@ impl TrustedWorkRequest {
         objective: PublicReadWorkObjective,
         settings: PublicReadWorkSettings,
         config: AgentWorkApplicationConfig,
-        credential: AgentProviderCredential,
+        access: impl Into<AgentBrowserModelAccess>,
     ) -> Result<Self, AgentWorkFailure> {
         let identity = ContextIdentity::new(
             ContextId::generate(),
@@ -316,7 +333,7 @@ impl TrustedWorkRequest {
             ContextKind::Owned,
         );
         let (input, task) = assemble(identity, profile.storage_class(), objective, settings)?;
-        Ok(Self::new(input, config, credential, task).with_browser_profile(profile))
+        Ok(Self::new(input, config, access, task).with_browser_profile(profile))
     }
 }
 
@@ -349,7 +366,13 @@ fn assemble_with_actions(
     let mut classes = vec![SemanticEffectClass::Read];
     if let Some(actions) = actions.as_ref().filter(|actions| !actions.read_only) {
         classes.push(SemanticEffectClass::LocalWrite);
-        classes.extend(actions.commits.iter().copied());
+        // Baseline drafting and a typing approval can grant the same effect.
+        // Normalize only these host-owned grants; external manifests stay strict.
+        for effect in &actions.commits {
+            if !classes.contains(effect) {
+                classes.push(*effect);
+            }
+        }
     }
     let effects = AgentEffectScope::try_new(&classes).map_err(fail)?;
     let mut origins = objective.navigation.origins().cloned().collect::<Vec<_>>();
@@ -488,6 +511,10 @@ mod tests;
 #[cfg(feature = "durable-runtime")]
 mod consent;
 #[cfg(feature = "durable-runtime")]
+mod overlay;
+#[cfg(feature = "durable-runtime")]
 mod read_interactions;
+#[cfg(feature = "durable-runtime")]
+pub(crate) mod results_page;
 #[cfg(feature = "durable-runtime")]
 pub(crate) mod site_work;

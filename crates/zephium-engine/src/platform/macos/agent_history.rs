@@ -82,21 +82,38 @@ impl AgentHistoryLedger {
         target: ContextNavigationTarget,
         runtime: AgentDocumentRuntimeId,
     ) -> Result<(), ()> {
-        if self.pending.is_some() || self.entries.len() >= MAX_AGENT_HISTORY_ENTRIES {
-            return Err(());
-        }
         let identity = AgentHistoryEntryIdentity::from_item(&item).ok_or(())?;
-        if self.entries.iter().any(|entry| entry.identity == identity) {
+        self.enroll_identity(identity, Some(item), target, runtime)
+    }
+
+    fn enroll_identity(
+        &mut self,
+        identity: AgentHistoryEntryIdentity,
+        item: Option<Retained<WKBackForwardListItem>>,
+        target: ContextNavigationTarget,
+        runtime: AgentDocumentRuntimeId,
+    ) -> Result<(), ()> {
+        if self.pending.is_some() {
             return Err(());
         }
-        if let Some(cursor) = self.cursor {
-            self.entries.truncate(cursor.checked_add(1).ok_or(())?);
-        } else if !self.entries.is_empty() {
-            return Err(());
+        // A load that replaced its document in the same native item (a
+        // redirect that locks history, a load of the address already shown)
+        // takes that entry over; what came after it left native history.
+        let kept = match self
+            .entries
+            .iter()
+            .position(|entry| entry.identity == identity)
+        {
+            Some(index) => index,
+            None => self.cursor.map_or(0, |cursor| cursor.saturating_add(1)),
+        };
+        self.entries.truncate(kept);
+        if self.entries.len() >= MAX_AGENT_HISTORY_ENTRIES {
+            self.entries.remove(0);
         }
         self.entries.push(AgentHistoryEntry {
             identity,
-            item: Some(item),
+            item,
             target,
             runtime,
             provenance: AgentHistoryProvenance::HostIssuedGet,
@@ -338,6 +355,45 @@ mod tests {
             ledger.entries[0].target.as_url().as_str(),
             "https://example.test/a"
         );
+    }
+
+    #[test]
+    fn a_reused_native_item_takes_its_entry_over_and_a_full_ledger_drops_its_oldest() {
+        let target = |path: &str| ContextNavigationTarget::parse(path).unwrap();
+        let runtime = AgentDocumentRuntimeId::new(9).unwrap();
+        let mut ledger = ledger(&[
+            (1, "https://example.test/a", 1),
+            (2, "https://example.test/b", 2),
+            (3, "https://example.test/c", 3),
+        ]);
+        ledger
+            .enroll_identity(identity(2), None, target("https://example.test/d"), runtime)
+            .unwrap();
+        assert_eq!(ledger.entries.len(), 2);
+        assert_eq!(ledger.cursor(), Some(1));
+        assert_eq!(
+            ledger.entries[1].target.as_url().as_str(),
+            "https://example.test/d"
+        );
+
+        for value in 10..10 + MAX_AGENT_HISTORY_ENTRIES {
+            ledger
+                .enroll_identity(
+                    identity(value),
+                    None,
+                    target("https://example.test/e"),
+                    runtime,
+                )
+                .unwrap();
+        }
+        assert_eq!(ledger.entries.len(), MAX_AGENT_HISTORY_ENTRIES);
+        assert_eq!(ledger.cursor(), Some(MAX_AGENT_HISTORY_ENTRIES - 1));
+        assert!(ledger
+            .authorize_back_identities(
+                identity(9 + MAX_AGENT_HISTORY_ENTRIES),
+                identity(8 + MAX_AGENT_HISTORY_ENTRIES)
+            )
+            .is_ok());
     }
 
     #[test]

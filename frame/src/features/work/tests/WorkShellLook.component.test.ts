@@ -59,12 +59,10 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
     objective.projection = structuredClone(projection);
     return true;
   });
-  vi.spyOn(objective, "plan").mockResolvedValue(null);
   const screen = await render(WorkEnvironmentWorkspace, {
     session: environment,
     tabs: [],
     spaceName: "Personal",
-    profileLabel: "Reader",
     aiEnabled: true,
     onopen: vi.fn(),
     onnewtab: vi.fn(),
@@ -99,7 +97,8 @@ test("the Work screen's own chrome, at rest and in use, in both themes", async (
   await shoot("works");
   await userEvent.keyboard("{Escape}");
   expect(screen.container.querySelector('[aria-label="Account"]')).toBeNull();
-  await screen.getByRole("button", { name: "Note", exact: true }).click();
+  await screen.getByRole("button", { name: "Blocks", exact: true }).click();
+  await page.getByRole("button", { name: /^Note/u }).click();
   await expect.element(screen.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
   await shoot("note");
   await userEvent.keyboard("{Escape}");

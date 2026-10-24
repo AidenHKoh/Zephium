@@ -4,10 +4,12 @@
   let {
     label,
     side = "right",
+    width = 288,
     onclose,
     children,
   }: {
     label: string;
+    width?: number;
     /** Which side of its anchor it opens on. */
     side?: "right" | "below";
     onclose: () => void;
@@ -35,6 +37,7 @@
 <div
   bind:this={root}
   class="popover nodrag nopan nowheel {side}"
+  style:inline-size={`${width}px`}
   role="dialog"
   aria-label={label}
   tabindex="-1"
@@ -52,7 +55,6 @@
   .popover {
     position: absolute;
     z-index: 5;
-    inline-size: 288px;
     padding: 14px;
     border-radius: var(--radius-control-large);
     background: var(--color-float);

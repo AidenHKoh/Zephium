@@ -179,6 +179,20 @@
     padding-inline-start: 20px;
   }
 
+  /* The reset strips every list's markers; a document's lists keep theirs. */
+  ul:not(.sections) {
+    list-style: disc;
+  }
+
+  ol {
+    list-style: decimal;
+  }
+
+  li::marker {
+    color: var(--color-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
   li :global(p:last-child) {
     margin-block-end: 2px;
   }

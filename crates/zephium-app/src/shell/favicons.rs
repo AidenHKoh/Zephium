@@ -55,8 +55,12 @@ pub(super) struct FaviconState {
     /// Revision each privileged surface currently holds for an origin.
     /// Interior mutability because the paths that reference icons take `&self`.
     pub(super) delivered: std::cell::RefCell<std::collections::HashMap<IconKey, String>>,
+    surface_profiles: std::cell::RefCell<std::collections::HashMap<IconSurface, ProfileId>>,
     /// References made since the last publish whose pixels the surface lacks.
     pub(super) undelivered: std::cell::RefCell<Vec<IconKey>>,
+    /// Profile each surface last heard an icon event for; its address lookups
+    /// follow that profile.
+    pub(super) announced: std::cell::RefCell<std::collections::HashMap<IconSurface, ProfileId>>,
     pub(super) icon_attempts: std::collections::HashMap<ItemId, IconAttempt>,
     pub(super) icon_load_completion_pending: std::collections::HashMap<ItemId, (ProfileId, String)>,
     pub(super) store_reads: std::collections::HashMap<ItemId, PendingFaviconStoreRead>,
@@ -112,6 +116,29 @@ impl Shell {
             };
             if seen.insert(origin.clone()) {
                 origins.push(origin);
+            }
+        }
+        // The switcher stacks the first tabs' icons of the other spaces too.
+        for other in self
+            .spaces
+            .of(profile)
+            .into_iter()
+            .filter(|other| *other != space)
+        {
+            for id in self.space_first_tabs(other) {
+                if origins.len() == MAX_FAVICON_BATCH_ORIGINS {
+                    break;
+                }
+                let origin = self
+                    .items
+                    .tab(id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .and_then(origin_of);
+                if let Some(origin) = origin {
+                    if seen.insert(origin.clone()) {
+                        origins.push(origin);
+                    }
+                }
             }
         }
         origins
@@ -597,6 +624,13 @@ impl Shell {
             Vec<zephium_ipc::FaviconEntry>,
         > = std::collections::HashMap::new();
         for key in pending {
+            if self
+                .windows
+                .focused()
+                .is_none_or(|window| window.profile != key.1)
+            {
+                continue;
+            }
             let Some(record) = self.favicons.icon_values.get(&(key.1, key.2.clone())) else {
                 continue;
             };
@@ -615,12 +649,36 @@ impl Shell {
         }
         drop(delivered);
         for ((surface, profile), entries) in grouped {
+            self.favicons
+                .announced
+                .borrow_mut()
+                .insert(surface, profile);
             (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
                 surface,
                 profile_id: profile.to_string(),
                 entries,
             }));
         }
+        self.announce_icon_owner();
+    }
+
+    /// The chrome surface follows the focused window's profile even when no
+    /// raster is due, so a returning profile reads its own icons.
+    pub(super) fn announce_icon_owner(&self) {
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return;
+        };
+        let mut announced = self.favicons.announced.borrow_mut();
+        if announced.get(&IconSurface::Chrome) == Some(&profile) {
+            return;
+        }
+        announced.insert(IconSurface::Chrome, profile);
+        drop(announced);
+        (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
+            surface: IconSurface::Chrome,
+            profile_id: profile.to_string(),
+            entries: Vec::new(),
+        }));
     }
 
     /// Names the cached icon for an origin and queues its pixels when the
@@ -631,6 +689,14 @@ impl Shell {
         profile: ProfileId,
         origin: &str,
     ) -> Option<zephium_ipc::IconRef> {
+        if self
+            .windows
+            .focused()
+            .is_none_or(|window| window.profile != profile)
+        {
+            return None;
+        }
+        self.select_icon_profile(surface, profile);
         let record = self
             .favicons
             .icon_values
@@ -648,6 +714,30 @@ impl Shell {
         })
     }
 
+    pub(super) fn select_icon_profile(&self, surface: IconSurface, profile: ProfileId) {
+        if self
+            .favicons
+            .surface_profiles
+            .borrow_mut()
+            .insert(surface, profile)
+            == Some(profile)
+        {
+            return;
+        }
+        // Each webview holds one profile's rasters. Returning to a profile must
+        // resend its pixels, even though their revisions have not changed.
+        self.forget_delivered_icons(surface);
+        self.favicons
+            .undelivered
+            .borrow_mut()
+            .retain(|(owner, candidate, _)| *owner != surface || *candidate == profile);
+        (self.emit)(Projection::Favicons(zephium_ipc::FaviconsView {
+            surface,
+            profile_id: profile.to_string(),
+            entries: Vec::new(),
+        }));
+    }
+
     /// A surface reattached with an empty raster cache, so nothing it
     /// previously received can be assumed present.
     pub(super) fn forget_delivered_icons(&self, surface: IconSurface) {
@@ -655,6 +745,7 @@ impl Shell {
             .delivered
             .borrow_mut()
             .retain(|(owner, _, _), _| *owner != surface);
+        self.favicons.announced.borrow_mut().remove(&surface);
     }
 
     pub(super) fn incognito_profile(&self, profile: ProfileId) -> bool {
@@ -664,6 +755,36 @@ impl Shell {
     }
 }
 
+/// The registrable domain of an origin, so `app.slack.com` and `slack.com`
+/// are one site. Hosts without a known suffix (`localhost`, addresses) match
+/// only themselves.
+fn site_of_origin(origin: &str) -> Option<String> {
+    let url = url::Url::parse(origin).ok()?;
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return Some(host);
+    }
+    Some(
+        psl::domain(host.as_bytes())
+            .filter(|domain| domain.suffix().is_known())
+            .and_then(|domain| std::str::from_utf8(domain.as_bytes()).ok())
+            .map_or_else(|| host.clone(), str::to_owned),
+    )
+}
+
+/// Another origin of the same site that already has an icon, newest first
+/// in `recent`. Used when a page has none of its own yet, so a redirect or
+/// login page keeps the site's icon instead of the generic globe.
+pub(super) fn same_site_icon_origin<'a>(
+    origin: &str,
+    recent: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let site = site_of_origin(origin)?;
+    recent
+        .filter(|candidate| *candidate != origin)
+        .find(|candidate| site_of_origin(candidate).as_deref() == Some(site.as_str()))
+}
+
 pub(super) fn origin_of(url: &url::Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
@@ -671,5 +792,44 @@ pub(super) fn origin_of(url: &url::Url) -> Option<String> {
     match url.origin() {
         url::Origin::Tuple(..) => Some(url.origin().ascii_serialization()),
         url::Origin::Opaque(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod same_site_tests {
+    use super::same_site_icon_origin;
+
+    #[test]
+    fn a_page_borrows_the_newest_icon_of_its_own_site_only() {
+        let recent = [
+            "https://example.org",
+            "https://slack.com",
+            "https://app.slack.com",
+        ];
+        assert_eq!(
+            same_site_icon_origin("https://zephiumdev.slack.com", recent.into_iter()),
+            Some("https://slack.com")
+        );
+        assert_eq!(
+            same_site_icon_origin("https://notslack.com", recent.into_iter()),
+            None
+        );
+        assert_eq!(
+            same_site_icon_origin("https://slack.com", ["https://slack.com"].into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn hosts_without_a_registrable_domain_match_only_themselves() {
+        let recent = ["http://127.0.0.2:3000", "http://localhost:8080"];
+        assert_eq!(
+            same_site_icon_origin("http://127.0.0.1:3000", recent.into_iter()),
+            None
+        );
+        assert_eq!(
+            same_site_icon_origin("http://localhost:3000", recent.into_iter()),
+            Some("http://localhost:8080")
+        );
     }
 }

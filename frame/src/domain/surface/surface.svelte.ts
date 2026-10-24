@@ -7,6 +7,9 @@ import { events } from "$shared/ipc/native-events";
 export type BrowserPage =
   "settings" | "extensions" | "history" | "downloads" | "work" | "tasks" | "notes" | "time";
 let page = $state<BrowserPage | null>(null);
+// The page a browser page was opened over, so closing it returns there: Settings
+// opened from Work gives the window back to Work, not to Browse.
+let underneath: BrowserPage | null = null;
 let error = $state(false);
 let generation = 0;
 let navigationEpoch = 0;
@@ -19,10 +22,11 @@ export const navigationFailed = () => error;
 async function initialize(epoch: number) {
   const listeners = await listenAll([
     events.browserReturn.listen(() => {
-      if (epoch === generation)
-        flushSync(() => {
-          page = null;
-        });
+      if (epoch !== generation) return;
+      underneath = null;
+      flushSync(() => {
+        page = null;
+      });
     }),
     events.uiCommand.listen(({ payload }) => {
       if (epoch !== generation) return;
@@ -47,6 +51,8 @@ async function initialize(epoch: number) {
             : undefined;
       if (confirmed !== undefined) {
         navigationEpoch++;
+        if (confirmed === null || confirmed === "work") underneath = null;
+        else if (page === "work") underneath = "work";
         flushSync(() => {
           error = false;
           page = confirmed;
@@ -88,6 +94,7 @@ export function dispose() {
   stop?.();
   stop = null;
   page = null;
+  underneath = null;
   error = false;
 }
 export async function open(next: BrowserPage | null) {
@@ -106,4 +113,9 @@ export async function open(next: BrowserPage | null) {
   } catch {
     fail();
   }
+}
+
+/** Closes the current page, returning to the one it was opened over. */
+export function close() {
+  return open(page === "work" ? null : underneath);
 }

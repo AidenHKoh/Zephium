@@ -110,7 +110,8 @@
     height: var(--dock-tile);
     border: 0;
     border-radius: var(--radius-card);
-    background: var(--color-card);
+    background: var(--color-tile);
+    box-shadow: var(--shine), var(--shadow-tile);
     cursor: default;
     transition:
       background-color var(--motion-fast) var(--ease-out),
@@ -119,7 +120,7 @@
   }
 
   .essential > button:hover {
-    background: var(--color-fill-hover);
+    background: var(--color-tile-hover);
   }
 
   .essential > button:active {

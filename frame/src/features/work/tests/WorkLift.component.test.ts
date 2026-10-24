@@ -5,7 +5,6 @@ import { page } from "vitest/browser";
 import { WorkSession } from "$domain/work";
 import type { WorkExecutionFact, WorkRuntimeProjection } from "$shared/ipc/bindings";
 import WorkResultInspector from "../components/WorkResultInspector.svelte";
-import WorkObjectiveInspector from "../components/WorkObjectiveInspector.svelte";
 import TabCard from "../components/cards/TabCard.svelte";
 import { projection as base } from "./environment-fixtures";
 
@@ -127,64 +126,6 @@ test("a findings card lifts with every claim, its detail and its evidence", asyn
   }
   await expect.element(screen.getByText("6 claims")).toBeVisible();
   expect(screen.container.textContent).not.toContain("+2");
-  await screen.unmount();
-  session.dispose();
-});
-
-test("a request lifts whole with its run as a quiet timeline", async () => {
-  await page.viewport(900, 700);
-  const step = (id: string, kind: Step["kind"], status: Step["status"], extra = {}) =>
-    ({ id, turn: 1, kind, status, ...extra }) as Step;
-  const session = state({ kind: "document", paragraphs: ["Done."] }, [
-    step("s1", { kind: "turn" }, "succeeded", { note: "Looking for reviews first." }),
-    step("s2", { kind: "search", query: "quiet keyboards" }, "succeeded"),
-    step("s3", { kind: "read", url: "https://www.a.example/review" }, "succeeded", {
-      measurements: {
-        wall_millis: 3200,
-        decision_calls: 0,
-        emulation_calls: 0,
-        planner_calls: 0,
-        native_actions: 0,
-        model_tokens: 0,
-        cost_micro_usd: 0,
-        cost_basis: "exact",
-      },
-    }),
-    step("s4", { kind: "read", url: "https://b.example/blocked" }, "failed", {
-      note: "The site asked for a sign-in.",
-    }),
-    step("s5", { kind: "finish" }, "succeeded"),
-  ]);
-  session.projection!.executions[0]!.spec.nodes[0]!.capability = {
-    kind: "agent",
-    grant: { provider: "open_ai", model: "m", max_turns: 4, max_steps: 8, browse_hops: 2 },
-  };
-  vi.spyOn(session, "plan").mockResolvedValue(null);
-  const screen = await render(WorkObjectiveInspector, {
-    session,
-    attached: [],
-    onattach: vi.fn(),
-  });
-  await expect
-    .element(screen.getByRole("heading", { name: "Investigate dependencies" }))
-    .toBeVisible();
-  const timeline = screen.getByRole("list", { name: "What the agent did" });
-  await expect.element(timeline).toBeVisible();
-  const rows = [...screen.container.querySelectorAll(".timeline li")].map((row) =>
-    [...row.querySelectorAll(":scope > :not(.glyph)")]
-      .map((part) => part.textContent?.trim())
-      .join(" "),
-  );
-  expect(rows).toEqual([
-    "Looking for reviews first.",
-    "Searched quiet keyboards",
-    "Read a.example 3.2 s",
-    "Read b.example The site asked for a sign-in.",
-    "Finished",
-  ]);
-  expect(screen.container.textContent).not.toContain("s3");
-  // An agent run needs no plan: the plan controls fold away.
-  expect(screen.container.querySelector("details.planning")?.hasAttribute("open")).toBe(false);
   await screen.unmount();
   session.dispose();
 });

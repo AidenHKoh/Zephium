@@ -4,7 +4,10 @@ import type {
   WorkHumanChanged,
   WorkDecisionPreferenceChanged,
   WorkModelsChanged,
+  AccountChanged,
   PanelState,
+  PageAssistChanged,
+  ProfilesView,
   FaviconsView,
   NoteOpenRequested,
   NoteChanges,
@@ -27,6 +30,9 @@ import type {
   SearchChanged,
   TabChanged,
   UiCommand,
+  VoiceChanged,
+  VoiceLevels,
+  SwipeScroll,
   WebExtensionAccessRequested,
 } from "./bindings";
 
@@ -53,6 +59,8 @@ export const nativeEventNames = {
   workHumanChanged: "zephium:work-human-changed",
   workDecisionPreferenceChanged: "zephium:work-decision-preference-changed",
   workModelsChanged: "zephium:work-models-changed",
+  pageAssistChanged: "zephium:page-assist-changed",
+  accountChanged: "zephium:account-changed",
   panelState: "zephium:panel-state",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
@@ -82,6 +90,10 @@ export const nativeEventNames = {
   runtimeStatusChanged: "zephium:runtime-status",
   blockerStatusChanged: "zephium:blocker-status",
   focusChanged: "zephium:focus",
+  voiceChanged: "zephium:voice-changed",
+  voiceLevels: "zephium:voice-levels",
+  swipeScroll: "zephium:swipe",
+  profilesChanged: "zephium:profiles",
 } as const;
 
 export const events = {
@@ -94,6 +106,8 @@ export const events = {
     nativeEventNames.workDecisionPreferenceChanged,
   ),
   workModelsChanged: scopedEvent<WorkModelsChanged>(nativeEventNames.workModelsChanged),
+  pageAssistChanged: scopedEvent<PageAssistChanged>(nativeEventNames.pageAssistChanged),
+  accountChanged: scopedEvent<AccountChanged>(nativeEventNames.accountChanged),
   favicons: scopedEvent<FaviconsView>(nativeEventNames.favicons),
   noteOpenRequested: scopedEvent<NoteOpenRequested>(nativeEventNames.noteOpenRequested),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
@@ -134,4 +148,8 @@ export const events = {
   runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>(nativeEventNames.runtimeStatusChanged),
   blockerStatusChanged: scopedEvent<BlockerStatusChanged>(nativeEventNames.blockerStatusChanged),
   focusChanged: scopedEvent<FocusChanged>(nativeEventNames.focusChanged),
+  voiceChanged: scopedEvent<VoiceChanged>(nativeEventNames.voiceChanged),
+  voiceLevels: scopedEvent<VoiceLevels>(nativeEventNames.voiceLevels),
+  swipeScroll: scopedEvent<SwipeScroll>(nativeEventNames.swipeScroll),
+  profilesChanged: scopedEvent<ProfilesView>(nativeEventNames.profilesChanged),
 };
