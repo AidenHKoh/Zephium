@@ -67,6 +67,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Zephium",
+    "copyright": "Copyright © 2026 Zephium",
+    "category": "Productivity",
+    "shortDescription": "A fast, private browser with a built-in place to get work done.",
+    "homepage": "https://zephium.app",
     "license": "MPL-2.0 AND CC-BY-SA-3.0",
     "resources": {
       "../LICENSE": "licenses/Zephium-MPL-2.0.txt",
