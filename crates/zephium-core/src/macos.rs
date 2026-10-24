@@ -62,14 +62,16 @@ pub const TAHOE_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/149
 pub const SEQUOIA_SECURITY_SOURCE_URL: &str = "https://support.apple.com/en-us/149229";
 
 /// The last UTC date on which CI may accept this review without an update.
-// Reviewed against Apple's security releases on 2026-10-06. Safari 27
-// (2026-09-14, Sequoia and Tahoe, four WebKit CVEs) is now the recommended
-// Safari there; macOS 26.7.1, 15.8.1 (2026-09-28) and 27.0.1 (no published
-// CVEs) are the newest system releases. Sonoma got neither Safari 27 nor a
-// September update; it stays admitted on Safari 26.6.1.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-13";
-/// 2026-10-14T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_791_936_000;
+// Reviewed against Apple's security releases on 2026-10-24: nothing newer
+// than 2026-09-28 exists for macOS or Safari (the only later row is iOS 27.1
+// for iPhone Duo, 2026-10-23, no macOS counterpart). Safari 27 (2026-09-14,
+// Sequoia and Tahoe, four WebKit CVEs) is the recommended Safari there;
+// macOS 26.7.1, 15.8.1 (2026-09-28) and 27.0.1 (no published CVEs) are the
+// newest system releases. Sonoma got neither Safari 27 nor a September
+// update; it stays admitted on Safari 26.6.1.
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-10-31";
+/// 2026-11-01T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_793_491_200;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProductVersion([u32; 3]);
