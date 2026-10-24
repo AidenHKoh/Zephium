@@ -29,14 +29,33 @@
     return dark && site.mark.dark ? site.mark.dark : site.mark.light;
   }
 
+  /** Where the site's tile is drawn, once the projection that adds it has
+   *  arrived: it can follow the operation's answer by a few frames, and a
+   *  mark thrown before then has nowhere to land. */
+  async function landed(site: string): Promise<DOMRect | null> {
+    const until = performance.now() + 700;
+    while (performance.now() < until) {
+      if (kept.has(site)) {
+        await tick();
+        return landing(site);
+      }
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    return null;
+  }
+
   async function toggle(site: Site, plate: HTMLElement) {
     if (pending.has(site.id)) return;
-    const existing = kept.get(site.id);
-    if (existing) {
-      tabs.close(existing);
+    pending.add(site.id);
+    if (kept.has(site.id)) {
+      // Refused, the site simply stays kept, and its plate says so.
+      try {
+        await tabs.releaseSite(site.id);
+      } finally {
+        pending.delete(site.id);
+      }
       return;
     }
-    pending.add(site.id);
     const from = plate.querySelector("img")?.getBoundingClientRect() ?? null;
     try {
       const result = await tabs.keepSite(site.id);
@@ -44,9 +63,7 @@
         onfailed(site.name);
         return;
       }
-      // The projection that draws the new tile arrives with the result.
-      await tick();
-      const to = landing(site.id);
+      const to = await landed(site.id);
       const host = flights();
       if (from && to && host && !reducedMotion()) void throwMark(host, source(site), from, to);
     } finally {

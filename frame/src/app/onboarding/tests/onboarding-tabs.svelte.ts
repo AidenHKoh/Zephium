@@ -5,7 +5,7 @@ import { emitNativeEvent } from "$shared/testing/native-events";
 /**
  * A tabs projection that behaves as native does for onboarding: keeping a
  * catalog site adds an unloaded Essentials tab and delivers the site's seeded
- * raster, closing one removes it.
+ * raster, closing one keeps it, and letting one go removes it.
  */
 const URLS: Record<string, string> = {
   slack: "https://app.slack.com/client",
@@ -25,6 +25,9 @@ const open = ["New Tab"].map((title, index) =>
 let kept = $state<TabView[]>([]);
 let name = $state("Personal");
 let next = 0;
+// The tab the window shows: the new tab of a fresh profile, or a page.
+let active = $state<TabView | undefined>(open[0]);
+let opened = 0;
 
 const node = (id: string, section: "favorites" | "today"): SidebarNodeView => ({
   id,
@@ -58,7 +61,16 @@ export const fakeTabs = {
     ...open.map((tab) => node(tab.id, "today")),
   ],
   activeId: () => "t0",
+  activeTab: () => active,
+  open() {
+    opened++;
+  },
+  opened: () => opened,
+  showPage(url: string) {
+    active = tabFixture({ id: "t9", title: "Page", url, icon: null });
+  },
   activeSpaceId: () => "space",
+  activeSpace: () => ({ id: "space", name: "Personal", icon: null, color: 0 }),
   splitGroup: () => null,
   dropTab() {},
   async keepSite(site: string) {
@@ -66,14 +78,24 @@ export const fakeTabs = {
     if (!url) return { outcome: "rejected" as const, disposition: null };
     const origin = url.split("/").slice(0, 3).join("/");
     await seed(origin, site);
-    kept = [
-      ...kept,
-      tabFixture({ id: `k${next++}`, title: site, url, icon: { origin, revision: site } }),
-    ];
+    // As native can: the answer first, the projection that draws the site a
+    // few frames after it.
+    const tab = tabFixture({
+      id: `k${next++}`,
+      title: site,
+      url,
+      icon: { origin, revision: site },
+    });
+    setTimeout(() => (kept = [...kept, tab]), 60);
     return { outcome: "applied" as const, disposition: null };
   },
-  close(id: string) {
-    kept = kept.filter((tab) => tab.id !== id);
+  // As native: closing an Essential ends its page and keeps the site.
+  close() {},
+  async releaseSite(site: string) {
+    const url = URLS[site];
+    if (!url) return { outcome: "rejected" as const, disposition: null };
+    kept = kept.filter((tab) => tab.url !== url);
+    return { outcome: "applied" as const, disposition: null };
   },
   async renameProfile(next: string) {
     name = next;
@@ -83,5 +105,7 @@ export const fakeTabs = {
   reset() {
     kept = [];
     name = "Personal";
+    active = open[0];
+    opened = 0;
   },
 };

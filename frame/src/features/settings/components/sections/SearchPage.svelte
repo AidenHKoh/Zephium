@@ -63,7 +63,7 @@
   <SettingsRow
     settingId="search.suggestions"
     title={m.search_suggestions_label()}
-    description={engine === "duckduckgo"
+    description={engine !== "custom"
       ? m.search_suggestions_description()
       : m.search_suggestions_unavailable()}
   >

@@ -60,6 +60,32 @@ impl SearchEngine {
         navigation::is_allowed(&url).then_some(url)
     }
 
+    /// The engine's own suggestion endpoint, which answers in the OpenSearch
+    /// JSON form browsers read (`["query", ["suggestion", ...]]`). A custom
+    /// engine names none.
+    pub fn suggestions(self, query: &str) -> Option<Url> {
+        let (base, key, extra): (&str, &str, &[(&str, &str)]) = match self {
+            Self::Google => (
+                "https://www.google.com/complete/search",
+                "q",
+                &[("client", "firefox"), ("ie", "utf-8"), ("oe", "utf-8")],
+            ),
+            Self::DuckDuckGo => ("https://duckduckgo.com/ac/", "q", &[("type", "list")]),
+            Self::Bing => ("https://www.bing.com/osjson.aspx", "query", &[]),
+            Self::Brave => ("https://search.brave.com/api/suggest", "q", &[]),
+            Self::Custom => return None,
+        };
+        let mut url = Url::parse(base).ok()?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair(key, query.trim());
+            for (name, value) in extra {
+                pairs.append_pair(name, value);
+            }
+        }
+        Some(url)
+    }
+
     pub fn configured_search(self, query: &str, template: &str) -> Option<Url> {
         if self != Self::Custom {
             return self.search(query);
@@ -269,6 +295,20 @@ pub fn match_quality(query: &str, title: &str, address: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_named_engine_suggests_over_https_and_a_custom_one_does_not() {
+        for engine in [
+            SearchEngine::Google,
+            SearchEngine::DuckDuckGo,
+            SearchEngine::Bing,
+            SearchEngine::Brave,
+        ] {
+            let url = engine.suggestions(" rust book ").expect("named engine");
+            assert_eq!(url.scheme(), "https");
+            assert!(url.query_pairs().any(|(_, value)| value == "rust book"));
+        }
+        assert!(SearchEngine::Custom.suggestions("rust").is_none());
+    }
     #[test]
     fn engines_encode_queries_and_preserve_navigation_policy() {
         for engine in [

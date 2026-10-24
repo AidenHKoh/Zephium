@@ -128,6 +128,30 @@ fn a_catalog_site_is_kept_unloaded_with_its_mark_and_only_once() {
 }
 
 #[test]
+fn a_kept_site_is_let_go_whole_where_closing_would_keep_it() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle_operation(Command::KeepSite("slack".into()));
+    shell.handle_operation(Command::KeepSite("notion".into()));
+    assert_eq!(kept(&shell).len(), 2);
+
+    let released = shell.handle_operation(Command::ReleaseSite("slack".into()));
+    assert!(matches!(
+        released.outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    let sites = kept(&shell);
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].1, "https://www.notion.so/");
+
+    let again = shell.handle_operation(Command::ReleaseSite("slack".into()));
+    assert_eq!(again.outcome, OperationOutcome::NoOp);
+    let unknown = shell.handle_operation(Command::ReleaseSite("SLACK".into()));
+    assert_eq!(unknown.outcome, OperationOutcome::Rejected);
+    assert_eq!(kept(&shell).len(), 1);
+}
+
+#[test]
 fn every_catalog_site_is_a_valid_page_with_a_full_mark() {
     for site in crate::shell::kept_sites::KEPT_SITES {
         let url = url::Url::parse(site.url).unwrap();

@@ -760,6 +760,9 @@ impl Shell {
             Command::KeepSite(id) => {
                 let _ = self.operation_keep_site(&id);
             }
+            Command::ReleaseSite(id) => {
+                let _ = self.operation_release_site(&id);
+            }
             Command::RenameFocusedProfile(name) => {
                 let _ = self.operation_rename_focused_profile(&name);
             }

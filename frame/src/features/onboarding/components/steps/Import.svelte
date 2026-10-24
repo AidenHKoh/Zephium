@@ -2,6 +2,7 @@
   import { Globe02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import { browserImport, type ImportKind } from "$domain/browser-import";
+  import { preferences } from "$domain/preferences";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
   import { BROWSERS } from "../../lib/catalog";
@@ -48,6 +49,43 @@
     );
   });
 
+  // The engines a search can go to without a URL of one's own; a custom
+  // engine stays in Settings.
+  const ENGINES = [
+    ["google", "Google"],
+    ["duckduckgo", "DuckDuckGo"],
+    ["bing", "Bing"],
+    ["brave", "Brave"],
+  ] as const;
+  let engine = $derived(preferences.value("search.engine"));
+  let at = $derived(ENGINES.findIndex(([id]) => id === engine));
+  // Each place is as wide as its name; the thumb takes the chosen one's
+  // measure, read again whenever the track's size changes.
+  let track = $state<HTMLElement>();
+  let places = $state<HTMLButtonElement[]>([]);
+  let thumb = $state<{ x: number; w: number } | null>(null);
+  $effect(() => {
+    const chosen = places[at];
+    if (!track || !chosen) {
+      thumb = null;
+      return;
+    }
+    const measure = () => (thumb = { x: chosen.offsetLeft, w: chosen.offsetWidth });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(track);
+    return () => observer.disconnect();
+  });
+
+  // Why the chosen browser cannot be read yet, if it cannot.
+  let hint = $derived.by(() => {
+    if (!source || job) return null;
+    if (!available) return m.onb_import_unavailable();
+    if (source.running) return m.onb_import_quit({ browser: source.name });
+    if (source.needsPermission) return m.onb_import_permission({ browser: source.name });
+    return null;
+  });
+
   function toggle(kind: ImportKind) {
     kinds = kinds.includes(kind)
       ? kinds.filter((candidate) => candidate !== kind)
@@ -63,6 +101,7 @@
 />
 
 <div class="import">
+  <p class="label" aria-hidden="true">{m.onb_import_from()}</p>
   <div class="browsers" role="radiogroup" aria-label={m.onb_import_from()}>
     {#each sources as candidate, index (candidate.id)}
       <button
@@ -142,15 +181,29 @@
   {#if nothingFound}
     <p class="note">{m.onb_import_none()}</p>
   {/if}
-  {#if source && !job}
-    <p class="note">
-      {#if !available}{m.onb_import_unavailable()}{:else if source.running}{m.onb_import_quit({
-          browser: source.name,
-        })}{:else if source.needsPermission}{m.onb_import_permission({
-          browser: source.name,
-        })}{/if}
-    </p>
-  {/if}
+  {#if hint}<p class="note">{hint}</p>{/if}
+
+  <div class="search">
+    <p class="label" aria-hidden="true">{m.onb_search_with()}</p>
+    <div class="engines" role="radiogroup" aria-label={m.onb_search_with()} bind:this={track}>
+      {#if thumb}<span
+          class="thumb"
+          aria-hidden="true"
+          style:width={`${thumb.w}px`}
+          style:transform={`translateX(${thumb.x}px)`}
+        ></span>{/if}
+      {#each ENGINES as [id, label], index (id)}
+        <button
+          bind:this={places[index]}
+          type="button"
+          role="radio"
+          aria-checked={engine === id}
+          disabled={preferences.saving()}
+          onclick={() => void preferences.set("search.engine", id)}>{label}</button
+        >
+      {/each}
+    </div>
+  </div>
 </div>
 
 <style>
@@ -158,7 +211,80 @@
     display: grid;
     justify-items: start;
     gap: 26px;
-    inline-size: 300px;
+    inline-size: 320px;
+  }
+
+  .label {
+    margin: 0 0 -10px;
+    color: var(--color-faint);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .search {
+    display: grid;
+    gap: 14px;
+    inline-size: 100%;
+    margin-block-start: 14px;
+    animation: lift 640ms var(--ease-emphasized) 420ms backwards;
+  }
+
+  .search .label {
+    margin: 0;
+  }
+
+  /* One control, four places, and a raised thumb that slides between
+     them. */
+  .engines {
+    position: relative;
+    display: flex;
+    padding: 3px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-fill);
+  }
+
+  /* Placed from the track's left edge in its own pixels, which do not
+     mirror. */
+  .thumb {
+    position: absolute;
+    inset-block: 3px;
+    left: 0;
+    border-radius: var(--radius-capsule);
+    background: var(--color-raise-active);
+    box-shadow: var(--shadow-raise);
+    transition:
+      transform var(--motion-slow) var(--ease-emphasized),
+      width var(--motion-slow) var(--ease-emphasized);
+  }
+
+  .engines button {
+    position: relative;
+    flex: 1 1 auto;
+    block-size: 30px;
+    padding: 0 13px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: none;
+    color: var(--color-faint);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: default;
+    transition: color var(--motion-fast) var(--ease-out);
+  }
+
+  .engines button:hover {
+    color: var(--color-muted);
+  }
+
+  .engines button[aria-checked="true"] {
+    color: var(--color-text);
+  }
+
+  .engines button:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
   }
 
   .browsers {
@@ -319,8 +445,13 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .browser {
+    .browser,
+    .search {
       animation: none;
+    }
+
+    .thumb {
+      transition: none;
     }
   }
 </style>

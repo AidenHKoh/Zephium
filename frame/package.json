@@ -17,7 +17,9 @@
     "stylelint": "stylelint \"src/**/*.{css,svelte}\"",
     "knip": "knip",
     "check:styles": "node scripts/check-styles.mjs",
-    "kept-site-rasters": "node scripts/kept-site-rasters.mjs"
+    "kept-site-rasters": "node scripts/kept-site-rasters.mjs",
+    "bake-sky": "node scripts/bake-sky.mjs",
+    "installer-art": "node scripts/render-installer-art.mjs"
   },
   "dependencies": {
     "@hugeicons/svelte": "1.1.4",

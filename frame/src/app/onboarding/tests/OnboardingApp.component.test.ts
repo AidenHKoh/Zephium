@@ -13,7 +13,6 @@ const native = vi.hoisted(() => ({
   intro: 0,
   ready: 0,
   finished: 0,
-  then: undefined as string | null | undefined,
   endpoint: null as string | null,
   opens: true,
   material: "none" as Material,
@@ -33,9 +32,8 @@ vi.mock("$shared/ipc/bindings", async () => {
       native.ready++;
       return true;
     },
-    onboardingFinish: async (then: string | null) => {
+    onboardingFinish: async () => {
       native.finished++;
-      native.then = then;
       return native.opens;
     },
     accountGet: async () =>
@@ -115,7 +113,6 @@ beforeEach(async () => {
   native.intro = 0;
   native.ready = 0;
   native.finished = 0;
-  native.then = undefined;
   native.endpoint = null;
   native.opens = true;
   native.material = "none";
@@ -179,19 +176,17 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   // Nothing of the formation is left running.
   await expect.poll(() => document.querySelector("canvas.air"), { timeout: 4000 }).toBeNull();
 
+  // Welcome pulls back from the new tab's sky to the window it belongs to.
   await begin.click();
-  const field = page.getByRole("textbox", { name: "Your name" });
-  await expect.element(field).toBeVisible();
-  await field.fill("Alex Rivera");
-  await capture("03-you");
-
-  await next();
   await expect
     .element(page.getByRole("heading", { name: "Bring your web with you." }))
     .toBeVisible();
-  // Saved, and shown nowhere: no greeting is turned on.
-  await expect.poll(() => fakeTabs.profile().name).toBe("Alex Rivera");
+  // No greeting is turned on, and the name is left as it was.
   expect(native.settings["ui.newtab-greeting"]).toBeUndefined();
+  expect(fakeTabs.profile().name).toBe("Personal");
+  // The engine chosen beside the import is the one search uses.
+  await page.getByRole("radio", { name: "Google" }).click();
+  await expect.poll(() => native.settings["search.engine"]).toBe("google");
   await page.getByRole("radio", { name: "Arc" }).click();
   await capture("04-import");
   await page.getByRole("button", { name: "Import", exact: true }).click();
@@ -220,14 +215,28 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   await capture("06-imported");
 
   await next();
+  // Every site kept is thrown into the dock, not only the first.
+  let thrown = 0;
+  const watch = new MutationObserver((changes) => {
+    for (const change of changes)
+      for (const added of change.addedNodes)
+        if (added instanceof HTMLElement && added.classList.contains("flight")) thrown++;
+  });
+  watch.observe(document.body, { childList: true, subtree: true });
   for (const site of ["Slack", "Notion", "Linear", "Figma", "GitHub"]) {
     await page.getByRole("button", { name: `Keep ${site}` }).click();
     await pause(160);
   }
-  expect(fakeTabs.sidebarNodes().filter((node) => node.section === "favorites")).toHaveLength(5);
+  await expect
+    .poll(() => fakeTabs.sidebarNodes().filter((node) => node.section === "favorites").length)
+    .toBe(5);
+  await expect.poll(() => thrown).toBe(5);
+  watch.disconnect();
   await capture("07-essentials");
+  // A second press lets the site go: closing an Essential would keep it.
   await page.getByRole("button", { name: "Remove GitHub" }).click();
   await expect.poll(() => fakeTabs.sidebarNodes().length).toBe(5);
+  await expect.element(page.getByRole("button", { name: "Keep GitHub" })).toBeVisible();
 
   await next();
   await expect
@@ -269,9 +278,10 @@ test("the first run, from the name in the air to the browser", { timeout: 180_00
   // nothing of onboarding stays mounted.
   await page.getByRole("button", { name: /Start browsing/u }).click();
   await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
-  // The running server is connected here, so nothing needs opening after.
+  // The running server is connected here, and the browser opens on the new
+  // tab the scene ended on, with no other tab opened for it.
   expect(native.endpoint).toBe("http://localhost:11434/v1");
-  expect(native.then).toBeNull();
+  expect(fakeTabs.opened()).toBe(0);
   await expect.poll(() => document.querySelector(".onboarding")).toBeNull();
 });
 
@@ -314,15 +324,28 @@ test("skipping finishes onboarding from anywhere", { timeout: 20_000 }, async ()
   await expect.poll(() => document.querySelector(".onboarding")).toBeNull();
 });
 
-test("Enter moves on, and an empty name is not saved", { timeout: 20_000 }, async () => {
+test("Enter moves on", { timeout: 20_000 }, async () => {
   document.documentElement.dataset.theme = "dark";
   render(OnboardingApp);
   await formed();
   await userEvent.keyboard("{Enter}");
-  await expect.element(page.getByRole("textbox", { name: "Your name" })).toHaveFocus();
-  await userEvent.keyboard("{Enter}");
   await expect
     .element(page.getByRole("heading", { name: "Bring your web with you." }))
     .toBeVisible();
-  expect(fakeTabs.profile().name).toBe("Personal");
+  await userEvent.keyboard("{Enter}");
+  await expect
+    .element(page.getByRole("heading", { name: "Keep what you use every day." }))
+    .toBeVisible();
+});
+
+test("whatever was chosen, the browser opens on a new tab", { timeout: 30_000 }, async () => {
+  document.documentElement.dataset.theme = "dark";
+  // A profile from before, left on a page.
+  fakeTabs.showPage("https://example.com/");
+  render(OnboardingApp);
+  await formed();
+  await page.getByRole("button", { name: /Get started/u }).click();
+  await page.getByRole("button", { name: "Skip setup" }).click();
+  await expect.poll(() => native.finished, { timeout: 4000 }).toBe(1);
+  expect(fakeTabs.opened()).toBe(1);
 });

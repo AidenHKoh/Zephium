@@ -225,7 +225,8 @@ test("Escape puts the list away, then clears the field", async () => {
   expect(screen.container.querySelector(".sheet")).not.toBeNull();
 
   await userEvent.keyboard("{Escape}");
-  expect(screen.container.querySelector(".sheet")).toBeNull();
+  // It fades on its way out, and is gone once it has.
+  await expect.poll(() => screen.container.querySelector(".sheet")).toBeNull();
   await expect.element(input).toHaveValue("rust");
 
   await userEvent.keyboard("{Escape}");

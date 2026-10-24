@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
+  import { fade } from "svelte/transition";
+  import { reducedMotion } from "$shared/lib/motion";
   import { Cancel01Icon } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import SearchField from "$shared/ui/SearchField";
@@ -111,6 +113,7 @@
   bind:this={root}
   class="dock"
   data-active={active}
+  data-open={visible}
   style:--available={`${available}px`}
   onfocusout={(event) => {
     if (event.relatedTarget instanceof Node && root.contains(event.relatedTarget)) return;
@@ -169,6 +172,7 @@
       class="sheet"
       data-measured={measured}
       style:block-size={contentHeight ? `min(${contentHeight}px, var(--available))` : undefined}
+      out:fade={{ duration: reducedMotion() ? 0 : 120 }}
     >
       <div class="scroll">
         <div class="content" bind:this={content}>
@@ -263,17 +267,32 @@
       inset 0 0 0 1px var(--color-border),
       var(--shadow-float);
     transform-origin: 50% 0;
-    animation: sheet-in var(--motion-base) var(--ease-emphasized) both;
+    animation: sheet-in 340ms var(--ease-emphasized) backwards;
+
+    /* Its own layer while it shows: as it grows and settles, the sky under
+       it is uncovered from what is already painted, never painted again. */
+    will-change: transform;
   }
 
+  /* The height goes straight for each answer as it lands, longer or
+     shorter, in one long settle that picks up from wherever it is when the
+     next answer comes mid-way. */
   .sheet[data-measured="true"] {
-    transition: block-size var(--motion-fast) var(--ease-out);
+    transition: block-size var(--motion-slow) var(--ease-emphasized);
   }
 
+  /* It unfolds out of the field: the edge travels down from the top while
+     the sheet settles into place. The clip reaches past the sides and foot
+     so its shadow is never cut, and only the opening is animated. */
   @keyframes sheet-in {
     from {
       opacity: 0;
-      transform: translateY(-6px) scale(0.985);
+      transform: translateY(-6px);
+      clip-path: inset(0 -48px calc(100% - 12px) -48px);
+    }
+
+    to {
+      clip-path: inset(0 -48px -48px -48px);
     }
   }
 
@@ -324,6 +343,14 @@
     .sheet[data-measured="true"] {
       transition: none;
     }
+  }
+
+  :global(:root[data-reduce-motion="true"]) .sheet {
+    animation: none;
+  }
+
+  :global(:root[data-reduce-motion="true"]) .sheet[data-measured="true"] {
+    transition: none;
   }
 
   @media (forced-colors: active) {

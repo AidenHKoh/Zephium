@@ -95,7 +95,10 @@
       {#if headed}<div id={`${listId}-${at}`} class="heading" role="presentation">
           {sectionLabels[group.section]()}
         </div>{/if}
-      {#each group.rows as row (row.id)}
+      <!-- The row searching for what is typed changes its address with every
+           key; it is held as one row whose words change, so typing reads as
+           the line updating rather than a new line each time. -->
+      {#each group.rows as row (row.result?.kind === "search" ? `search:${rows.indexOf(row)}` : row.id)}
         {@const index = rows.indexOf(row)}
         <ResultRow
           id={`${listId}-option-${index}`}

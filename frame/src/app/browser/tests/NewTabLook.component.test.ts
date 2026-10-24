@@ -88,12 +88,20 @@ const settled = () =>
     document.getAnimations().map((animation) => animation.finished.catch(() => undefined)),
   );
 
+/** The sky this theme asks for is decoded and showing. */
+async function skied(screen: Screen) {
+  await expect
+    .poll(() => screen.container.querySelector('.newtab[data-ready="true"]'), { timeout: 8000 })
+    .toBeTruthy();
+  await settled();
+}
+
 async function capture(screen: Screen, name: string) {
   await settled();
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     screen.container.style.background = "var(--color-canvas)";
-    await settled();
+    await skied(screen);
     await page
       .elementLocator(screen.container)
       .screenshot({ path: `../../../../../target/newtab/${name}-${theme}.png` });
@@ -108,30 +116,22 @@ const result = (title: string, kind: SearchResult["kind"] = "tab"): SearchResult
   action: { type: "OpenUrl", url: `https://rust-lang.org/${encodeURIComponent(title)}` },
 });
 
-test("the field hangs from the top, the name and the day are cut into the page", async () => {
+test("the field hangs from the top, and the name and the day stand in the sky", async () => {
   const screen = await setup({ "ui.newtab-clock-format": "12h", "focus.goal": "240" });
+  await skied(screen);
   await expect.element(screen.getByRole("img", { name: "Zephium" })).toBeVisible();
-  await expect.element(screen.getByText("2:32 PM")).toBeVisible();
+  expect(screen.container.querySelector(".time")!.textContent).toBe("2:32 PM");
   await expect.element(screen.getByText("Monday, September 28")).toBeVisible();
   await expect.element(screen.getByRole("combobox")).toHaveFocus();
 
   const pane = screen.container.querySelector(".newtab")!.getBoundingClientRect();
   const field = screen.container.querySelector(".ui-search")!.getBoundingClientRect();
   expect(field.top - pane.top).toBeLessThan(12);
-  const ground = screen.container.querySelector(".ground .page")!.getAttribute("d")!;
-  expect(ground).toContain("A18 18 0 0 0");
-
-  // The ground cuts the name's letters out exactly where the name stands.
-  const mark = screen.getByRole("img", { name: "Zephium" }).element().getBoundingClientRect();
-  const cut = screen.container.querySelector(".ground mask")!;
-  expect(Number(cut.getAttribute("x")) + 2).toBeCloseTo(mark.left - pane.left, 0);
-  expect(Number(cut.getAttribute("y")) + 2).toBeCloseTo(mark.top - pane.top, 0);
-  expect(Number(cut.getAttribute("width")) - 4).toBeCloseTo(mark.width, 0);
-  // And a round pane for the page's control; the figures are cards
-  // along the foot.
-  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(1);
-  const card = screen.container.querySelector(".tile")!.getBoundingClientRect();
-  expect(pane.bottom - card.bottom).toBe(28);
+  // The page is the sky less the notch the field hangs in.
+  const ground = screen.container.querySelector<HTMLElement>(".page")!;
+  expect(ground.style.clipPath).toMatch(/A ?18 18 0 0 0/u);
+  const sky = screen.container.querySelector<HTMLElement>(".sky")!;
+  expect(sky.style.backgroundImage).toMatch(/sky-day|sky-night/u);
 
   // The figures: what the blocker stopped today, focus time against the
   // day's goal, and what is due, read from Tasks with the overdue one.
@@ -140,19 +140,20 @@ test("the field hangs from the top, the name and the day are cut into the page",
   await expect.element(screen.getByRole("meter")).toHaveAttribute("aria-valuenow", "134");
   const due = screen.getByRole("button", { name: /Due today 3 1 overdue/u });
   await expect.element(due).toBeVisible();
+  expect(pane.bottom - due.element().getBoundingClientRect().bottom).toBe(24);
   await due.click();
   expect(ontasks).toHaveBeenCalledOnce();
   await expect.element(screen.getByRole("button", { name: "Customize New Tab" })).toBeVisible();
   await capture(screen, "rest");
 
-  // Over a material the openings are the window itself: a stand-in
-  // wallpaper behind the pane shows through them and nowhere else.
+  // Over a material the pane is still the sky; only the window around it
+  // shows the desktop.
   document.documentElement.dataset.material = "liquid_glass";
   for (const theme of ["dark", "light"]) {
     document.documentElement.dataset.theme = theme;
     screen.container.style.background =
       "linear-gradient(115deg, #2b1c3a, #c2553f 38%, #e9a26b 52%, #2f6b5e 70%, #10222a)";
-    await settled();
+    await skied(screen);
     await page
       .elementLocator(screen.container)
       .screenshot({ path: `../../../../../target/newtab/rest-glass-${theme}.png` });
@@ -176,7 +177,7 @@ test("typing turns the page over to results dropping from the field", async () =
   await capture(screen, "search");
 });
 
-test("a narrow pane keeps the notch inside the page", async () => {
+test("a narrow pane keeps the field inside the page", async () => {
   const screen = await setup({}, 0);
   screen.container.style.inlineSize = "660px";
   await expect.element(screen.getByRole("combobox")).toBeVisible();
@@ -193,13 +194,13 @@ test("a narrow pane keeps the notch inside the page", async () => {
 
 test("the new tab in each theme, both modes", async () => {
   const screen = await setup({ "ui.newtab-clock-format": "12h" });
-  await expect.element(screen.getByText("2:32 PM")).toBeVisible();
+  await skied(screen);
   for (const id of ["zephium", "paper", "nord", "dracula", "catppuccin"]) {
     themed(id);
     for (const theme of ["dark", "light"]) {
       document.documentElement.dataset.theme = theme;
       screen.container.style.background = "var(--color-canvas)";
-      await settled();
+      await skied(screen);
       await page
         .elementLocator(screen.container)
         .screenshot({ path: `../../../../../target/look/themes/${id}-${theme}-newtab-page.png` });

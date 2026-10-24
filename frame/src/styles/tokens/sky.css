@@ -1,0 +1,36 @@
+/* The new tab's sky: the page each sky is baked into (scripts/bake-sky.mjs),
+   and what stands on it. Day stands over a light page and night
+   over a dark one, whatever the theme; the sky brings its own light. */
+:root {
+  --sky-day-paper: #f7f7f8;
+  --sky-day-shadow: rgb(18 48 112 / 22%);
+  --sky-day-disc-fill: rgb(255 255 255 / 18%);
+  --sky-day-disc-rim: rgb(255 255 255 / 36%);
+  --sky-night-paper: #1a1d25;
+  --sky-night-shadow: rgb(2 8 24 / 40%);
+  --sky-night-disc-fill: rgb(255 255 255 / 10%);
+  --sky-night-disc-rim: rgb(255 255 255 / 18%);
+  --sky-ink: rgb(255 255 255);
+  --sky-name: rgb(255 255 255 / 92%);
+  --sky-glint: rgb(255 255 255);
+  --sky-day-lip: rgb(236 244 255 / 34%);
+  --sky-night-lip: rgb(176 196 238 / 30%);
+
+  /* Ink on a white control set on the sky. */
+  --sky-on-ink: rgb(16 24 42);
+  --sky-ink-hover: rgb(255 255 255 / 86%);
+}
+
+/* A scene drawn outside the new tab names its sky; what stands on it
+   follows. */
+[data-sky="day"] {
+  --sky-paper: var(--sky-day-paper);
+  --sky-shadow: var(--sky-day-shadow);
+  --sky-lip: var(--sky-day-lip);
+}
+
+[data-sky="night"] {
+  --sky-paper: var(--sky-night-paper);
+  --sky-shadow: var(--sky-night-shadow);
+  --sky-lip: var(--sky-night-lip);
+}

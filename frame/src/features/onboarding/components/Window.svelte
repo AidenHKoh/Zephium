@@ -1,19 +1,23 @@
 <script lang="ts">
   import {
+    ArrowDown01Icon,
     ArrowLeft02Icon,
     ArrowRight02Icon,
     Briefcase02Icon,
     Folder01Icon,
     Globe02Icon,
+    Layers01Icon,
     PlusSignIcon,
     Refresh01Icon,
     Search01Icon,
     SidebarLeftIcon,
-    ToolCaseIcon,
+    UserIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
   import Icon from "$shared/ui/Icon";
   import { WORDMARK } from "$shared/lib/wordmark";
+  import { placeSky, SCENES, type Scene } from "$shared/sky";
+  import { NEWTAB, PAGE } from "../lib/camera";
   import type { Site } from "../lib/catalog";
   import Mark from "$shared/ui/BrandMark";
   import WorkCanvas from "./WorkCanvas.svelte";
@@ -24,6 +28,10 @@
     imported,
     playing,
     modes = true,
+    scene,
+    space,
+    named = true,
+    timed = true,
     element = $bindable(),
   }: {
     mode: "browse" | "work";
@@ -35,6 +43,13 @@
     imported: { from: string; bookmarks: number } | null;
     /** The Work run plays only while it is on screen. */
     playing: boolean;
+    /** The new tab's sky. */
+    scene: Scene;
+    /** The name of the space the tabs are in. */
+    space: string;
+    /** Whether the new tab's name and its time line show. */
+    named?: boolean;
+    timed?: boolean;
     element?: HTMLElement;
   } = $props();
 
@@ -51,6 +66,11 @@
     now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }),
   );
   const number = new Intl.NumberFormat();
+
+  const sky = placeSky(PAGE.width, NEWTAB.horizon);
+  const letters =
+    `scale(${NEWTAB.name.w / WORDMARK.width}) ` +
+    `translate(${-WORDMARK.x} ${-WORDMARK.y}) scale(${WORDMARK.scaleX} ${WORDMARK.scaleY})`;
 </script>
 
 <!-- The browser itself, drawn small from the same tokens it is built from:
@@ -71,7 +91,11 @@
           <span><Icon icon={Briefcase02Icon} size={13} />{m.mode_work()}</span>
         </div>{/if}
       <div class="address">{m.search_web_short()}</div>
-      <div class="row quiet"><Icon icon={PlusSignIcon} size={14} />{m.new_tab()}</div>
+      <div class="space">
+        <span>{space}</span><Icon icon={ArrowDown01Icon} size={11} strokeWidth={2} />
+        <span class="gap"></span>
+        <Icon icon={PlusSignIcon} size={14} />
+      </div>
       {#if imported}
         <div class="row folder" data-imported>
           <Icon icon={Folder01Icon} size={14} />{m.onb_window_from({ browser: imported.from })}
@@ -82,7 +106,9 @@
       {/if}
       <div class="row current"><Icon icon={Globe02Icon} size={14} />{m.new_tab()}</div>
       <div class="dock" data-dock>
-        <span class="tile"><Icon icon={ToolCaseIcon} size={15} /></span>
+        <span class="avatar"><Icon icon={UserIcon} size={15} /></span>
+        <i class="rule"></i>
+        {#if sites.length === 0}<span class="empty">{m.essential_drop_hint()}</span>{/if}
         {#each shown as site (site.id)}
           <span class="tile site" data-kept={site.id}><Mark mark={site.mark} size={17} /></span>
         {/each}
@@ -91,26 +117,52 @@
     </div>
 
     <div class="rail">
+      <span class="lights"><i></i><i></i><i></i></span>
       <div class="rail-modes">
-        <span><Icon icon={Globe02Icon} size={13} /></span>
-        <span class="on"><Icon icon={Briefcase02Icon} size={13} /></span>
+        <span><Icon icon={Globe02Icon} size={12} /></span>
+        <span class="on"><Icon icon={Briefcase02Icon} size={12} /></span>
       </div>
       <span class="rail-icon"><Icon icon={Search01Icon} size={15} /></span>
       <hr />
-      {#each sites.slice(0, 4) as site (site.id)}
-        <span class="rail-icon"><Mark mark={site.mark} size={17} /></span>
-      {/each}
+      <span class="rail-icon"><Icon icon={Layers01Icon} size={15} /></span>
+      <span class="rail-icon current"><Icon icon={Globe02Icon} size={15} /></span>
       <span class="rail-icon"><Icon icon={PlusSignIcon} size={15} /></span>
+      <span class="gap"></span>
+      {#each sites.slice(0, 3) as site (site.id)}
+        <span class="rail-disc"><Mark mark={site.mark} size={16} /></span>
+      {/each}
+      <span class="rail-disc"><Icon icon={UserIcon} size={14} /></span>
     </div>
   </aside>
 
   <main class="pane">
-    <div class="newtab">
-      <div class="search"><Icon icon={Search01Icon} size={13} />{m.search_web_short()}</div>
-      <svg class="mark" viewBox="105 90 585 84"
-        ><path d={WORDMARK.d} transform="scale({WORDMARK.scaleX} {WORDMARK.scaleY})" /></svg
+    <!-- The new tab as it opens: the sky, the field hanging in its notch,
+         the name low in the sky and the time under it. -->
+    <div class="newtab" data-sky={scene}>
+      <div
+        class="sky"
+        style:background-image={`url("${SCENES[scene]}")`}
+        style:background-size={`${sky.w}px ${sky.h}px`}
+        style:background-position={`${sky.x}px ${sky.y}px`}
+      ></div>
+      <div
+        class="search"
+        style:width={`${NEWTAB.notch.width}px`}
+        style:height={`${NEWTAB.notch.height}px`}
       >
-      <p class="when"><b>{time}</b><span>{day}</span></p>
+        <Icon icon={Search01Icon} size={13} />{m.search_web_short()}
+      </div>
+      <svg
+        class="mark"
+        data-shown={named}
+        style:left={`${NEWTAB.name.x}px`}
+        style:top={`${NEWTAB.name.y}px`}
+        style:width={`${NEWTAB.name.w}px`}
+        style:height={`${NEWTAB.name.h}px`}><path d={WORDMARK.d} transform={letters} /></svg
+      >
+      <p class="when" data-shown={timed} style:top={`${NEWTAB.when}px`}>
+        <b>{time}</b><span>{day}</span>
+      </p>
     </div>
     <div class="work">
       {#if mode === "work"}<WorkCanvas {playing} />{/if}
@@ -165,8 +217,9 @@
 
   .rail {
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     inline-size: 52px;
+    padding-block-end: 2px;
     opacity: 0;
   }
 
@@ -230,6 +283,24 @@
     color: var(--color-text);
   }
 
+  /* The head of the tab list: the space's name, and the plus that opens a
+     tab in it. */
+  .space {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    block-size: 30px;
+    padding-inline: 9px 10px;
+    color: var(--color-label-secondary);
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .space :global(svg) {
+    color: var(--color-faint);
+  }
+
   .address {
     display: grid;
     place-items: center;
@@ -278,11 +349,43 @@
     animation: row-in 600ms var(--ease-emphasized) 120ms backwards;
   }
 
+  /* The profile, a rule, then what is kept, as the real foot is. */
   .dock {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 5px;
+    grid-template-columns: 36px 1px repeat(3, 1fr);
+    align-items: center;
+    gap: 6px;
     margin-block-start: auto;
+  }
+
+  .avatar {
+    display: grid;
+    place-items: center;
+    inline-size: 36px;
+    block-size: 36px;
+    border-radius: var(--radius-capsule);
+    background: var(--color-card);
+    color: var(--color-muted);
+  }
+
+  .rule {
+    block-size: 22px;
+    background: var(--color-border);
+  }
+
+  /* Nothing kept yet: the real dock's own invitation. */
+  .empty {
+    display: grid;
+    grid-column: 3 / -1;
+    place-items: center;
+    block-size: 40px;
+    padding-inline: 8px;
+    border-radius: var(--radius-row);
+    background: var(--color-tile);
+    color: var(--color-faint);
+    font-size: 10px;
+    line-height: 1.3;
+    text-align: center;
   }
 
   .tile {
@@ -302,21 +405,32 @@
     animation: tile-in 520ms var(--ease-snap) backwards;
   }
 
+  .rail .lights {
+    gap: 5px;
+    block-size: 28px;
+    margin: 0;
+    align-items: center;
+  }
+
+  .rail .lights i {
+    inline-size: 9px;
+    block-size: 9px;
+  }
+
   .rail-modes {
-    display: grid;
-    gap: 2px;
-    margin-block-start: 30px;
-    padding: 3px;
-    border-radius: var(--radius-control-compact);
+    display: flex;
+    gap: 1px;
+    padding: 2px;
+    border-radius: var(--radius-capsule);
     background: var(--color-fill);
   }
 
   .rail-modes span {
     display: grid;
     place-items: center;
-    inline-size: 30px;
-    block-size: 24px;
-    border-radius: var(--radius-inset);
+    inline-size: 21px;
+    block-size: 20px;
+    border-radius: var(--radius-capsule);
     color: var(--color-faint);
   }
 
@@ -331,6 +445,27 @@
     inline-size: 36px;
     block-size: 36px;
     border-radius: var(--radius-control-compact);
+    color: var(--color-muted);
+  }
+
+  .rail-icon.current {
+    background: var(--row-active);
+    box-shadow: var(--row-rim);
+    color: var(--color-text);
+  }
+
+  .rail .gap {
+    flex: 1;
+  }
+
+  .rail-disc {
+    display: grid;
+    place-items: center;
+    inline-size: 34px;
+    block-size: 34px;
+    flex: none;
+    border-radius: var(--radius-capsule);
+    background: var(--color-card);
     color: var(--color-muted);
   }
 
@@ -356,6 +491,10 @@
     transition: opacity 520ms var(--ease-out);
   }
 
+  .newtab {
+    background: var(--sky-paper);
+  }
+
   .work {
     opacity: 0;
   }
@@ -368,6 +507,12 @@
     opacity: 1;
   }
 
+  .sky {
+    position: absolute;
+    inset: 0;
+    background-repeat: no-repeat;
+  }
+
   .search {
     position: absolute;
     inset-block-start: 0;
@@ -375,46 +520,69 @@
     display: flex;
     align-items: center;
     gap: 9px;
-    inline-size: 380px;
-    block-size: 38px;
     padding-inline: 16px;
     box-sizing: border-box;
     transform: translateX(-50%);
     border-radius: 0 0 var(--radius-control) var(--radius-control);
     background: var(--color-chrome);
+    box-shadow: 0 0.5px 0 var(--sky-lip);
     color: var(--color-faint);
     font-size: 12.5px;
   }
 
   .mark {
     position: absolute;
-    inset-inline-start: 162px;
-    inset-block-start: 236px;
-    inline-size: 300px;
-    block-size: 43px;
     overflow: visible;
+    transition: opacity 900ms var(--ease-out);
   }
 
   .mark path {
-    fill: var(--color-text);
+    fill: var(--sky-name);
   }
 
   .when {
     position: absolute;
-    inset-block-start: 304px;
     inset-inline: 0;
     display: flex;
+    align-items: center;
     justify-content: center;
-    gap: 10px;
+    gap: 6px;
     margin: 0;
-    color: var(--color-muted);
-    font-size: 12.5px;
+    color: var(--sky-ink);
+    font-size: 9px;
     font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 10px var(--sky-shadow);
+    transition: opacity 600ms var(--ease-out);
   }
 
   .when b {
-    color: var(--color-text);
-    font-weight: 500;
+    font-weight: 600;
+  }
+
+  .when span {
+    opacity: 0.82;
+  }
+
+  .when span::before {
+    content: "";
+    display: inline-block;
+    inline-size: 2px;
+    block-size: 2px;
+    margin-inline-end: 6px;
+    border-radius: var(--radius-capsule);
+    background: currentcolor;
+    vertical-align: middle;
+  }
+
+  .when b,
+  .when span {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  :is(.mark, .when)[data-shown="false"] {
+    opacity: 0;
+    transition-duration: 360ms;
   }
 
   @keyframes row-in {
@@ -436,7 +604,9 @@
     .browse,
     .rail,
     .newtab,
-    .work {
+    .work,
+    .mark,
+    .when {
       transition: none;
     }
 

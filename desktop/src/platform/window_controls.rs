@@ -29,7 +29,8 @@ use objc2_app_kit::{
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSViewLayerContentsRedrawPolicy, NSWindow,
     NSWindowButton, NSWindowDidBecomeKeyNotification, NSWindowDidDeminiaturizeNotification,
     NSWindowDidExitFullScreenNotification, NSWindowDidResignKeyNotification, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWindowWillEnterFullScreenNotification, NSWorkspace,
+    NSWindowStyleMask, NSWindowWillEnterFullScreenNotification,
+    NSWindowWillExitFullScreenNotification, NSWorkspace,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSInsetRect, NSNotification, NSNotificationCenter,
@@ -61,6 +62,9 @@ pub struct Ivars {
     /// be visible the moment it slides down.
     suspended: Cell<bool>,
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
+    /// The browser window's chrome, told the moment fullscreen begins or
+    /// ends so the room it keeps for the controls follows them at once.
+    chrome: RefCell<Option<WebviewWindow>>,
 }
 
 impl Drop for Ivars {
@@ -154,6 +158,7 @@ impl WindowControls {
             settled: Cell::new(false),
             suspended: Cell::new(false),
             observers: RefCell::new(Vec::new()),
+            chrome: RefCell::new(None),
         });
         // SAFETY: the designated initializer of NSView.
         unsafe { msg_send![super(this), initWithFrame: frame] }
@@ -248,14 +253,51 @@ impl WindowControls {
 
     fn suspend(&self, suspended: bool) {
         self.ivars().suspended.set(suspended);
+        self.tell_chrome(suspended);
         if suspended {
             for button in self.buttons() {
                 fade(&button, 1.0, 0.0);
             }
             fade(self, 0.0, 0.0);
         } else {
+            // Leaving fullscreen, AppKit lays the titlebar out afresh at its
+            // own position. The inset is applied as the content view draws,
+            // which a window that comes back at the same size never asks for.
+            self.reinset();
             self.setNeedsDisplay(true);
             self.resync(false);
+        }
+    }
+
+    /// Leaving fullscreen, AppKit animates the titlebar back with the
+    /// controls at its own position, a few points off the inset, and lays
+    /// them out again until the animation ends. They are hidden for the
+    /// length of it and come back, already in place, when it is done.
+    fn leaving(&self) {
+        self.tell_chrome(false);
+        for button in self.buttons() {
+            fade(&button, 0.0, 0.0);
+        }
+    }
+
+    /// Puts the controls back at their inset now. The inset is applied as the
+    /// content view draws; asking for that draw at once, rather than on the
+    /// next pass, keeps AppKit's own position from showing for a frame.
+    fn reinset(&self) {
+        if let Some(content) = self.window().and_then(|window| window.contentView()) {
+            content.setNeedsDisplay(true);
+            content.displayIfNeeded();
+        }
+    }
+
+    /// Tells the chrome whether the controls are gone for fullscreen. Sent
+    /// as the transition begins either way, so the chrome moves with AppKit
+    /// rather than after it; repeating the same news is harmless.
+    fn tell_chrome(&self, fullscreen: bool) {
+        if let Some(chrome) = self.ivars().chrome.borrow().as_ref() {
+            let _ = chrome.eval(format!(
+                "window.dispatchEvent(new CustomEvent('zephium:fullscreen',{{detail:{fullscreen}}}))"
+            ));
         }
     }
 
@@ -286,6 +328,9 @@ impl WindowControls {
         unsafe {
             add(NSWindowWillEnterFullScreenNotification, |view| {
                 view.suspend(true)
+            });
+            add(NSWindowWillExitFullScreenNotification, |view| {
+                view.leaving()
             });
             add(NSWindowDidExitFullScreenNotification, |view| {
                 view.suspend(false)
@@ -363,6 +408,7 @@ pub fn install(window: &WebviewWindow) {
     );
     controls.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::DuringViewResize);
     parent.addSubview_positioned_relativeTo(&controls, NSWindowOrderingMode::Below, Some(&close));
+    controls.ivars().chrome.replace(Some(window.clone()));
     controls.observe(ns_window);
     if ns_window
         .styleMask()

@@ -14,6 +14,7 @@
   import { Onboarding } from "$features/onboarding";
   import WindowControls from "$shared/ui/WindowControls";
   import { applyLanguage } from "$shared/lib/locale.svelte";
+  import { decode, scene } from "$shared/sky";
 
   $effect(() => void applyLanguage(preferences.value("ui.language")));
 
@@ -43,8 +44,8 @@
   // stays running while its page is replaced.
   let finished = $state(false);
 
-  async function finish(then: "account" | "models" | null): Promise<boolean> {
-    const opened = await commands.onboardingFinish(then).catch(() => false);
+  async function finish(): Promise<boolean> {
+    const opened = await commands.onboardingFinish().catch(() => false);
     if (opened) {
       finished = true;
       await tick();
@@ -69,6 +70,11 @@
     void (async () => {
       try {
         await Promise.all([themeReady, preferencesReady, tabsReady]);
+        // Welcome opens on the sky, so the window is shown with it whole.
+        await Promise.race([
+          decode(scene()).catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
         if (disposed) return;
         ready = true;
         await tick();
