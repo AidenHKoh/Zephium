@@ -200,6 +200,10 @@ jobs:
           # binary stays stripped and the line tables land in a dSYM.
           CARGO_PROFILE_RELEASE_DEBUG: line-tables-only
           CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: packed
+          # On CI Tauri skips the Finder pass that lays out the disk image
+          # (background, icon positions) unless told not to; without it the
+          # DMG opens as a plain folder window.
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
         run: >-
           pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
           --config "${RELEASE_CONFIG}"
