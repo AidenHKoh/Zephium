@@ -14,7 +14,7 @@ body:
     attributes:
       label: Zephium version
       description: Shown in Settings, About.
-      placeholder: "1.0.0-beta.1"
+      placeholder: "1.0.3"
     validations:
       required: true
 
