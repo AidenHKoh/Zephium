@@ -19,6 +19,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     faviconProbe: async () => true,
     workCall: native.call,
     mediaAdmitRemote: native.admit,
+    linkDescribe: async () => ({ status: "ok" as const, data: true }),
     resourceCall: native.resource,
     workPaneShow: native.paneShow,
     workPaneHide: vi.fn(),

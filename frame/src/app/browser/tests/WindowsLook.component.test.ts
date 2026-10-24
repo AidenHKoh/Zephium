@@ -1,4 +1,4 @@
-import { afterEach, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
@@ -59,8 +59,8 @@ for (const theme of ["dark", "light"] as const) {
     });
     await settle();
     await shot(`windows-${theme}`);
-    await screen.getByRole("button", { name: "Close", exact: true }).hover();
-    await settle();
-    await shot(`windows-${theme}-close`);
+    // Windows draws its own caption buttons over the window's corner; the
+    // chrome draws none of its own there.
+    expect(screen.container.querySelector('[aria-label="Close"]')).toBeNull();
   });
 }

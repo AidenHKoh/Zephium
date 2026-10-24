@@ -26,9 +26,15 @@ export function noteSession(profile: string, host: string): NoteSession | null {
   if (sessions.size >= MAX_SESSIONS) {
     const clean = [...sessions].find(([, session]) => session.disposable);
     if (!clean) return null;
-    clean[1].stop();
-    clean[1].removeCloseTask();
     sessions.delete(clean[0]);
+    // A session is asked for while a page derives what it shows, where
+    // stopping one (which writes its state) is refused. A clean one has
+    // nothing to save, so it stops just after.
+    const [, evicted] = clean;
+    queueMicrotask(() => {
+      evicted.stop();
+      evicted.removeCloseTask();
+    });
   }
   const session = new NoteSession(profile, host);
   sessions.set(key, session);
