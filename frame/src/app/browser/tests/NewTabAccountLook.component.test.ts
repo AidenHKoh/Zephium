@@ -99,8 +99,8 @@ test("signed out, the corner offers a calm way in", async () => {
   const screen = await stage(accountFixture());
   const button = screen.getByRole("button", { name: "Sign in", exact: true });
   await expect.element(button).toBeVisible();
-  // Its pane is cut to the words it holds, beside the page's settings.
-  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(2);
+  // Its disc is a capsule as wide as the words it holds, beside the page's settings.
+  expect(screen.container.querySelectorAll(".control")).toHaveLength(2);
   const words = button.element().getBoundingClientRect();
   const gear = screen.getByRole("button", { name: "Customize New Tab" }).element();
   expect(words.right).toBeLessThan(gear.getBoundingClientRect().left);
@@ -185,12 +185,12 @@ test("a long address is cut short, never the panel widened", async () => {
 test("a private window and an install without the service show no account", async () => {
   native.kind = "incognito";
   let screen = await stage(signedIn("ada@example.com", 42));
-  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(1);
+  expect(screen.container.querySelectorAll(".control")).toHaveLength(1);
   expect(screen.getByRole("button", { name: "Account", exact: true }).query()).toBeNull();
   await screen.unmount();
 
   native.kind = "default";
   screen = await stage(accountFixture({ available: false }));
   expect(screen.getByRole("button", { name: "Sign in", exact: true }).query()).toBeNull();
-  expect(screen.container.querySelectorAll(".ground .pane")).toHaveLength(1);
+  expect(screen.container.querySelectorAll(".control")).toHaveLength(1);
 });

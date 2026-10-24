@@ -142,7 +142,13 @@ export function createSearchSurface(options: {
       )
       .map((result) => ({
         id: resultIdentity(result),
-        title: result.title,
+        // The row searching for what was typed reads the field as it is, so
+        // it never lags a key behind while the next answer is on its way. A
+        // row titled otherwise (a scoped search) keeps its own words.
+        title:
+          result.kind === "search" && result.title === answered.trim() && query.trim()
+            ? query.trim()
+            : result.title,
         section: resultSection(result),
         result,
         tool: null,
@@ -341,7 +347,11 @@ export function createSearchSurface(options: {
   }
 
   async function copy() {
-    const address = addressOf(rows.find((row) => row.id === selectedId));
+    const row = rows.find((candidate) => candidate.id === selectedId);
+    // The search row reads the field before its answer arrives; its address
+    // is the previous query's until then.
+    if (!settled && row?.result?.kind === "search") return;
+    const address = addressOf(row);
     if (address) await copyText(address, "copied");
   }
 

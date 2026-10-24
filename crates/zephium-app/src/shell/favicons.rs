@@ -481,7 +481,7 @@ impl Shell {
             if self.items.tab(id).is_some_and(|tab| tab.loading) {
                 self.favicons
                     .icon_load_completion_pending
-                    .insert(id, (current.profile, current.origin));
+                    .insert(id, (current.profile, current.origin.clone()));
             } else {
                 // A fully loaded document with no pixels has conclusively
                 // consumed its bounded budget. Cache that negative result so
@@ -489,8 +489,14 @@ impl Shell {
                 self.favicons.icon_load_completion_pending.remove(&id);
                 self.favicons
                     .icons_checked
-                    .insert((current.profile, current.origin));
+                    .insert((current.profile, current.origin.clone()));
             }
+            // A page busy starting up can still be decoding its icon when the
+            // budget runs out, and an icon on another origin is one it may
+            // not read at all. Ask the anonymous origin probe as well, so a
+            // tab is never left without an icon its site publishes. Private
+            // profiles and recent failures are refused by the probe itself.
+            self.probe_favicons(current.profile, vec![current.origin]);
         }
     }
 

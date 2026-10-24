@@ -15,6 +15,7 @@
   import { untrack } from "svelte";
   import { commands } from "$shared/ipc/bindings";
   import { IS_MAC, IS_WINDOWS } from "$shared/platform";
+  import { fullscreen } from "$shared/lib/fullscreen.svelte";
   import IconButton from "$shared/ui/IconButton";
   import ModeTabs from "./ModeTabs.svelte";
   import SidebarSearch from "./SidebarSearch.svelte";
@@ -35,6 +36,8 @@
   } = $props();
 
   let active = $derived(tabs.activeTab());
+  // In fullscreen the lights are gone, and so is the room kept for them.
+  let lights = $derived(IS_MAC && !fullscreen());
 
   // At rail width the extensions' buttons live in this menu; a popup chosen
   // there hangs from the button that opened it.
@@ -84,7 +87,8 @@
 
 <!--
   macOS keeps AppKit's traffic lights through the overlay title bar, so the
-  leading 52px of the top row belongs to the system. Windows reveals native
+  leading 52px of the top row belongs to the system, except in fullscreen,
+  where AppKit hides them. Windows reveals native
   controls at the top-right edge. On Linux the controls are ours, and at rail width they move into the collapsed menu
   because three buttons cannot fit beside anything else.
 -->
@@ -95,8 +99,10 @@
     line, and the rule below them says where the head ends.
   -->
   <header class="flex shrink-0 flex-col items-center gap-[3px]" aria-label={m.ui_navigation()}>
-    {#if IS_MAC}
+    {#if lights}
       <div style:height="var(--titlebar-height)" aria-hidden="true"></div>
+    {:else if IS_MAC}
+      <div style:height="8px" aria-hidden="true"></div>
     {/if}
     <ModeTabs compact />
     <div class="flex items-center gap-0.5">
@@ -117,7 +123,7 @@
   <header
     class="flex shrink-0 items-center gap-px pe-1.5"
     style:height="var(--titlebar-height)"
-    style:padding-inline-start={IS_MAC
+    style:padding-inline-start={lights
       ? "var(--traffic-light-inset)"
       : launcher && IS_WINDOWS
         ? "0"

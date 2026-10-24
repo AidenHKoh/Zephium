@@ -140,6 +140,13 @@ Windows job and must come **before** the updater signature: Authenticode
 changes the installer's bytes, so sign it first, then replace Tauri's `.sig`
 by running `pnpm tauri signer sign` over the signed file.
 
+Until then, SmartScreen judges each installer by its own download reputation.
+After publishing, submit `Zephium-Windows-x64-setup.exe` at
+<https://www.microsoft.com/wdsi/filesubmission> as a software developer
+("Incorrectly detected as malware/malicious" when it is flagged). Keep the
+asset name and download URL unchanged between releases, and keep the bundle's
+`publisher` at `Zephium`: Windows keys the per-user install by it.
+
 ## Recovery
 
 - **Before publishing**, anything can be redone: delete the draft, fix the

@@ -1,9 +1,7 @@
-export type Step =
-  "welcome" | "you" | "import" | "essentials" | "launcher" | "work" | "ai" | "ready";
+export type Step = "welcome" | "import" | "essentials" | "launcher" | "work" | "ai" | "ready";
 
 export const STEPS: readonly Step[] = [
   "welcome",
-  "you",
   "import",
   "essentials",
   "launcher",

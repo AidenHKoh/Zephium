@@ -610,6 +610,42 @@ fn attach_prober(shell: &mut Shell) -> ProbeLog {
 }
 
 #[test]
+fn a_page_that_gave_no_pixels_in_its_budget_is_probed_for_its_icon() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let probed = attach_prober(&mut shell);
+    let id = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id,
+        input: "busy-app.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id,
+        url: "https://busy-app.example/".into(),
+    }));
+    present_committed(&mut shell, id, "https://busy-app.example/");
+    for attempt in 1..=FAVICON_POLL_DELAYS.len() as u8 {
+        shell.handle(Command::FaviconPoll { id, attempt });
+    }
+    assert_eq!(
+        probed.lock().unwrap().as_slice(),
+        ["https://busy-app.example"]
+    );
+
+    let profile = shell.profile_of_item(id).unwrap();
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: "https://busy-app.example".into(),
+        rgba: Some(vec![23; zephium_core::icon::RGBA32_BYTES]),
+    });
+    assert!(last(&screen)
+        .tabs
+        .iter()
+        .find(|tab| tab.id == id.to_string())
+        .is_some_and(|tab| tab.icon.is_some()));
+}
+
+#[test]
 fn favicon_probe_delivers_held_icons_and_asks_four_origins_at_a_time() {
     let store = Arc::new(FakeStore::default());
     let held = vec![5; zephium_core::icon::RGBA32_BYTES];

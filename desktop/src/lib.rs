@@ -400,17 +400,6 @@ struct UiStartupGate {
     visible: Arc<AtomicBool>,
     handed_over: Arc<AtomicBool>,
     browser_revealed: Arc<AtomicBool>,
-    /// What onboarding asked to open once the browser has appeared.
-    then: Arc<Mutex<Option<OnboardingNextV1>>>,
-}
-
-/// Where onboarding sends the person once the browser is up: the setup
-/// they chose there and could not finish inside it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-enum OnboardingNextV1 {
-    Account,
-    Models,
 }
 
 // WebView2 cold starts compete with runtime servicing and antivirus scanning.
@@ -436,7 +425,6 @@ impl UiStartupGate {
             visible: Arc::new(AtomicBool::new(false)),
             handed_over: Arc::new(AtomicBool::new(false)),
             browser_revealed: Arc::new(AtomicBool::new(false)),
-            then: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -608,24 +596,6 @@ impl UiStartupGate {
                 window.app_handle(),
                 "could not show the browser after onboarding",
             );
-            return;
-        }
-        let then = self
-            .then
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        // Models set up later have nowhere to open while Work and AI are off.
-        let ai = window
-            .app_handle()
-            .try_state::<keymap::Keymap>()
-            .is_none_or(|keymap| keymap.ai_enabled());
-        if let Some(next) = then.filter(|next| ai || !matches!(next, OnboardingNextV1::Models)) {
-            let id = match next {
-                OnboardingNextV1::Account => "settings.account",
-                OnboardingNextV1::Models => "settings.ai",
-            };
-            execute_command(window.app_handle(), id);
         }
     }
 
@@ -1701,6 +1671,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_close,
             tabs_set_essential,
             essentials_keep,
+            essentials_release,
             profile_rename,
             onboarding_play_intro,
             onboarding_finish,
@@ -2803,6 +2774,21 @@ fn essentials_keep(
         return rejected_operation();
     }
     dispatch_operation(caller.app_handle(), &shell, Command::KeepSite(site))
+}
+
+#[tauri::command]
+#[specta::specta]
+fn essentials_release(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    site: String,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize_onboarding(&caller, "essentials_release")
+        || !bounded(&site, MAX_KEPT_SITE_ID_BYTES)
+    {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::ReleaseSite(site))
 }
 
 #[tauri::command]
@@ -4789,22 +4775,14 @@ fn onboarding_play_intro(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
     true
 }
 
-/// Finishes onboarding: records it, then opens the browser in its place and,
-/// once it is shown, the setup chosen there.
+/// Finishes onboarding: records it, then opens the browser in its place, on
+/// the new tab the closing scene ends on, whatever was chosen there.
 #[tauri::command]
 #[specta::specta]
-fn onboarding_finish(
-    caller: WebviewWindow,
-    gate: State<'_, UiStartupGate>,
-    then: Option<OnboardingNextV1>,
-) -> bool {
+fn onboarding_finish(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
     if !authorize_onboarding(&caller, "onboarding_finish") {
         return false;
     }
-    *gate
-        .then
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = then;
     // Opening the browser matters more than the record: if it is lost,
     // onboarding simply shows once more on the next launch.
     if !APP_STORE
@@ -8006,6 +7984,7 @@ mod tests {
             "onboarding_play_intro",
             "onboarding_finish",
             "essentials_keep",
+            "essentials_release",
             "profile_rename",
         ] {
             assert!(

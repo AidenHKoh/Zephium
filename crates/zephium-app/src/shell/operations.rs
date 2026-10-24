@@ -20,6 +20,7 @@ impl Shell {
                 before,
             } => self.operation_set_tab_essential(id, essential, before),
             Command::KeepSite(id) => self.operation_keep_site(&id),
+            Command::ReleaseSite(id) => self.operation_release_site(&id),
             Command::RenameFocusedProfile(name) => self.operation_rename_focused_profile(&name),
             Command::CreateProfile {
                 name,

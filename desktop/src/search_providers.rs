@@ -200,11 +200,14 @@ pub(super) fn schedule(
             let Some((engine, true)) = settings else {
                 return;
             };
-            // DuckDuckGo publishes this browser suggestion endpoint. Other engines
-            // remain search destinations until their suggestion access is qualified.
-            if engine != "duckduckgo" {
+            // Suggestions come from the engine the user searches with, and from
+            // nowhere else; a custom engine names no endpoint.
+            let Some(engine) = SearchEngine::from_id(&engine) else {
                 return;
-            }
+            };
+            let Some(endpoint) = engine.suggestions(&query) else {
+                return;
+            };
             let client = CLIENT.get_or_init(|| {
                 reqwest::Client::builder()
                     .https_only(true)
@@ -218,12 +221,6 @@ pub(super) fn schedule(
             let Some(client) = client else {
                 return;
             };
-            let mut endpoint =
-                reqwest::Url::parse("https://duckduckgo.com/ac/").expect("fixed HTTPS endpoint");
-            endpoint
-                .query_pairs_mut()
-                .append_pair("q", query.trim())
-                .append_pair("type", "list");
             let response = client
                 .get(endpoint)
                 .header(reqwest::header::ACCEPT, "application/json")
@@ -249,7 +246,7 @@ pub(super) fn schedule(
                     _ => return,
                 }
             }
-            let results = parse_suggestions(&bytes, query.trim());
+            let results = parse_suggestions(engine, &bytes, query.trim());
             shell.dispatch(Command::SearchAdditional {
                 context: Box::new(context.clone()),
                 query: query.clone(),
@@ -263,11 +260,17 @@ pub(super) fn schedule(
         .insert(session, Pending { token, task });
 }
 
-fn parse_suggestions(bytes: &[u8], query: &str) -> Vec<SearchResult> {
+fn parse_suggestions(engine: SearchEngine, bytes: &[u8], query: &str) -> Vec<SearchResult> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return Vec::new();
     };
-    if value.get(0).and_then(|value| value.as_str()) != Some(query) {
+    // An answer to another query is late and dropped; engines may echo the
+    // query in their own case.
+    if value
+        .get(0)
+        .and_then(|value| value.as_str())
+        .is_none_or(|echo| echo.trim().to_lowercase() != query.to_lowercase())
+    {
         return Vec::new();
     }
     let Some(phrases) = value.get(1).and_then(|value| value.as_array()) else {
@@ -286,11 +289,11 @@ fn parse_suggestions(bytes: &[u8], query: &str) -> Vec<SearchResult> {
             {
                 return None;
             }
-            let url = SearchEngine::DuckDuckGo.search(phrase)?;
+            let url = engine.search(phrase)?;
             Some(SearchResult {
                 kind: "suggestion".into(),
                 title: phrase.into(),
-                detail: "DuckDuckGo".into(),
+                detail: engine.name().into(),
                 icon: None,
                 action: SearchAction::OpenUrl {
                     url: url.to_string(),
@@ -307,11 +310,27 @@ mod tests {
     #[test]
     fn untrusted_suggestions_are_bounded_and_cannot_supply_actions() {
         let rows = parse_suggestions(
+            SearchEngine::DuckDuckGo,
             br#"["rust",["rust guide","rust guide","file:///secret",42,"rust book"]]"#,
             "rust",
         );
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| matches!(&row.action, SearchAction::OpenUrl { url } if url.starts_with("https://duckduckgo.com/?q="))));
-        assert!(parse_suggestions(br#"["old",["rust guide"]]"#, "rust").is_empty());
+        assert!(parse_suggestions(
+            SearchEngine::DuckDuckGo,
+            br#"["old",["rust guide"]]"#,
+            "rust"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn suggestions_search_with_the_engine_they_came_from() {
+        let rows = parse_suggestions(SearchEngine::Google, br#"["Rust",["rust book"]]"#, "rust");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, "Google");
+        assert!(
+            matches!(&rows[0].action, SearchAction::OpenUrl { url } if url.starts_with("https://www.google.com/search?q="))
+        );
     }
 }

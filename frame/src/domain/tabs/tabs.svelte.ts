@@ -139,6 +139,8 @@ export const dropTab = (id: string, x: number, y: number) => void commands.tabDr
 /** Keeps one of onboarding's catalog sites in Essentials, named by its id;
  *  native owns the address. Settles on native's answer, never assumed. */
 export const keepSite = (site: string) => settle(commands.essentialsKeep(site));
+/** Lets go of a site kept and never opened; closing an Essential keeps it. */
+export const releaseSite = (site: string) => settle(commands.essentialsRelease(site));
 /** Names the focused profile, which is who the browser greets. */
 export const renameProfile = (name: string) => settle(commands.profileRename(name));
 

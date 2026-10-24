@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, type Snippet } from "svelte";
+  import { onMount, untrack, type Snippet } from "svelte";
   import { accountFoot, accountSession } from "$domain/account";
   import {
     CheckListIcon,
@@ -18,10 +18,11 @@
   import { greetingFor } from "../lib/greeting";
   import { clockFace, clockFormat, dayKey, focusSpan, untilNextMinute } from "../lib/clock";
   import { focus, localDay } from "$domain/time";
-  import { groundPath, notchShape, notchWidth, roundedRect } from "../lib/ground";
+  import { groundPath, notchShape, notchWidth } from "../lib/ground";
   import { layout, type Box } from "../lib/layout";
   import { WORDMARK } from "$shared/lib/wordmark";
   import { reducedMotion } from "$shared/lib/motion";
+  import { decode, placeSky, SCENES, scene as skyScene, seen, type Scene } from "$shared/sky";
   import NewTabAccount from "./NewTabAccount.svelte";
 
   let {
@@ -42,10 +43,6 @@
     /** Opens Time. */
     ontime?: () => void;
   } = $props();
-
-  const id = $props.id();
-  // One pass of light across the name as the page arrives, then stillness.
-  const glint = !reducedMotion();
 
   let width = $state(0);
   let height = $state(0);
@@ -92,15 +89,10 @@
   );
 
   // The figures a private window shows none of; what is due only while Tasks
-  // is wanted here, and the blocked count only once it has been read.
+  // is wanted here. What the blocker stopped is always there, at nothing
+  // until it has stopped something.
   let figures = $derived(
-    incognito
-      ? []
-      : [
-          ...(blocked === null ? [] : ["trackers"]),
-          ...(showFocus ? ["focus"] : []),
-          ...(showDue ? ["due"] : []),
-        ],
+    incognito ? [] : ["trackers", ...(showFocus ? ["focus"] : []), ...(showDue ? ["due"] : [])],
   );
 
   // Read when the page opens and with the minute's redraw while it shows, so
@@ -147,27 +139,45 @@
     ...(showAccount ? [account.signedIn ? 32 : Math.max(32, signInWidth)] : []),
     ...(oncustomize ? [32] : []),
   ]);
-  let page = $derived(layout(width, height, { controls, clock: showClock, tiles: figures.length }));
-
-  // One outline for the ground: the page less the notch, the controls' panes,
-  // and the name's box, which a patch of ground fills back in less the
-  // letters themselves.
-  const pane = ({ x, y, w, h }: Box, r: number) => roundedRect(x, y, w, h, r);
+  let page = $derived(layout(width, height, { controls, clock: showClock }));
   const at = ({ x, y, w, h }: Box) => `left:${x}px;top:${y}px;width:${w}px;height:${h}px`;
-  let openings = $derived(page.controls.map((control) => pane(control, control.h / 2)));
-  let box = $derived(pane(page.mark, 0));
-  // Reaches a little past the box, so the patch and the hole never meet edge
-  // to edge and leave a hairline where both are antialiased.
-  let patch = $derived(
-    pane({ x: page.mark.x - 2, y: page.mark.y - 2, w: page.mark.w + 4, h: page.mark.h + 4 }, 0),
-  );
-  let ground = $derived(groundPath(width, height, page.notch, [...openings, box]));
+
+  // Day over a light page, night over a dark one.
+  let scene = $derived(skyScene());
+
+  // The sky arrives once a session, as the first new tab opens, and is simply
+  // there on every one after.
+  const arriving = !seen(untrack(() => scene));
+  let shown = $state<Scene | null>(seen(untrack(() => scene)) ? untrack(() => scene) : null);
+  $effect(() => {
+    const wanted = scene;
+    let live = true;
+    // A sky that cannot be decoded leaves the page its own colour; it never
+    // keeps the name and the controls hidden.
+    const reveal = () => {
+      if (live) shown = wanted;
+    };
+    void decode(wanted).then(reveal, reveal);
+    return () => {
+      live = false;
+    };
+  });
+
+  // The picture is the page: painted with it, nothing drawn of its own. The
+  // page is cut by the notch the field hangs in, so the window's own glass
+  // reaches down into it around the field.
+  let sky = $derived(placeSky(width, page.horizon));
+  const id = $props.id();
+  let ground = $derived(groundPath(width, height, page.notch));
   let lip = $derived(notchShape(width, height, page.notch));
   let fieldWidth = $derived(notchWidth(width, page.notch));
   let letters = $derived(
-    `translate(${page.mark.x} ${page.mark.y}) scale(${page.mark.w / WORDMARK.width}) ` +
+    `scale(${page.mark.w / WORDMARK.width}) ` +
       `translate(${-WORDMARK.x} ${-WORDMARK.y}) scale(${WORDMARK.scaleX} ${WORDMARK.scaleY})`,
   );
+  // One pass of light across the name as the first sky arrives, then
+  // stillness: driven by the document, nothing left running once it passes.
+  const glint = arriving && !reducedMotion();
 
   // What is due today, overdue included, kept current while the page shows it:
   // read once, then again whenever a task in this profile changes.
@@ -229,101 +239,104 @@
 
 <!--
   Drawn by the chrome, so a new tab costs no WebView and shows no paint flash.
-  The page is solid, as every page is, and the window shows through it in
-  three places: the notch the field hangs in, the letters of the name, and
-  the panes of the page's controls. The day's figures are cards along its
-  foot.
-  Everything is placed in the page's own pixels from one layout, so the cuts
-  and what stands in them move as one.
+  The page is a window onto the Zephium sky: solid above, dissolving through
+  a halftone screen into the page below the horizon. The window's own glass
+  reaches down into it through the notch the field hangs in. The dots are
+  baked into the picture, so the page only shows it.
 -->
 <section
   class="newtab"
+  class:arriving
+  data-scene={scene}
+  data-ready={shown === scene}
   aria-label={m.new_tab()}
   bind:clientWidth={width}
   bind:clientHeight={height}
 >
-  <svg class="ground" aria-hidden="true">
+  {#if ground}<div class="page" aria-hidden="true" style:clip-path={`path(evenodd, "${ground}")`}>
+      <div
+        class="sky"
+        style:background-image={`url("${SCENES[scene]}")`}
+        style:background-size={`${sky.w}px ${sky.h}px`}
+        style:background-position={`${sky.x}px ${sky.y}px`}
+      ></div>
+    </div>{/if}
+
+  <!-- Light caught along the edge where the page meets the window, fading
+       away from it: a strip as tall as the notch, so it is drawn once. -->
+  <svg class="rim" aria-hidden="true" style:height={`${page.notch.height + 1}px`}>
     <defs>
-      <path id={`${id}-letters`} d={WORDMARK.d} transform={letters} />
-      <!-- Only as large as the name, so the offscreen buffer a mask costs is
-           the size of the letters and not of the page. -->
-      <mask
-        id={`${id}-cut`}
-        maskUnits="userSpaceOnUse"
-        x={page.mark.x - 2}
-        y={page.mark.y - 2}
-        width={page.mark.w + 4}
-        height={page.mark.h + 4}
-      >
-        <path d={patch} fill="white" />
-        <use href={`#${id}-letters`} fill="black" />
-      </mask>
-      <!-- Light caught along the edge a pane shows the page, fading away
-           from it. -->
-      <linearGradient id={`${id}-lip-up`} x1="0" y1="1" x2="0" y2="0">
+      <linearGradient id={`${id}-lip`} x1="0" y1="1" x2="0" y2="0">
         <stop offset="0" class="lip" />
         <stop offset="0.6" class="lip" stop-opacity="0" />
       </linearGradient>
-      <linearGradient id={`${id}-lip-down`} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" class="lip" />
-        <stop offset="0.5" class="lip" stop-opacity="0" />
-      </linearGradient>
-      <!-- A soft band of light that crosses the name once as the page arrives,
-           driven by the document itself: no frame of script, and nothing
-           left running once it has passed. -->
-      <linearGradient
-        id={`${id}-glint`}
-        gradientUnits="userSpaceOnUse"
-        x1={page.mark.x - page.mark.h * 3}
-        x2={page.mark.x}
-        y1="0"
-        y2={page.mark.h}
-      >
-        <stop offset="0" class="glint" stop-opacity="0" />
-        <stop offset="0.5" class="glint" />
-        <stop offset="1" class="glint" stop-opacity="0" />
-        {#if glint}<animateTransform
+    </defs>
+    <path d={lip} stroke={`url(#${id}-lip)`} />
+  </svg>
+
+  <!-- The name, drawn only as large as itself. -->
+  <svg class="mark" role="img" aria-label="Zephium" style={at(page.mark)}>
+    <defs>
+      <path id={`${id}-letters`} d={WORDMARK.d} transform={letters} />
+      {#if glint}<linearGradient
+          id={`${id}-glint`}
+          gradientUnits="userSpaceOnUse"
+          x1={-page.mark.h * 3}
+          x2="0"
+          y1="0"
+          y2={page.mark.h}
+        >
+          <stop offset="0" class="glint" stop-opacity="0" />
+          <stop offset="0.5" class="glint" />
+          <stop offset="1" class="glint" stop-opacity="0" />
+          <animateTransform
             attributeName="gradientTransform"
             type="translate"
             from="0 0"
             to={`${page.mark.w + page.mark.h * 3} 0`}
-            begin="0.18s"
-            dur="1.2s"
+            begin="0.5s"
+            dur="1.3s"
             calcMode="spline"
             keyTimes="0;1"
             keySplines="0.3 0 0.2 1"
             fill="freeze"
-          />{/if}
-      </linearGradient>
-      <linearGradient id={`${id}-wash`} x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" class="wash-lit" />
-        <stop offset="1" class="wash-dim" />
-      </linearGradient>
+          />
+        </linearGradient>{/if}
     </defs>
-    <path class="page" fill-rule="evenodd" d={ground} />
-    <path class="page" d={patch} mask={`url(#${id}-cut)`} />
-    <use class="solid" href={`#${id}-letters`} />
-    <use class="wash" href={`#${id}-letters`} fill={`url(#${id}-wash)`} />
+    <use class="name" href={`#${id}-letters`} />
     {#if glint}<use href={`#${id}-letters`} fill={`url(#${id}-glint)`} />{/if}
-    <path class="rim" d={lip} stroke={`url(#${id}-lip-up)`} />
-    {#each openings as opening, index (index)}
-      <path class="pane" d={opening} stroke={`url(#${id}-lip-down)`} />
-    {/each}
   </svg>
 
   <div class="field" style:width={`${fieldWidth}px`} style:height={`${page.notch.height}px`}>
     {@render search()}
   </div>
 
-  <!-- Each control in its own round pane of the window, level with the
-       field. -->
+  {#if showGreeting}
+    <p class="greeting" style:bottom={`${height - page.mark.y + 18}px`}>
+      {greeting}
+    </p>
+  {/if}
+
+  {#if page.when !== null}
+    <p class="when" style:top={`${page.when}px`}>
+      <time class="time" datetime={now.toISOString()}
+        >{#if face.period !== null && face.periodLeading}<span class="period"
+            >{`${face.period} `}</span
+          >{/if}{face.time}{#if face.period !== null && !face.periodLeading}<span class="period"
+            >{` ${face.period}`}</span
+          >{/if}</time
+      ><span class="date">{date}</span>
+    </p>
+  {/if}
+
+  <!-- Each control a disc of light on the sky, level with the field. -->
   {#if showAccount && onaccount && page.controls[0]}
-    <div class="control" data-glass-text style={at(page.controls[0])}>
+    <div class="control" style={at(page.controls[0])}>
       <NewTabAccount {account} {onaccount} bind:signInWidth />
     </div>
   {/if}
   {#if oncustomize && page.controls.at(-1)}
-    <div class="control" data-glass-text style={at(page.controls.at(-1)!)}>
+    <div class="control" style={at(page.controls.at(-1)!)}>
       <IconButton
         icon={Settings01Icon}
         label={m.settings_customize_newtab()}
@@ -335,51 +348,25 @@
     </div>
   {/if}
 
-  {#if showGreeting}
-    <p class="greeting" style:bottom={`${height - page.mark.y + 24}px`}>{greeting}</p>
-  {/if}
-  <!-- The letters are drawn by the ground; this stands where they are so the
-       name has a place and a label. -->
-  <span class="mark" role="img" aria-label="Zephium" style={at(page.mark)}></span>
-
-  {#if page.when !== null}
-    <p class="when" style:top={`${page.when}px`}>
-      <time datetime={now.toISOString()}
-        >{#if face.period !== null && face.periodLeading}<span class="period"
-            >{`${face.period} `}</span
-          >{/if}{face.time}{#if face.period !== null && !face.periodLeading}<span class="period"
-            >{` ${face.period}`}</span
-          >{/if}</time
-      ><span class="date">{date}</span>
-    </p>
-  {/if}
-
   <!-- A private window has no figures; what it promises stands in their place. -->
   {#if incognito}
     <p class="note">{m.ntp_private()}</p>
-  {/if}
-
-  <!-- The day in figures, a card each, along the foot of the page: what it
-       is, then the figure with its context read on the same line. -->
-  {#each figures as figure, index (figure)}
-    {@const tile = page.tiles[index]}
-    {#if tile}
-      {#if figure === "trackers"}
-        <div class="tile" style={at(tile)}>
-          <span class="label"
-            ><Icon icon={Shield01Icon} size={13} /><span class="name"
+  {:else if figures.length}
+    <!-- The day in figures, along the foot of the page; they step aside
+         while a search is open. -->
+    <div class="figures">
+      {#each figures as figure (figure)}
+        {#if figure === "trackers"}
+          <div class="figure">
+            <Icon icon={Shield01Icon} size={14} /><span class="name"
               >{m.ntp_trackers_blocked()}</span
-            ></span
-          >
-          <span class="reading">
-            <span class="value">{number.format(blocked ?? 0)}</span>
-            <span class="foot">{m.ntp_today()}</span>
-          </span>
-        </div>
-      {:else if figure === "focus"}
-        <button type="button" class="tile" style={at(tile)} onclick={ontime}>
-          <span class="label"
-            ><Icon icon={Clock01Icon} size={13} /><span class="name">{m.ntp_focused()}</span><span
+            ><span class="value">{number.format(blocked ?? 0)}</span>
+          </div>
+        {:else if figure === "focus"}
+          <button type="button" class="figure" onclick={ontime}>
+            <Icon icon={Clock01Icon} size={14} /><span class="name">{m.ntp_focused()}</span><span
+              class="value">{focusSpan(focusMinutes)}</span
+            ><span
               class="meter"
               role="meter"
               aria-label={m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}
@@ -387,180 +374,158 @@
               aria-valuemax={focusGoalMinutes}
               aria-valuenow={Math.min(focusMinutes, focusGoalMinutes)}
               ><span class="fill" style:transform={`scaleX(${focusShare})`}></span></span
-            ></span
-          >
-          <span class="reading">
-            <span class="value">{focusSpan(focusMinutes)}</span>
-            <span class="foot">{m.ntp_focus_goal({ goal: focusSpan(focusGoalMinutes) })}</span>
-          </span>
-        </button>
-      {:else}
-        <button type="button" class="tile" style={at(tile)} onclick={ontasks}>
-          <span class="label"
-            ><Icon icon={CheckListIcon} size={13} /><span class="name">{m.ntp_due_today()}</span
-            ></span
-          >
-          <span class="reading">
-            <span class="value">{due.today}</span>
-            <span class="foot" class:late={due.overdue > 0}
+            >
+          </button>
+        {:else}
+          <button type="button" class="figure" onclick={ontasks}>
+            <Icon icon={CheckListIcon} size={14} /><span class="name">{m.ntp_due_today()}</span
+            ><span class="value">{due.today}</span><span class="foot" class:late={due.overdue > 0}
               >{due.overdue > 0
                 ? m.ntp_overdue({ count: due.overdue })
                 : m.ntp_nothing_overdue()}</span
             >
-          </span>
-        </button>
-      {/if}
-    {/if}
-  {/each}
+          </button>
+        {/if}
+      {/each}
+    </div>
+  {/if}
 </section>
 
 <style>
-  /* Whatever the ground leaves open is the window: the chrome's own colour on
-     an opaque window, and nothing where the window has a material to show.
-     Everything here is placed in the drawing's physical pixels, which do not
-     mirror in a right-to-left page. */
+  /* Whatever the page leaves open is the window: the chrome's own colour on
+     an opaque window, and its material where it has one. Below the horizon
+     the page is the colour the sky dissolves into. Everything is placed in
+     the page's physical pixels, which do not mirror in a right-to-left page. */
   .newtab {
-    --mark-lit: 42%;
-    --mark-dim: 18%;
-    --tile-hover: var(--color-fill-hover);
+    --sky-paper: var(--sky-day-paper);
+    --sky-shadow: var(--sky-day-shadow);
+    --sky-lip: var(--sky-day-lip);
+    --disc-fill: var(--sky-day-disc-fill);
+    --disc-rim: var(--sky-day-disc-rim);
 
     position: relative;
     block-size: 100%;
     overflow: hidden;
     background: var(--color-chrome);
+    isolation: isolate;
+    container: newtab / inline-size;
   }
 
-  :global(:root[data-theme="light"]) .newtab {
-    --mark-lit: 64%;
-    --mark-dim: 46%;
-    --tile-hover: var(--color-control-hover);
+  .newtab[data-scene="night"] {
+    --sky-paper: var(--sky-night-paper);
+    --sky-shadow: var(--sky-night-shadow);
+    --sky-lip: var(--sky-night-lip);
+    --disc-fill: var(--sky-night-disc-fill);
+    --disc-rim: var(--sky-night-disc-rim);
   }
 
   :global(:root:not([data-material="none"])[data-material]) .newtab {
     background: transparent;
   }
 
-  .ground {
+  .page,
+  .sky {
     position: absolute;
     inset: 0;
-    inline-size: 100%;
-    block-size: 100%;
-    pointer-events: none;
   }
 
   .page {
-    fill: var(--color-page);
+    background: var(--sky-paper);
   }
 
-  /* On an opaque window there is nothing behind the letters worth showing,
-     so they are drawn in the text colour over the cut. Over a material they
-     are the material, with a light wash so the name still reads first. */
-  .solid {
-    fill: var(--color-text);
-  }
-
-  .wash {
-    display: none;
-  }
-
-  :global(:root:not([data-material="none"])[data-material]) .solid {
-    display: none;
-  }
-
-  :global(:root:not([data-material="none"])[data-material]) .wash {
-    display: inline;
-  }
-
-  .glint {
-    stop-color: var(--color-glint);
-  }
-
-  .wash-lit {
-    stop-color: color-mix(in srgb, var(--color-text) var(--mark-lit), transparent);
-  }
-
-  .wash-dim {
-    stop-color: color-mix(in srgb, var(--color-text) var(--mark-dim), transparent);
-  }
-
-  /* The notch is the frame itself and stays clear; the controls' panes
-     carry the launcher's wash, so they read as glass set into the page
-     rather than holes in it. */
-  .rim,
-  .pane {
-    stroke-width: 1;
+  .sky {
+    background-repeat: no-repeat;
   }
 
   .rim {
-    fill: none;
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline: 0;
+    inline-size: 100%;
+    pointer-events: none;
   }
 
-  .pane {
-    fill: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
+  /* Light along the notch's foot: white by day, a cool moonlit tone at
+     night, where white would read as a drawn border. */
+  .rim path {
+    fill: none;
+    stroke-width: 1;
   }
 
   .lip {
-    stop-color: var(--color-border-strong);
+    stop-color: var(--sky-lip);
   }
 
+  .mark {
+    position: absolute;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .name {
+    fill: var(--sky-name);
+  }
+
+  .glint {
+    stop-color: var(--sky-glint);
+  }
+
+  /* The field fills the notch: the window's glass is its material. */
   .field {
     position: absolute;
-    z-index: 1;
+    z-index: 2;
     inset-block-start: 0;
     inset-inline: 0;
     margin-inline: auto;
   }
 
-  .control {
-    position: absolute;
-    display: grid;
-    place-items: center;
-    color: var(--color-muted);
-  }
-
-  .mark {
-    position: absolute;
-    pointer-events: none;
-  }
-
   .greeting,
-  .when,
-  .note {
+  .when {
     position: absolute;
     inset-inline: 0;
     margin: 0 auto;
+    color: var(--sky-ink);
     text-align: center;
+    text-shadow: 0 1px 18px var(--sky-shadow);
+    pointer-events: none;
   }
 
   .greeting {
-    color: var(--color-faint);
-    font-size: var(--text-caption);
+    font-size: 11.5px;
     font-weight: 600;
-    letter-spacing: 0.16em;
+    line-height: 16px;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
+    opacity: 0.86;
   }
 
+  /* One line under the name: the time set firm, the date beside it a step
+     quieter, a point of light between them. */
   .when {
     display: flex;
     align-items: baseline;
     justify-content: center;
-    gap: 10px;
-    color: var(--color-muted);
-    font-size: 14px;
-    line-height: 18px;
+    gap: 8px;
+    font-size: 16px;
+    line-height: 20px;
   }
 
-  .when time {
-    color: var(--color-text);
-    font-weight: 500;
+  .time {
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
   }
 
   .period {
-    color: var(--color-muted);
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.08em;
+    opacity: 0.86;
+  }
+
+  .date {
+    font-weight: 400;
+    opacity: 0.86;
   }
 
   .date::before {
@@ -568,42 +533,100 @@
     display: inline-block;
     inline-size: 3px;
     block-size: 3px;
-    margin-inline-end: 10px;
+    margin-inline-end: 8px;
     border-radius: var(--radius-capsule);
     background: currentcolor;
     vertical-align: middle;
     opacity: 0.6;
   }
 
+  /* A disc of light on the sky: the sky behind it is still, so it needs no
+     blur of its own. */
+  .control {
+    position: absolute;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-capsule);
+    background: var(--disc-fill);
+    box-shadow:
+      inset 0 0 0 0.5px var(--disc-rim),
+      inset 0 1px 0 var(--disc-rim);
+    color: var(--sky-ink);
+  }
+
+  /* White on the sky for the buttons alone: the account's panel opens from
+     inside the disc and keeps the theme's own ink. */
+  .control :global(:is(.ntp-account, .sign-in, .icon-button)) {
+    --color-text: var(--sky-ink);
+    --color-muted: var(--sky-ink);
+    --color-label-secondary: var(--sky-ink);
+  }
+
   .note {
+    position: absolute;
+    inset-inline: 0;
     inset-block-end: 28px;
+    margin: 0 auto;
     padding-inline: 24px;
     color: var(--color-faint);
     font-size: var(--text-label);
     line-height: 1.5;
+    text-align: center;
   }
 
-  /* A card on the page: what it is, and under it the figure with its
-     context on the same line, on a card fill with the controls' rim. */
-  .tile {
+  /* The day's figures: quiet capsules on the page, each read as one line. */
+  .figures {
     position: absolute;
+    inset-inline: 0;
+    inset-block-end: 24px;
     display: flex;
-    box-sizing: border-box;
-    flex-direction: column;
-    justify-content: space-between;
-    container: tile / inline-size;
-    padding: 13px 16px 12px;
-    border: 0;
-    border-radius: var(--radius-card);
-    background: var(--color-card);
-    box-shadow: var(--shadow-raise);
-    color: inherit;
-    font: inherit;
-    text-align: start;
-    animation: arrive var(--motion-page) var(--ease-emphasized) 60ms backwards;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    padding-inline: 24px;
+    transition:
+      opacity var(--motion-base) var(--ease-out),
+      translate var(--motion-base) var(--ease-out);
   }
 
-  button.tile {
+  /* Open results take the sky to themselves: the name and the time step
+     back under them rather than showing round them, and return as soon as
+     the results close, whatever is left in the field. Each is only as large as
+     itself, so the fade composites a few small layers and repaints nothing. */
+  .mark,
+  .greeting,
+  .when {
+    transition: opacity var(--motion-base) var(--ease-out);
+  }
+
+  .newtab:has(:global(.dock[data-open="true"])) :is(.mark, .greeting, .when) {
+    opacity: 0;
+  }
+
+  .figure {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    block-size: 34px;
+    padding: 0 14px 0 12px;
+    border: 0;
+    border-radius: var(--radius-capsule);
+    background: color-mix(in srgb, var(--color-text) 5%, transparent);
+    color: var(--color-muted);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    animation: arrive var(--motion-page) var(--ease-emphasized) 80ms backwards;
+  }
+
+  .figure :global(svg) {
+    flex: none;
+    color: var(--color-faint);
+  }
+
+  button.figure {
     cursor: default;
     outline: none;
     transition:
@@ -611,84 +634,41 @@
       scale var(--motion-slow) var(--ease-smooth);
   }
 
-  button.tile:hover {
-    background: var(--tile-hover);
+  button.figure:hover {
+    background: color-mix(in srgb, var(--color-text) 9%, transparent);
   }
 
-  button.tile:active {
-    scale: 0.985;
+  button.figure:active {
+    scale: 0.97;
     transition-duration: var(--motion-fast);
   }
 
-  button.tile:focus-visible {
+  button.figure:focus-visible {
     outline: 2px solid var(--color-ring);
     outline-offset: 2px;
   }
 
-  .label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-inline-size: 0;
-    overflow: hidden;
-    color: var(--color-muted);
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 16px;
-    white-space: nowrap;
-  }
-
-  .label :global(svg) {
-    flex: none;
-    color: var(--color-faint);
-  }
-
-  .name {
-    min-inline-size: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .reading {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    min-inline-size: 0;
-  }
-
   .value {
-    flex: none;
     color: var(--color-text);
-    font-size: 22px;
-    font-weight: 500;
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-    line-height: 26px;
-    letter-spacing: -0.025em;
   }
 
   .foot {
-    display: flex;
-    align-items: center;
-    min-inline-size: 0;
-    overflow: hidden;
     color: var(--color-faint);
-    font-size: 11.5px;
-    font-weight: 500;
-    white-space: nowrap;
   }
 
   .foot.late {
     color: var(--color-danger);
   }
 
-  /* The day's progress toward the aim, at the far end of the label. */
+  /* The day's progress toward the aim. */
   .meter {
     position: relative;
     flex: none;
-    inline-size: 36px;
-    margin-inline-start: auto;
+    inline-size: 28px;
     block-size: 3px;
+    margin-inline-start: 2px;
     overflow: hidden;
     border-radius: var(--radius-capsule);
     background: var(--color-fill-strong);
@@ -702,11 +682,11 @@
     transform-origin: left center;
   }
 
-  /* A card too narrow for the figure and its context keeps the figure on
-     screen; the context is still read out. */
-  @container tile (inline-size < 148px) {
-    .foot,
-    .meter {
+  /* A narrow pane keeps each figure to its icon and value on one row; the
+     rest is still read out. */
+  @container newtab (inline-size < 720px) {
+    .figure .name,
+    .figure .foot {
       position: absolute;
       inline-size: 1px;
       block-size: 1px;
@@ -715,12 +695,14 @@
     }
   }
 
-  /* The ground is there from the first frame, so the page never shows the
-     window through itself; only what stands on it fades in. */
-  .control,
-  .greeting,
-  .when {
-    animation: arrive var(--motion-page) var(--ease-emphasized) backwards;
+  /* The first new tab of a session waits for its sky, then the sky and
+     what stands on it come up together. */
+  .arriving :is(.sky, .mark, .greeting, .when, .control) {
+    transition: opacity 640ms var(--ease-out);
+  }
+
+  .arriving:not([data-ready="true"]) :is(.sky, .mark, .greeting, .when, .control) {
+    opacity: 0;
   }
 
   @keyframes arrive {
@@ -730,21 +712,37 @@
   }
 
   @media (forced-colors: active) {
-    .solid {
+    .sky {
+      display: none;
+    }
+
+    .name {
       fill: CanvasText;
+    }
+
+    .greeting,
+    .when {
+      color: CanvasText;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .control,
-    .greeting,
-    .when,
-    .tile {
+    .figure {
       animation: none;
+    }
+
+    .arriving :is(.sky, .mark, .greeting, .when, .control),
+    .figures {
+      transition: none;
     }
   }
 
-  :global(:root[data-reduce-motion="true"]) :is(.control, .greeting, .when, .tile) {
+  :global(:root[data-reduce-motion="true"]) .figure {
     animation: none;
+  }
+
+  :global(:root[data-reduce-motion="true"])
+    :is(.arriving .sky, .arriving .mark, .arriving .control, .figures) {
+    transition: none;
   }
 </style>

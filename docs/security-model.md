@@ -1276,7 +1276,7 @@ These inherited properties must not be overstated:
   terminal and prevents an empty in-memory map from being mistaken for native absence.
 - Before Tauri creates a view, the runtime version must parse as a stable four-component
   WebView2 version. The reviewed security floor and latest recommendation are
-  `154.0.4258.62`, published October 5, 2026. An older Stable runtime is admitted
+  `156.0.4314.42`, published October 22, 2026. An older Stable runtime is admitted
   with an update-recommended advisory. A newer stable major receives
   an unreviewed-runtime advisory. Preview-channel and malformed strings are
   refused (exit 78 with a native alert).
@@ -1284,23 +1284,24 @@ These inherited properties must not be overstated:
   environment overrides that
   can replace runtime/UDF selection, append browser flags such as `--no-sandbox`, select
   another channel, or attach script debuggers. CI and release publication
-  expire this review after October 13, 2026; runtime reports an overdue-review
+  expire this review after October 31, 2026; runtime reports an overdue-review
   advisory instead. Per-view Environment7/UDF/runtime, Environment10, Settings7, and
   CoreWebView2_18 checks remain independent capability gates.
 - Microsoft acknowledged on July 14 that additional Chromium security fixes
   were not yet available in Edge/WebView2 Stable. Stable `150.0.4078.80`
   incorporated the update on July 16. Microsoft listed CVE-2026-85046 as
   exploited in the wild in Stable `152.0.4191.62` on September 2, then published
-  Stable security updates through `154.0.4258.62` on October 5.
+  Stable security updates through `156.0.4314.42` on October 22.
   Microsoft publishes no WebView2-specific per-CVE applicability matrix;
   Zephium therefore treats the shared runtime release as a conservative floor
   rather than claiming each listed CVE applies to WebView2. The October 2 review
   independently confirmed matching x86, x64, and ARM64 WebView2 packages in the
   Microsoft Update Catalog and raised both the floor and recommendation; the
   October 6 review raised them to `154.0.4258.62`. On October 6 Microsoft
-  again acknowledged a pending Chromium security fix, so production
-  publication is blocked until a later Stable release is reviewed. See
-  [the review evidence](windows-webview2-security-review-2026-10-06.md).
+  again acknowledged a pending Chromium security fix. The October 24 review
+  found no such notice remaining and four later Stable security releases, and
+  raised both to `156.0.4314.42`, clearing the publication blocker. See
+  [the review evidence](windows-webview2-security-review-2026-10-24.md).
   The release gate preserves the
   historical notice and requires both a cleared blocker and a floor published
   after it, so changing a boolean cannot turn a known vendor patch gap into
@@ -1383,7 +1384,7 @@ These inherited properties must not be overstated:
   build differs from the loaded `com.apple.WebKit` framework build, starts with
   an update-recommended advisory. Newer major lines (macOS 28, Safari 28)
   receive an unreviewed-runtime advisory. The review expires for CI/release
-  after October 13, while runtime
+  after October 31, while runtime
   keeps starting and reports review age to privileged chrome.
 - Overlay configuration keeps Tao's allocated `TaoWindow` class and instance layout
   intact. Zephium does not use `object_setClass` to turn that live object into an

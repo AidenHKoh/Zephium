@@ -26,6 +26,10 @@ const COALESCE_MS = 60;
  *  exists so a native that never answers at all cannot wait forever. */
 const RESPONSE_DEADLINE_MS = 5000;
 const RETRY_MS = 150;
+/** How long a first, partial answer shorter than the rows on screen waits for
+ *  the rest of it. Local matches land before online suggestions; shown as
+ *  they come, the list shrinks and grows back on every key. */
+const PARTIAL_HOLD_MS = 160;
 
 export function createSearchController(options: {
   owner: Omit<SearchContext, "request_id"> | null;
@@ -46,6 +50,7 @@ export function createSearchController(options: {
   let completion: string | null = null;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
+  let hold: ReturnType<typeof setTimeout> | undefined;
   /** A request for this query has already been sent again after failing. A
    *  refused or unanswered search is almost always transient, and saying so
    *  on the first miss turns a hiccup into an error the user has to handle. */
@@ -57,6 +62,7 @@ export function createSearchController(options: {
   const clear = () => {
     clearTimeout(debounce);
     clearTimeout(deadline);
+    clearTimeout(hold);
   };
   /** Retained rows stay on screen so the list does not blink between queries,
    *  but they are not `settled`: the surface queues intent against them rather
@@ -186,19 +192,31 @@ export function createSearchController(options: {
         publish(retained());
         return;
       }
-      received = true;
-      settledContext = active;
-      visible = result.results;
-      answered = result.query;
-      completion = result.completion;
-      publish({
-        results: visible,
-        completion,
-        pending: result.pending,
-        settled: true,
-        answered,
-        error: "none",
-      });
+      clearTimeout(hold);
+      const apply = () => {
+        if (disposed || !sameSearch(active, result.context)) return;
+        received = true;
+        settledContext = active;
+        visible = result.results;
+        answered = result.query;
+        completion = result.completion;
+        publish({
+          results: visible,
+          completion,
+          pending: result.pending,
+          settled: true,
+          answered,
+          error: "none",
+        });
+      };
+      // A partial answer that would shrink the list waits briefly for the rest
+      // of it, so the list changes once per answer instead of shrinking and
+      // growing back; one that lengthens it, or the final one, shows at once.
+      if (result.pending && result.results.length < visible.length) {
+        hold = setTimeout(apply, PARTIAL_HOLD_MS);
+        return;
+      }
+      apply();
     },
     pause() {
       clear();

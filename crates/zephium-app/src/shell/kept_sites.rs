@@ -82,6 +82,42 @@ impl Shell {
         mutation_result(self.commit(Vec::new()))
     }
 
+    /// Lets go of a catalog site kept and never opened: it leaves the
+    /// Essentials whole, where closing an Essential would put it back. One
+    /// that has been opened is the sidebar's to manage, not onboarding's.
+    pub(super) fn operation_release_site(&mut self, id: &str) -> OperationDisposition {
+        let Some(site) = kept_site(id) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        let Some(profile) = self.windows.focused().map(|window| window.profile) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+        };
+        let Ok(url) = url::Url::parse(site.url) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        let placement = Placement::Favorites { profile };
+        let Some(kept) = self
+            .items
+            .roots(placement)
+            .iter()
+            .copied()
+            .find(|existing| {
+                self.items
+                    .tab(*existing)
+                    .and_then(|tab| tab.url.as_ref())
+                    .is_some_and(|existing| existing == &url)
+            })
+        else {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        };
+        if self.items.tab(kept).is_none_or(|tab| tab.has_view()) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
+        self.cancel_favicon_attempt(kept);
+        let fx = self.items.remove(kept);
+        mutation_result(self.commit(fx))
+    }
+
     /// Keeps sites another browser kept, after those already kept and without
     /// repeating one. They wait unloaded, as kept sites do until opened.
     pub(super) fn keep_imported_sites(

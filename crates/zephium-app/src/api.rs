@@ -349,6 +349,8 @@ pub enum Command {
     },
     /// Keeps one of onboarding's catalog sites, named by its catalog id.
     KeepSite(String),
+    /// Lets go of a catalog site onboarding kept, named by its catalog id.
+    ReleaseSite(String),
     RenameFocusedProfile(String),
     /// A named profile with its own space, engine store and content policy.
     CreateProfile {

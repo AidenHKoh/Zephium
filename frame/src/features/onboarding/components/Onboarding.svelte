@@ -14,13 +14,13 @@
   import { WORDMARK } from "$shared/lib/wordmark";
   import * as motion from "$session/motion.svelte";
   import { SITES, SITE_URLS } from "../lib/catalog";
-  import { frame, SHOTS, STAGE, type Shot } from "../lib/camera";
+  import { scene } from "$shared/sky";
+  import { cover, frame, land, NEWTAB, PAGE, SHOTS, STAGE, type Shot } from "../lib/camera";
   import { neighbour, position, stepsFor, type Step } from "../lib/flow";
   import { formName, type Box } from "../lib/formation";
   import { keptSites } from "../lib/kept";
-  import { followUp, type Mind, type Then } from "../lib/minds";
+  import type { Mind } from "../lib/minds";
   import Window from "./Window.svelte";
-  import You from "./steps/You.svelte";
   import Import from "./steps/Import.svelte";
   import Essentials from "./steps/Essentials.svelte";
   import Launcher from "./steps/Launcher.svelte";
@@ -30,15 +30,15 @@
     onfinish,
     windowControls,
   }: {
-    /** Hands the window to the browser, which then opens the setup chosen
-     *  here, if any; false if native refused. */
-    onfinish: (then: Then | null) => Promise<boolean>;
+    /** Hands the window to the browser, on its new tab; false if native
+     *  refused. */
+    onfinish: () => Promise<boolean>;
     windowControls?: Snippet;
   } = $props();
 
   let step = $state<Step>("welcome");
-  /** Welcome's own beats: the air gathering, the name standing, and the
-   *  air gone, with nothing of it left running. */
+  /** Welcome's own beats: the dots gathering, the name standing, and the
+   *  dots gone, with nothing of them left running. */
   let phase = $state<"waiting" | "forming" | "formed" | "still">("waiting");
   let leaving = $state(false);
   let notice = $state<string | null>(null);
@@ -46,14 +46,21 @@
   let width = $state(0);
   let height = $state(0);
   let fit = $derived(width && height ? Math.min(width / STAGE.width, height / STAGE.height) : 1);
+  // The window's whole view, in stage pixels: the stage is centred in it.
+  let view = $derived({ width: width / fit, height: height / fit });
+  // Placed once the view is measured; until then nothing glides into place.
+  let placed = $state(false);
+  $effect(() => {
+    if (placed || !width || !height) return;
+    const next = requestAnimationFrame(() => (placed = true));
+    return () => cancelAnimationFrame(next);
+  });
+  let sky = $derived(scene());
 
   let air = $state<HTMLCanvasElement>();
   let windowElement = $state<HTMLElement>();
   let flights = $state<HTMLElement>();
 
-  const current = tabs.profile()?.name ?? "";
-  // Asked for and kept, and for now shown nowhere.
-  let name = $state(current === "Personal" ? "" : current);
   let mind = $state<Mind | null>(null);
   let server = $state.raw<WorkLocalServerV1 | null>(null);
 
@@ -67,21 +74,27 @@
     return { from, bookmarks };
   });
 
-  let shot = $derived<Shot>(step === "welcome" ? SHOTS.peek : SHOTS[step]);
+  // Welcome is the window's new tab, so close that its sky is all there is;
+  // every step after pulls back from it, and leaving goes back into it.
+  let close = $derived(cover(view));
+  let shot = $derived<Shot>(step === "welcome" || leaving ? close : SHOTS[step]);
+  // The new tab's name, where welcome shows it: the dots gather there.
+  let hero = $derived.by((): Box => {
+    const [x, y] = land(close, [PAGE.x + NEWTAB.name.x, PAGE.y + NEWTAB.name.y]);
+    return { x, y, w: NEWTAB.name.w * close.scale, h: NEWTAB.name.h * close.scale };
+  });
   // The fade is masked one scene past the last shot that fades, by then fully
   // open, so taking the mask away never shows as a jump.
   let masked = $derived(
-    step === "welcome" || step === "you" || step === "import" || step === "ai" || step === "ready",
+    step === "welcome" || step === "import" || step === "ai" || step === "ready",
   );
   // Work and its models are offered only while Work and AI are on.
   let ai = $derived(preferences.aiEnabled());
   let place = $derived(position(step, ai));
 
-  const box: Box = { x: 340, y: 266, w: 560, h: (560 * WORDMARK.height) / WORDMARK.width };
-
-  // The name forms once the window is actually on screen, never into a
-  // window native has not revealed yet.
-  let revealed = $derived(motion.launchState() !== "armed");
+  // The name forms once the window is actually on screen and its sky in
+  // place, never into a window native has not revealed yet.
+  let revealed = $derived(motion.launchState() !== "armed" && placed);
   // Started by the reveal alone: nothing it reads later, the stage's scale
   // included, may restart or cut short a formation already under way.
   $effect(() => {
@@ -94,7 +107,8 @@
         phase = "still";
         return;
       }
-      const color = getComputedStyle(document.documentElement).getPropertyValue("--color-text");
+      const color = getComputedStyle(document.documentElement).getPropertyValue("--sky-ink");
+      const box = hero;
       return formName(air, {
         stage: STAGE,
         box,
@@ -105,7 +119,7 @@
           context.scale(WORDMARK.scaleX, WORDMARK.scaleY);
         },
         density: Math.min(2, window.devicePixelRatio || 1) * Math.min(1.5, fit),
-        color: color.trim() || "#f4f4f6",
+        color: color.trim() || "#ffffff",
         onformed: () => (phase = "formed"),
         ondone: () => (phase = "still"),
       });
@@ -114,38 +128,34 @@
 
   function begin() {
     if (step !== "welcome" || (phase !== "formed" && phase !== "still")) return;
-    step = "you";
+    step = "import";
   }
 
   function go(next: Step | undefined) {
     if (!next || leaving) return;
-    if (step === "you") saveName();
     step = next;
-  }
-
-  function saveName() {
-    const chosen = name.trim();
-    if (chosen && chosen !== current) void tabs.renameProfile(chosen);
   }
 
   async function finish() {
     if (leaving) return;
-    if (step === "you") saveName();
     leaving = true;
     const profile = tabs.profile()?.id;
+    // The scene ends on the new tab, so the browser opens on one: a tab left
+    // on a page from before is set aside for a new one.
+    if (tabs.activeTab()?.url) tabs.open();
     // A server already running here is connected now, so Work opens ready.
     if (mind === "local" && server && profile)
       await commands.workSetModelEndpoint(profile, server.base).catch(() => null);
-    // The scene steps back to nothing first; the browser then arrives in the
-    // window it leaves, with its own launch.
-    await new Promise((resolve) => setTimeout(resolve, reducedMotion() ? 0 : 1000));
-    if (await onfinish(followUp(mind, server))) return;
+    // The words go, and the camera goes back into the new tab until its sky
+    // is all there is; the browser then arrives on that sky, with its own
+    // launch.
+    await new Promise((resolve) => setTimeout(resolve, reducedMotion() ? 0 : 1500));
+    if (await onfinish()) return;
     leaving = false;
     say(m.onb_finish_failed());
   }
 
   const primary = $derived.by((): string => {
-    if (step === "you") return name.trim() ? m.onb_continue() : m.onb_not_now();
     if (step === "import") return imported ? m.onb_continue() : m.onb_skip_step();
     if (step === "ai") return mind ? m.onb_continue() : m.onb_not_now();
     if (step === "ready") return m.onb_start();
@@ -162,7 +172,6 @@
   }
 
   const headings: Partial<Record<Step, { title: () => string; body?: () => string }>> = {
-    you: { title: m.onb_you_title },
     import: { title: m.onb_import_title, body: m.onb_import_body },
     essentials: { title: m.onb_essentials_title, body: m.onb_essentials_body },
     launcher: { title: m.onb_launcher_title, body: m.onb_launcher_body },
@@ -210,37 +219,19 @@
   data-step={step}
   data-phase={phase}
   data-leaving={leaving}
+  data-sky={sky}
   bind:clientWidth={width}
   bind:clientHeight={height}
 >
   <div class="ground" data-tauri-drag-region></div>
 
   <div class="stage" style:transform={`translate(-50%, -50%) scale(${fit})`}>
-    {#if phase !== "still"}<canvas class="air" bind:this={air} aria-hidden="true"></canvas>{/if}
-    <svg
-      class="name"
-      viewBox="{WORDMARK.x} {WORDMARK.y} {WORDMARK.width} {WORDMARK.height}"
-      style:left={`${box.x}px`}
-      style:top={`${box.y}px`}
-      style:width={`${box.w}px`}
-      style:height={`${box.h}px`}
-      role="img"
-      aria-label="Zephium"
-      ><path d={WORDMARK.d} transform="scale({WORDMARK.scaleX} {WORDMARK.scaleY})" /></svg
-    >
-
-    <div class="welcome" data-glass-text>
-      <p>{m.onb_tagline()}</p>
-      <Button variant="primary" size="large" shape="capsule" onclick={begin}
-        >{m.onb_begin()}<KeyHint keys={["↵"]} /></Button
-      >
-    </div>
-
     <div
       class="rig"
       style:transform={frame(shot)}
       style:--reach={`${shot.fade ?? 1200}px`}
       data-masked={masked}
+      data-placed={placed}
     >
       <Window
         mode={step === "work" || step === "ai" ? "work" : "browse"}
@@ -248,8 +239,21 @@
         {imported}
         playing={step === "work"}
         modes={ai}
+        scene={sky}
+        space={tabs.activeSpace()?.name ?? ""}
+        named={!leaving && (step !== "welcome" || phase === "formed" || phase === "still")}
+        timed={!leaving && step !== "welcome"}
         bind:element={windowElement}
       />
+    </div>
+
+    {#if phase !== "still"}<canvas class="air" bind:this={air} aria-hidden="true"></canvas>{/if}
+
+    <div class="welcome" style:top={`${hero.y + hero.h + 30}px`} data-glass-text>
+      <p>{m.onb_tagline()}</p>
+      <Button variant="primary" size="large" shape="capsule" onclick={begin}
+        >{m.onb_begin()}<KeyHint keys={["↵"]} /></Button
+      >
     </div>
 
     {#key step}
@@ -268,9 +272,7 @@
         </header>
       {/if}
       <div class="scene" data-scene={step}>
-        {#if step === "you"}
-          <You bind:name onsubmit={advance} />
-        {:else if step === "import"}
+        {#if step === "import"}
           <Import />
         {:else if step === "essentials"}
           <Essentials {kept} {landing} flights={() => flights} onfailed={failed} />
@@ -284,7 +286,7 @@
 
     <nav class="bar" aria-label={m.onb_label()} data-glass-text>
       <span class="side">
-        {#if step !== "you"}<Button
+        {#if neighbour(step, -1, ai)}<Button
             variant="ghost"
             size="large"
             shape="capsule"
@@ -355,44 +357,30 @@
     pointer-events: none;
   }
 
-  /* The name, solid, takes the place of the air that formed it. */
-  .name {
-    position: absolute;
-    overflow: visible;
-    opacity: 0;
-    transition: opacity 1200ms var(--ease-out);
-  }
-
-  .name path {
-    fill: var(--color-text);
-  }
-
-  .onboarding:is([data-phase="formed"], [data-phase="still"]) .name {
-    opacity: 1;
-  }
-
-  .onboarding:not([data-step="welcome"]) .name {
-    opacity: 0;
-    transition-duration: 360ms;
-  }
-
+  /* Under the name, in the sky: white words, and a white control with the
+     sky's own ink. */
   .welcome {
+    --color-lit: var(--sky-ink);
+    --color-lit-hover: var(--sky-ink-hover);
+    --color-on-lit: var(--sky-on-ink);
+
     position: absolute;
-    inset-block-start: 380px;
     inset-inline: 0;
     display: grid;
     justify-items: center;
-    gap: 30px;
+    gap: 28px;
     pointer-events: none;
   }
 
   .welcome p {
     max-inline-size: 30ch;
     margin: 0;
-    color: var(--color-muted);
+    color: var(--sky-ink);
     font-size: 17px;
+    font-weight: 500;
     line-height: 1.5;
     text-align: center;
+    text-shadow: 0 1px 18px var(--sky-shadow);
     text-wrap: balance;
   }
 
@@ -452,12 +440,8 @@
     );
   }
 
-  .onboarding[data-step="welcome"]:is([data-phase="waiting"], [data-phase="forming"]) .rig {
-    opacity: 0;
-  }
-
-  .onboarding[data-step="welcome"]:is([data-phase="formed"], [data-phase="still"]) .rig {
-    transition-delay: 500ms;
+  .rig[data-placed="false"] {
+    transition: none;
   }
 
   @property --reach {
@@ -542,7 +526,7 @@
   /* Beside the window, centred on it however many browsers were found. */
   .scene[data-scene="import"] {
     inset-block-start: 272px;
-    inset-inline: 856px auto;
+    inset-inline: 832px auto;
     block-size: 392px;
     align-content: center;
   }
@@ -665,17 +649,8 @@
     color: var(--color-muted);
   }
 
-  /* Leaving: the words go first, then the whole scene steps back and away
-     while the browser fades in beneath it. Onboarding draws a miniature,
-     so it never pretends to become the real window. */
-  .onboarding[data-leaving="true"] .stage {
-    opacity: 0;
-    scale: 0.9;
-    transition:
-      opacity 820ms var(--ease-out) 120ms,
-      scale 1000ms var(--ease-emphasized);
-  }
-
+  /* Leaving: the words go first, then the camera goes back into the new
+     tab, and the browser arrives on its sky. */
   .onboarding[data-leaving="true"] :is(.head, .scene, .top) {
     opacity: 0;
     transition: opacity 360ms var(--ease-exit);
@@ -701,10 +676,8 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .onboarding[data-leaving="true"] .stage,
     .rig,
     .bar,
-    .name,
     .welcome > :global(*) {
       transition: none;
     }
