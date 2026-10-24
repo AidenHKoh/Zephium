@@ -347,7 +347,11 @@ export function createSearchSurface(options: {
   }
 
   async function copy() {
-    const address = addressOf(rows.find((row) => row.id === selectedId));
+    const row = rows.find((candidate) => candidate.id === selectedId);
+    // The search row reads the field before its answer arrives; its address
+    // is the previous query's until then.
+    if (!settled && row?.result?.kind === "search") return;
+    const address = addressOf(row);
     if (address) await copyText(address, "copied");
   }
 

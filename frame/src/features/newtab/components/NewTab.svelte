@@ -152,12 +152,12 @@
   $effect(() => {
     const wanted = scene;
     let live = true;
-    void decode(wanted).then(
-      () => {
-        if (live) shown = wanted;
-      },
-      () => {},
-    );
+    // A sky that cannot be decoded leaves the page its own colour; it never
+    // keeps the name and the controls hidden.
+    const reveal = () => {
+      if (live) shown = wanted;
+    };
+    void decode(wanted).then(reveal, reveal);
     return () => {
       live = false;
     };
