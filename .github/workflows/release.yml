@@ -92,6 +92,27 @@ jobs:
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "pubkey=${pubkey}" >> "${GITHUB_OUTPUT}"
 
+      # Strict engine and advisory reviews, blocker seed freshness, and
+      # outstanding vendor fixes.
+      - name: Release security gate
+        run: cargo xtask check-release-engine-security
+
+  # Pushing the tag starts this workflow alongside the main CI run for the same
+  # commit, which takes ~20 minutes, so the wait is its own job: the builds and
+  # the component suite run meanwhile, and nothing is drafted until it passes.
+  ci:
+    name: Main CI for the release commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
       - name: Require successful CI for this exact release commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -116,11 +137,6 @@ jobs:
           done
           echo "::error::No successful main CI run exists for release commit ${candidate}."
           exit 1
-
-      # Strict engine and advisory reviews, blocker seed freshness, and
-      # outstanding vendor fixes.
-      - name: Release security gate
-        run: cargo xtask check-release-engine-security
 
   # The component suite runs only on demand elsewhere, so every release runs
   # it and shows its result. It does not hold the builds or the draft yet:
@@ -354,7 +370,7 @@ jobs:
 
   publish:
     name: Draft release
-    needs: [gate, macos, windows]
+    needs: [gate, ci, macos, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
