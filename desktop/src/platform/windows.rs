@@ -89,7 +89,7 @@ pub fn enforce_runtime_security_floor(
     let (_, advisory) =
         zephium_core::webview2::assess_runtime(&reported, now).map_err(|error| {
             format!(
-                "WebView2 runtime {reported:?} is not supported ({error}). Zephium needs the stable Evergreen WebView2 Runtime"
+                "Zephium needs the latest Microsoft Edge WebView2 Runtime. This PC has WebView2 {reported}.\n\nInstall or update the Evergreen WebView2 Runtime from https://developer.microsoft.com/microsoft-edge/webview2/, then open Zephium again.\n\nDetails: {error}"
             )
         })?;
     Ok(advisory)
