@@ -2898,6 +2898,7 @@
   "import_kind_reading": "Lendo…",
   "import_kind_added": "{count} adicionados",
   "import_kind_current": "Já estava aqui",
+  "import_kind_none": "Nada para importar",
   "import_kind_skipped": "Ignorado",
   "import_dismiss": "Concluído",
   "download_of": "{received} de {total}",

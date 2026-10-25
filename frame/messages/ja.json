@@ -2898,6 +2898,7 @@
   "import_kind_reading": "読み取り中…",
   "import_kind_added": "{count} 件追加",
   "import_kind_current": "すでにあります",
+  "import_kind_none": "インポートするものがありません",
   "import_kind_skipped": "スキップ",
   "import_dismiss": "完了",
   "download_of": "{received} / {total}",

@@ -2898,6 +2898,7 @@
   "import_kind_reading": "Wird gelesen…",
   "import_kind_added": "{count} hinzugefügt",
   "import_kind_current": "Schon vorhanden",
+  "import_kind_none": "Nichts zu importieren",
   "import_kind_skipped": "Übersprungen",
   "import_dismiss": "Fertig",
   "download_of": "{received} von {total}",

@@ -2898,6 +2898,7 @@
   "import_kind_reading": "Okunuyor…",
   "import_kind_added": "{count} eklendi",
   "import_kind_current": "Zaten burada",
+  "import_kind_none": "İçe aktarılacak bir şey yok",
   "import_kind_skipped": "Atlandı",
   "import_dismiss": "Bitti",
   "download_of": "{received} / {total}",

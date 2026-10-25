@@ -2898,6 +2898,7 @@
   "import_kind_reading": "Lecture…",
   "import_kind_added": "{count} ajouté(s)",
   "import_kind_current": "Déjà présent",
+  "import_kind_none": "Rien à importer",
   "import_kind_skipped": "Ignoré",
   "import_dismiss": "Terminé",
   "download_of": "{received} sur {total}",

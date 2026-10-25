@@ -2898,6 +2898,7 @@
   "import_kind_reading": "Чтение…",
   "import_kind_added": "Добавлено: {count}",
   "import_kind_current": "Уже есть",
+  "import_kind_none": "Нечего импортировать",
   "import_kind_skipped": "Пропущено",
   "import_dismiss": "Готово",
   "download_of": "{received} из {total}",

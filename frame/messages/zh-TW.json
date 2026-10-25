@@ -2898,6 +2898,7 @@
   "import_kind_reading": "讀取中…",
   "import_kind_added": "已加入 {count} 個",
   "import_kind_current": "已存在",
+  "import_kind_none": "沒有可匯入的內容",
   "import_kind_skipped": "已略過",
   "import_dismiss": "完成",
   "download_of": "{received} / {total}",
