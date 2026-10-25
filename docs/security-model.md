@@ -1090,7 +1090,7 @@ material, packaged hostile enforcement tests on every supported OS, legal approv
 external review, and recorded resource/endurance budgets. Full capability and failure
 details are in `docs/adblock.md`.
 
-**Dependency policy.** Tauri, Tauri Runtime Wry, Wry, and adblock-rust are vendored from
+**Dependency policy.** Tauri, Tauri Runtime Wry, Wry, Tao, and adblock-rust are vendored from
 the immutable upstream revisions recorded in their respective
 `vendor/*/UPSTREAM.md` files. The Tauri patch preserves pathless ephemeral storage for
 implicit Linux incognito WebViews and rejects contradictory explicit persistent storage
