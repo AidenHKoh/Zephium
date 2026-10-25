@@ -513,6 +513,28 @@ impl UiStartupGate {
         }
     }
 
+    /// Whether the main window may navigate to `url` given where this launch
+    /// is. Once the first document has been shown, the bootstrap blank page
+    /// is gone for good; once onboarding handed over, so is onboarding. Both
+    /// are still in the back-forward list, so history navigation of any kind
+    /// (mouse button, swipe, shortcut, script) ends here.
+    fn permits_navigation(&self, url: &tauri::Url) -> bool {
+        if !ui_navigation_allowed(url) {
+            return false;
+        }
+        if url.as_str() == PRIVILEGED_BOOTSTRAP_URL {
+            return !self.visible.load(Ordering::Acquire)
+                && !self.handed_over.load(Ordering::Acquire);
+        }
+        let onboarding = self.handover.as_ref().map(|handover| &handover.onboarding);
+        !(self.handed_over.load(Ordering::Acquire)
+            && onboarding.is_some_and(|onboarding| {
+                url.scheme() == onboarding.scheme()
+                    && url.host_str() == onboarding.host_str()
+                    && url.path() == onboarding.path()
+            }))
+    }
+
     /// Whether the caller is the onboarding page this launch opened, and it
     /// has not yet handed the window over.
     fn serves_onboarding(&self, window: &WebviewWindow) -> bool {
@@ -1954,7 +1976,14 @@ fn cleanup_privileged_runtime_after_exit() -> bool {
 fn navigation_lock() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("ui-navigation-lock")
         .on_navigation(|webview, url| {
-            let allowed = ui_navigation_allowed(url);
+            let allowed = if webview.label() == MAIN_LABEL {
+                webview.try_state::<UiStartupGate>().map_or_else(
+                    || ui_navigation_allowed(url),
+                    |gate| gate.permits_navigation(url),
+                )
+            } else {
+                ui_navigation_allowed(url)
+            };
             if !allowed
                 && NAVIGATION_DENIAL_LOGS_REMAINING
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -8672,6 +8701,48 @@ mod tests {
         assert!(!super::ui_navigation_allowed(
             &Url::parse("file:///etc/passwd").unwrap()
         ));
+    }
+
+    #[test]
+    fn history_never_returns_to_onboarding_or_the_bootstrap_page() {
+        #[cfg(not(target_os = "windows"))]
+        let base = "tauri://localhost";
+        #[cfg(target_os = "windows")]
+        let base = "http://tauri.localhost";
+        let url = |path: &str| Url::parse(&format!("{base}/{path}")).unwrap();
+        let bootstrap = Url::parse(super::PRIVILEGED_BOOTSTRAP_URL).unwrap();
+        let gate = super::UiStartupGate::onboarding_first(
+            url(super::ONBOARDING_PAGE),
+            url("browser.html"),
+        );
+
+        assert!(gate.permits_navigation(&bootstrap));
+        assert!(gate.permits_navigation(&url(super::ONBOARDING_PAGE)));
+
+        gate.visible
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(!gate.permits_navigation(&bootstrap));
+        assert!(gate.permits_navigation(&url(super::ONBOARDING_PAGE)));
+
+        gate.handed_over
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(gate.permits_navigation(&url("browser.html")));
+        assert!(!gate.permits_navigation(&bootstrap));
+        for onboarding in [
+            super::ONBOARDING_PAGE,
+            "onboarding.html?again",
+            "onboarding.html#scene",
+        ] {
+            assert!(!gate.permits_navigation(&url(onboarding)), "{onboarding}");
+        }
+        assert!(!gate.permits_navigation(&Url::parse("https://example.com/").unwrap()));
+
+        let browser_only = super::UiStartupGate::new(url("browser.html"));
+        browser_only
+            .visible
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(!browser_only.permits_navigation(&bootstrap));
+        assert!(browser_only.permits_navigation(&url("browser.html")));
     }
 
     #[test]
