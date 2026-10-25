@@ -2224,6 +2224,8 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             request_witness,
             #[cfg(target_os = "windows")]
+            extension_window: Cell::new(None),
+            #[cfg(target_os = "windows")]
             windows_final_discard: None,
             #[cfg(target_os = "windows")]
             discard_deadline: None,
