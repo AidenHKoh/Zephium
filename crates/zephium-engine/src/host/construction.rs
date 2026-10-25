@@ -2161,7 +2161,12 @@ impl EngineHost {
             // the first content load after the outer generation was retired.
             return None;
         }
-        let Some(epoch) = navigation.begin(url) else {
+        let initial = if native_popup {
+            navigation.begin_adopted(url)
+        } else {
+            navigation.begin(url)
+        };
+        let Some(epoch) = initial else {
             eprintln!("engine: could not establish initial navigation epoch");
             if report_failure {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
