@@ -5400,6 +5400,8 @@ export type WorkModelFaultV1 =
 "key_refused" |
 /**  The person's own provider account is out of credit. */
 "provider_credit" |
+/**  The provider plan's per-minute limit is smaller than one request. */
+"plan_limit" |
 /**  The account's included Zephium AI usage, and any extra, is spent. */
 "hosted_usage" |
 /**  The chosen Zephium AI model needs another plan. */

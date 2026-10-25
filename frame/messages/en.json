@@ -2429,6 +2429,7 @@
   "work_fault_missing_key": "The chosen model has no key.",
   "work_fault_key_refused": "The model’s provider refused its key.",
   "work_fault_provider_credit": "The model provider’s account is out of credit.",
+  "work_fault_plan_limit": "One request is larger than the model provider’s plan allows per minute. Upgrade the plan there or choose another model.",
   "work_fault_fix_plan": "Upgrade or use a key",
   "work_fault_fix_sign_in": "Sign in",
   "work_fault_plan_required": "This model needs a different Zephium plan.",
