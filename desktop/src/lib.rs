@@ -1141,15 +1141,34 @@ fn contain_tauri_setup_failure<E>(
 
 fn request_startup_failure(app: &tauri::AppHandle, error: impl std::fmt::Display) {
     let error = error.to_string();
+    let problem = startup_alert::StartupProblem::classify(&error);
+    request_classified_startup_failure(app, problem, &error, &error);
+}
+
+/// A failure of the setup transaction: one that knows what the person can do
+/// about it says so, any other is classified from its text.
+fn request_setup_failure(app: &tauri::AppHandle, error: Box<dyn std::error::Error>) {
+    match error.downcast::<startup_alert::StartupFailure>() {
+        Ok(failure) => request_classified_startup_failure(
+            app,
+            failure.problem(),
+            &failure.to_string(),
+            failure.detail(),
+        ),
+        Err(error) => request_startup_failure(app, error),
+    }
+}
+
+fn request_classified_startup_failure(
+    app: &tauri::AppHandle,
+    problem: startup_alert::StartupProblem,
+    cause: &str,
+    detail: &str,
+) {
     write_diagnostic(format_args!(
-        "startup: failed to initialize Zephium: {error}"
+        "startup: failed to initialize Zephium: {cause}"
     ));
-    startup_alert::show_then(
-        app,
-        startup_alert::StartupProblem::classify(&error),
-        &error,
-        request_orderly_terminal_failure,
-    );
+    startup_alert::show_then(app, problem, detail, request_orderly_terminal_failure);
 }
 
 fn request_shell_terminal_failure(
@@ -5778,6 +5797,10 @@ pub fn run() {
     }
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
+    let context = tauri::generate_context!();
+    // A launch that stops before setup has nowhere else to say why.
+    #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
+    platform::imp::open_startup_log(&context.config().identifier);
     #[cfg(target_os = "macos")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
@@ -5807,12 +5830,12 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
-        Err(error) => {
+        Err(failure) => {
             // This runs before Builder creates either privileged chrome
             // or raw content. Preview, overridden, or unparseable runtimes
             // remain hard failures; an outdated one is an advisory.
-            diagnostic!("security: {error}");
-            startup_alert::show_blocking(startup_alert::StartupProblem::UnsupportedSystem, &error);
+            diagnostic!("security: {failure}");
+            startup_alert::show_blocking(failure.problem(), failure.detail());
             std::process::exit(78);
         }
     };
@@ -6142,17 +6165,15 @@ pub fn run() {
             });
 
             #[cfg(target_os = "windows")]
-            let platform_initialized = platform::imp::init(
+            platform::imp::init(
                 &window,
                 &privileged_runtime.main,
                 runtime_update_notifier.clone(),
-            );
+            )?;
             #[cfg(target_os = "macos")]
-            let platform_initialized = platform::imp::init(&window);
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            if !platform_initialized {
+            if !platform::imp::init(&window) {
                 return Err(std::io::Error::other(
-                    "required privileged-WebView hardening or native composition failed",
+                    "the browser window couldn't be set up with its required protections",
                 )
                 .into());
             }
@@ -6825,7 +6846,7 @@ pub fn run() {
             {
                 if !platform::imp::harden_privileged(&panel_window) {
                     return Err(std::io::Error::other(
-                        "required privileged panel WKWebView hardening failed",
+                        "the launcher panel couldn't be set up with its required protections",
                     )
                     .into());
                 }
@@ -6834,16 +6855,11 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 platform::imp::round_corners(&panel_window);
-                if !platform::imp::harden_privileged(
+                platform::imp::harden_privileged(
                     &panel_window,
                     &privileged_runtime.panel,
                     runtime_update_notifier.clone(),
-                ) {
-                    return Err(std::io::Error::other(
-                        "required privileged panel WebView2 hardening failed",
-                    )
-                    .into());
-                }
+                )?;
                 platform::imp::apply_material(&panel_window, true);
             }
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -6996,17 +7012,20 @@ pub fn run() {
             })();
 
             contain_tauri_setup_failure(setup_result, |error| {
-                request_startup_failure(app.handle(), error)
+                request_setup_failure(app.handle(), error)
             })
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .unwrap_or_else(|error| {
             diagnostic!("startup: failed to build Zephium: {error}");
             #[cfg(not(target_os = "linux"))]
-            startup_alert::show_blocking(
-                startup_alert::StartupProblem::Other,
-                &error.to_string(),
-            );
+            {
+                let error = error.to_string();
+                startup_alert::show_blocking(
+                    startup_alert::StartupProblem::classify(&error),
+                    &error,
+                );
+            }
             std::process::exit(1);
         });
 
@@ -8013,7 +8032,7 @@ mod tests {
             .split(".setup(move |app| {")
             .nth(1)
             .expect("desktop setup hook")
-            .split(".build(tauri::generate_context!())")
+            .split(".build(context)")
             .next()
             .expect("bounded desktop setup hook");
         let state = setup
@@ -8111,7 +8130,7 @@ mod tests {
             .split(".setup(move |app| {")
             .nth(1)
             .expect("desktop setup hook")
-            .split(".build(tauri::generate_context!())")
+            .split(".build(context)")
             .next()
             .expect("bounded desktop setup hook");
 
@@ -8579,7 +8598,7 @@ mod tests {
     fn privileged_webview2_save_as_is_cancelled_before_dialog_suppression() {
         let source = include_str!("platform/windows.rs");
         let handler = source
-            .split("let core25 = core.cast::<ICoreWebView2_25>()?")
+            .split("let core25 = require::<ICoreWebView2_25>(&core, \"ICoreWebView2_25\")?")
             .nth(1)
             .expect("mandatory privileged SaveAsUIShowing interface")
             .split("// Tauri's navigation hook")
@@ -8597,7 +8616,7 @@ mod tests {
     fn privileged_webview2_autofill_surfaces_are_read_back_disabled() {
         let source = include_str!("platform/windows.rs");
         let policy = source
-            .split("let settings4 = settings.cast::<ICoreWebView2Settings4>()?")
+            .split("let settings4 = require::<ICoreWebView2Settings4>(&settings, \"Settings4\")?")
             .nth(1)
             .expect("mandatory privileged Settings4 policy")
             .split("let mut token = 0_i64")
