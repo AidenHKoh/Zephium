@@ -509,6 +509,11 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
+	/**
+	 *  `None` where the system has no such setting to read: the page then keeps
+	 *  its language's own hour cycle.
+	 */
+	systemClock24h: () => __TAURI_INVOKE<boolean | null>("system_clock_24h"),
 	updateStatus: () => __TAURI_INVOKE<({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: string | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never } | null>("update_status"),
 	/**
 	 *  Checks for a newer release and downloads it. Returns the resulting status;

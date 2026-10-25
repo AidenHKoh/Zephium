@@ -114,6 +114,7 @@ mod startup_alert;
 #[cfg(feature = "work-development-traces")]
 mod startup_styles;
 mod swipe;
+mod system_time;
 mod updates;
 mod voice;
 mod webext;
@@ -1811,6 +1812,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             download_call,
             download_open_access_settings,
             about::about_info,
+            system_time::system_clock_24h,
             updates::update_status,
             updates::update_check,
             updates::update_relaunch,
