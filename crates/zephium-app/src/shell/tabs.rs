@@ -14,7 +14,7 @@ pub(super) enum AfterClose {
     #[default]
     Next,
     Previous,
-    /// The tab used most recently before the closed one.
+    /// The tab activated most recently before the closed one.
     Recent,
 }
 
@@ -356,10 +356,28 @@ impl Shell {
         match self.tab_preferences.after_close {
             AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
             AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
-            AfterClose::Recent => tabs
-                .iter()
-                .copied()
-                .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id)),
+            AfterClose::Recent => {
+                // `tabs` is this space's sidebar, with the profile's
+                // Essentials, so the search skips tabs of other spaces.
+                let candidates: std::collections::HashSet<ItemId> = tabs.iter().copied().collect();
+                // A tab never activated here, such as one restored at launch,
+                // is not on the stack: rank the rest as before, without
+                // Essentials, so a closed one is never reopened on its own.
+                self.residency
+                    .recent
+                    .most_recent_first()
+                    .find(|id| candidates.contains(id))
+                    .or_else(|| {
+                        tabs.iter()
+                            .copied()
+                            .filter(|id| {
+                                !self.items.get(*id).is_some_and(|item| {
+                                    matches!(item.placement, Placement::Favorites { .. })
+                                })
+                            })
+                            .max_by_key(|id| (self.residency.last_focus.get(id).copied(), *id))
+                    })
+            }
         }
     }
 

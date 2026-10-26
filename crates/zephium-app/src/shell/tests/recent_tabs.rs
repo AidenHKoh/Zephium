@@ -318,3 +318,383 @@ fn show_browser_page_falls_back_to_most_recent_web_tab() {
 
     assert_eq!(active_id(&screen), middle);
 }
+
+// After closing a tab, "Previously active tab": the stack first, Essentials
+// included; then, without Essentials, the newest `last_focus`, then the
+// newest id.
+
+fn prefer_recent(shell: &mut Shell) {
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.after-close".into(),
+        value: "recent".into(),
+    });
+}
+
+fn restart(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.after-close".into(), "recent".into());
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    (shell, engine, screen)
+}
+
+fn make_essential(shell: &mut Shell, id: ItemId) {
+    shell.handle(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+    assert!(matches!(
+        shell.items.get(id).unwrap().placement,
+        Placement::Favorites { .. }
+    ));
+}
+
+/// A new space, switched to, with the tab it opens in front.
+fn new_space(shell: &mut Shell, screen: &Screen) -> (SpaceId, ItemId) {
+    let created = shell.handle_operation(Command::Space(Box::new(crate::SpaceCommand::Create {
+        name: "Other".into(),
+        look: Default::default(),
+    })));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    (shell.windows.focused().unwrap().space, active_id(screen))
+}
+
+fn today_in(space: SpaceId) -> Placement {
+    Placement::Space {
+        space,
+        section: SpaceSection::Today,
+    }
+}
+
+fn active(screen: &Screen) -> Option<ItemId> {
+    last(screen)
+        .active
+        .and_then(|active| ItemId::parse(&active))
+}
+
+#[test]
+fn after_close_recent_follows_activation_not_split_join() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let x = active_id(&screen);
+    let a = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, a, "left.example");
+    let b = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, b, "right.example");
+    shell.handle(Command::Activate(x));
+    shell.handle(Command::Activate(a));
+    shell.handle(Command::SplitWith {
+        other: b,
+        axis: Axis::Row,
+    });
+
+    shell.handle(Command::Close(a));
+
+    assert_eq!(
+        active_id(&screen),
+        x,
+        "joining a split is not an activation"
+    );
+}
+
+#[test]
+fn after_close_recent_ignores_work_pane_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let x = active_id(&screen);
+    navigate_and_commit(&mut shell, x, "x.example");
+    let shown = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, shown, "shown.example");
+    let y = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, y, "y.example");
+    shell.handle(Command::Activate(x));
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    let pane = shell.operation_work_pane_show(
+        WorkPaneTarget::Tab(shown),
+        Rect::new(300.0, 120.0, 720.0, 560.0),
+    );
+    assert_eq!(pane.outcome, OperationOutcome::Deferred);
+    shell.handle(Command::ShowBrowserPage(None));
+    assert_eq!(active_id(&screen), x);
+
+    shell.handle(Command::Close(x));
+
+    assert_eq!(active_id(&screen), y);
+}
+
+#[test]
+fn after_close_recent_skips_other_spaces_and_moved_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let home = shell.windows.focused().unwrap().space;
+    let a = active_id(&screen);
+    navigate_and_commit(&mut shell, a, "a.example");
+    let b = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, b, "b.example");
+    let (other, elsewhere) = new_space(&mut shell, &screen);
+    navigate_and_commit(&mut shell, elsewhere, "elsewhere.example");
+    shell.handle_operation(Command::Space(Box::new(crate::SpaceCommand::Switch(home))));
+    assert_eq!(active_id(&screen), b);
+    assert_eq!(stack(&shell)[1], elsewhere, "the other space's tab is next");
+
+    shell.handle(Command::Close(b));
+    assert_eq!(active_id(&screen), a);
+
+    let c = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, c, "c.example");
+    let moved = shell.handle_operation(Command::Space(Box::new(crate::SpaceCommand::MoveTab {
+        tab: c,
+        space: other,
+    })));
+    assert_ne!(moved.outcome, OperationOutcome::Rejected);
+    assert_eq!(active_id(&screen), a);
+    assert_eq!(
+        stack(&shell)[..2],
+        [a, c],
+        "the moved tab stays on the stack"
+    );
+}
+
+#[test]
+fn after_close_recent_without_any_activated_candidate() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    let second = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    let third = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, third, "third.example");
+    shell.handle(Command::Activate(first));
+    shell.persist();
+
+    let (mut shell, _engine, screen) = restart(store);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(stack(&shell), vec![first]);
+    shell.handle(Command::Close(first));
+
+    assert_eq!(active(&screen), Some(second.max(third)), "the newest id");
+}
+
+#[test]
+fn after_close_recent_restored_split_lands_on_other_half() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let a = active_id(&screen);
+    navigate_and_commit(&mut shell, a, "left.example");
+    let b = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, b, "right.example");
+    let _newer = open(&mut shell, &screen);
+    shell.handle(Command::Activate(a));
+    shell.handle(Command::SplitWith {
+        other: b,
+        axis: Axis::Row,
+    });
+    shell.persist();
+
+    let (mut shell, engine, screen) = restart(store);
+    assert_eq!(engine.last_layout().len(), 2);
+    assert_eq!(active_id(&screen), a);
+    shell.handle(Command::Close(a));
+
+    assert_eq!(active_id(&screen), b);
+}
+
+#[test]
+fn after_close_recent_never_picks_a_closed_essential() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let profile = shell.windows.focused().unwrap().profile;
+    let essential = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    make_essential(&mut shell, essential);
+    shell.handle(Command::Close(essential));
+    let slot = shell.items.roots(Placement::Favorites { profile })[0];
+    assert_ne!(slot, essential, "the Essential is kept under a new id");
+
+    let (space, fresh) = new_space(&mut shell, &screen);
+    let background = ItemId::from(5);
+    assert!(shell.items.insert_tab(background, today_in(space)));
+    assert!(slot > background);
+    shell.handle(Command::Close(fresh));
+
+    assert_eq!(active_id(&screen), background);
+    assert!(!shell.items.tab(slot).unwrap().has_view());
+}
+
+#[test]
+fn after_close_recent_with_only_essentials_left() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let a = active_id(&screen);
+    navigate_and_commit(&mut shell, a, "a.example");
+    let essential = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    make_essential(&mut shell, essential);
+    shell.handle(Command::Activate(a));
+    shell.persist();
+
+    let (mut shell, _engine, screen) = restart(store);
+    assert_eq!(active_id(&screen), a);
+    assert!(!shell.items.tab(essential).unwrap().has_view());
+    shell.handle(Command::Close(a));
+
+    assert_eq!(active(&screen), None);
+    assert_eq!(shell.windows.focused().unwrap().active, None);
+    assert!(!shell.items.tab(essential).unwrap().has_view());
+}
+
+#[test]
+fn after_close_recent_fallback_prefers_touched_tabs() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let (space, fresh) = new_space(&mut shell, &screen);
+    navigate_and_commit(&mut shell, fresh, "fresh.example");
+    let shown = ItemId::from(10);
+    assert!(shell.items.insert_tab(shown, today_in(space)));
+    navigate_and_commit(&mut shell, shown, "shown.example");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    let pane = shell.operation_work_pane_show(
+        WorkPaneTarget::Tab(shown),
+        Rect::new(300.0, 120.0, 720.0, 560.0),
+    );
+    assert_eq!(pane.outcome, OperationOutcome::Deferred);
+    shell.handle(Command::ShowBrowserPage(None));
+    let newer = ItemId::from(u128::MAX - 1);
+    assert!(shell.items.insert_tab(newer, today_in(space)));
+
+    shell.handle(Command::Close(fresh));
+
+    assert_eq!(active_id(&screen), shown);
+}
+
+#[test]
+fn after_close_recent_fallback_skips_touched_essential() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let profile = shell.windows.focused().unwrap().profile;
+    let (space, fresh) = new_space(&mut shell, &screen);
+    navigate_and_commit(&mut shell, fresh, "fresh.example");
+    let essential = ItemId::from(u128::MAX - 1);
+    assert!(shell
+        .items
+        .insert_tab(essential, Placement::Favorites { profile }));
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    let background = ItemId::from(5);
+    assert!(shell.items.insert_tab(background, today_in(space)));
+    shell.handle(Command::SplitWith {
+        other: essential,
+        axis: Axis::Row,
+    });
+    assert!(shell.residency.last_focus.contains_key(&essential));
+
+    shell.handle(Command::Close(fresh));
+
+    assert_eq!(active_id(&screen), background);
+}
+
+#[test]
+fn after_close_recent_reaches_an_activated_essential() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let essential = open(&mut shell, &screen);
+    navigate_and_commit(&mut shell, essential, "essential.example");
+    make_essential(&mut shell, essential);
+    let b = open(&mut shell, &screen);
+
+    shell.handle(Command::Close(b));
+
+    assert_eq!(active_id(&screen), essential);
+}
+
+#[test]
+fn after_close_recent_after_rejected_extensions_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let a = active_id(&screen);
+    let b = open(&mut shell, &screen);
+    shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    let extensions = active_id(&screen);
+    shell.handle(Command::Activate(a));
+    shell.handle(Command::Activate(b));
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+    let reopened = shell.handle_operation(Command::ShowBrowserPage(Some(
+        crate::BrowserPage::Extensions,
+    )));
+    assert_eq!(reopened.outcome, OperationOutcome::NativeAdmissionFailed);
+    engine
+        .reject_native_dispatch
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert_eq!(active_id(&screen), b);
+    assert_eq!(stack(&shell), vec![b, a, extensions]);
+
+    shell.handle(Command::Close(b));
+
+    assert_eq!(active_id(&screen), a);
+}
+
+#[test]
+fn after_close_recent_reaches_favorites_and_pinned() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    prefer_recent(&mut shell);
+    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
+    let pinned = Placement::Space {
+        space,
+        section: SpaceSection::Pinned,
+    };
+    let favorite = ItemId::generate();
+    assert!(shell
+        .items
+        .insert_tab(favorite, Placement::Favorites { profile }));
+    let folder = ItemId::generate();
+    assert!(shell.items.insert(zephium_core::item::Item {
+        id: folder,
+        parent: None,
+        placement: pinned,
+        kind: ItemKind::Folder {
+            name: "Folder".into()
+        },
+    }));
+    let child = ItemId::generate();
+    assert!(shell.items.insert_tab(child, pinned));
+    let tab = shell.items.tab(child).cloned().unwrap();
+    let _ = shell.items.remove(child);
+    assert!(shell.items.insert(zephium_core::item::Item {
+        id: child,
+        parent: Some(folder),
+        placement: pinned,
+        kind: ItemKind::Tab(tab),
+    }));
+
+    shell.handle(Command::Activate(child));
+    shell.handle(Command::Activate(favorite));
+    let b = open(&mut shell, &screen);
+    shell.handle(Command::Close(b));
+    assert_eq!(active_id(&screen), favorite);
+
+    shell.handle(Command::Activate(child));
+    let c = open(&mut shell, &screen);
+    shell.handle(Command::Close(c));
+    assert_eq!(active_id(&screen), child);
+}
