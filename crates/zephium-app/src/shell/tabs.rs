@@ -210,8 +210,7 @@ impl Shell {
             self.items.set_last_active(id, now);
         }
         self.cancel_page_permission_if_not_foreground();
-        self.residency.recent.push(id);
-        self.touch(id);
+        self.note_activation(id);
         self.items.ensure_view(id)
     }
 
@@ -442,6 +441,7 @@ impl Shell {
             }
             if let Some(replacement) = replacement {
                 self.items.set_lifecycle(replacement, Lifecycle::Active);
+                self.note_activation(replacement);
             }
         }
         let _ = self.commit(effects);

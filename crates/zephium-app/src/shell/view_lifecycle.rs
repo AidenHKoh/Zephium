@@ -1096,10 +1096,21 @@ impl Shell {
                     window.active = Some(replacement);
                 }
                 self.items.set_lifecycle(replacement, Lifecycle::Active);
-                self.touch(replacement);
+                self.note_activation(replacement);
             }
         }
         self.commit(effects);
+    }
+
+    /// A tab was activated: it goes on top of `residency.recent` and its
+    /// idle clock restarts. The only push onto `recent`; sites that show a
+    /// tab without activating it (split partners, the work pane, a hidden
+    /// window) call `touch` alone.
+    pub(super) fn note_activation(&mut self, id: ItemId) {
+        if self.items.tab(id).is_some() {
+            self.residency.recent.push(id);
+        }
+        self.touch(id);
     }
 
     pub(super) fn touch(&mut self, id: ItemId) {
