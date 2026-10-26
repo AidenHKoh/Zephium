@@ -278,7 +278,7 @@ impl Shell {
         }
         let tabs_before = self.keyboard_tabs(profile, space);
         let pos = tabs_before.iter().position(|x| *x == id);
-        let mut fx = self.items.remove(id);
+        let mut fx = self.remove_item(id);
         if let Some(closed) = closed {
             if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
                 self.recently_closed.remove(0);
@@ -426,7 +426,7 @@ impl Shell {
         } else {
             self.cancel_discard_probe(id);
         }
-        let effects = self.items.remove(id);
+        let effects = self.remove_item(id);
         for (window_id, space, was_active) in affected {
             let replacement = was_active
                 .then(|| self.today_tabs(space).into_iter().next())
@@ -490,7 +490,7 @@ impl Shell {
                 .then_some(candidate)
         })?;
         if !self.items.set_committed_url_str(id, &entry.url) {
-            let _ = self.items.remove(id);
+            let _ = self.remove_item(id);
             return None;
         }
         self.items.set_title(id, entry.title.clone());
@@ -631,7 +631,7 @@ impl Shell {
             return;
         }
         if !self.items.adopt_native_view(child) {
-            let _ = self.items.remove(child);
+            let _ = self.remove_item(child);
             return;
         }
         self.record_view_creation(child);
@@ -713,7 +713,7 @@ impl Shell {
                 }
             }
         }
-        let effects = self.items.remove(child);
+        let effects = self.remove_item(child);
         self.commit(effects);
     }
 

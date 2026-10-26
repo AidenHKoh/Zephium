@@ -417,7 +417,6 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
-        self.residency.recent.retain_live(&self.items);
         self.residency
             .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());
@@ -1111,6 +1110,24 @@ impl Shell {
             self.residency.recent.push(id);
         }
         self.touch(id);
+    }
+
+    /// Removes an item and its descendants from the tree. Every shell
+    /// removal goes through here or `remove_profile_items`, so
+    /// `residency.recent` never names a closed tab.
+    pub(super) fn remove_item(&mut self, id: ItemId) -> Vec<Effect> {
+        let effects = self.items.remove(id);
+        self.residency.recent.retain_live(&self.items);
+        effects
+    }
+
+    pub(super) fn remove_profile_items(
+        &mut self,
+        spaces: &zephium_core::spaces::RemovedProfileSpaces,
+    ) -> Vec<Effect> {
+        let effects = self.items.remove_for_profile(spaces);
+        self.residency.recent.retain_live(&self.items);
+        effects
     }
 
     pub(super) fn touch(&mut self, id: ItemId) {

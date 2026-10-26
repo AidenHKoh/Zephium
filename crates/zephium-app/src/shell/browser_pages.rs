@@ -134,7 +134,7 @@ impl Shell {
         let native = self.commit(effects);
         if native.rejected {
             if created {
-                let _ = self.items.remove(id);
+                let _ = self.remove_item(id);
             } else {
                 self.items.set_lifecycle(id, Lifecycle::Inactive);
             }
