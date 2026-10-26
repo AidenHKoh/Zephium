@@ -188,9 +188,7 @@ impl Shell {
                 let fallback = self
                     .residency
                     .recent
-                    .iter()
-                    .rev()
-                    .copied()
+                    .most_recent_first()
                     .find(|id| {
                         self.item_in_focused_scope(*id)
                             && self.items.tab(*id).is_some_and(|tab| {

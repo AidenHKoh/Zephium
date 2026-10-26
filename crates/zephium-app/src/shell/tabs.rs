@@ -210,7 +210,6 @@ impl Shell {
             self.items.set_last_active(id, now);
         }
         self.cancel_page_permission_if_not_foreground();
-        self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
         self.items.ensure_view(id)

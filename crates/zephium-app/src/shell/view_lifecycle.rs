@@ -1,5 +1,6 @@
 //! Bounded native-view residency, discard, crash, and process recovery.
 
+use super::recent_tabs::RecentTabs;
 use super::*;
 use zephium_core::ports::engine::MemoryPressure;
 
@@ -66,7 +67,7 @@ pub(super) struct ResidencyState {
     memory_sampled: Option<std::time::Instant>,
     pub(super) capacity_requests: std::collections::VecDeque<CapacityRequest>,
     capacity_blocked: std::collections::HashMap<ItemId, String>,
-    pub(super) recent: Vec<ItemId>,
+    pub(super) recent: RecentTabs,
     pub(super) last_focus: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) resident_since: std::collections::HashMap<ItemId, std::time::Instant>,
     pub(super) inactive_since: std::collections::HashMap<ItemId, std::time::Instant>,
@@ -96,7 +97,7 @@ impl Default for ResidencyState {
             memory_sampled: None,
             capacity_requests: std::collections::VecDeque::new(),
             capacity_blocked: std::collections::HashMap::new(),
-            recent: Vec::new(),
+            recent: RecentTabs::default(),
             last_focus: std::collections::HashMap::new(),
             resident_since: std::collections::HashMap::new(),
             inactive_since: std::collections::HashMap::new(),
@@ -416,9 +417,7 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
-        self.residency
-            .recent
-            .retain(|id| self.items.tab(*id).is_some());
+        self.residency.recent.retain_live(&self.items);
         self.residency
             .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());

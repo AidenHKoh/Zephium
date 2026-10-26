@@ -277,9 +277,7 @@ impl Shell {
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 
-        self.residency
-            .recent
-            .retain(|id| self.items.tab(*id).is_some());
+        self.residency.recent.retain_live(&self.items);
         self.residency
             .last_focus
             .retain(|id, _| self.items.tab(*id).is_some());
